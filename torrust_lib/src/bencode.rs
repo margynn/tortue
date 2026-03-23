@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
     /// ```
     #[must_use]
     pub fn next_byte(&mut self) -> Result<u8, Error> {
-        let byte = self.peek_byte()?;
+        let byte: u8 = self.peek_byte()?;
         self.position += 1;
         Ok(byte)
     }
@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
     /// );
     /// ```
     pub fn consume_byte(&mut self, expected: u8) -> Result<(), Error> {
-        let found = self.next_byte()?;
+        let found: u8 = self.next_byte()?;
         if found != expected {
             return Err(Error::UnexpectedByte { expected, found });
         }
@@ -113,7 +113,7 @@ impl<'a> Parser<'a> {
     pub fn parse(&mut self) -> Result<Bencode<'a>, Error> {
         match self.peek_byte()? {
             b'i' => self.parse_int(),
-            b'l' => unimplemented!(),
+            b'l' => self.parse_list(),
             b'd' => unimplemented!(),
             b'0'..=b'9' => self.parse_bytes(),
             byte => Err(Error::InvalidToken(byte)),
@@ -123,12 +123,12 @@ impl<'a> Parser<'a> {
     fn parse_int(&mut self) -> Result<Bencode<'a>, Error> {
         self.consume_byte(b'i')?;
 
-        let start = self.position;
+        let start: usize = self.position;
         while self.peek_byte()? != b'e' {
             self.position += 1;
         }
 
-        let s = std::str::from_utf8(&self.input[start..self.position])
+        let s: &str = std::str::from_utf8(&self.input[start..self.position])
             .map_err(|_| Error::InvalidInteger)?;
 
         if s.is_empty() {
@@ -141,37 +141,49 @@ impl<'a> Parser<'a> {
             return Err(Error::InvalidInteger);
         }
 
-        let value = s.parse::<i64>().map_err(|_| Error::InvalidInteger)?;
+        let value: i64 = s.parse::<i64>().map_err(|_| Error::InvalidInteger)?;
         self.consume_byte(b'e')?;
 
         Ok(Bencode::Int(value))
     }
 
     fn parse_bytes(&mut self) -> Result<Bencode<'a>, Error> {
-        let start = self.position;
+        let len: usize = self.parse_len()?;
+        if len > self.remaining() {
+            return Err(Error::UnexpectedEof);
+        }
+        let start: usize = self.position;
+        let end: usize = start + len;
+        self.position = end;
+        Ok(Bencode::Bytes(&self.input[start..end]))
+    }
+
+    fn parse_len(&mut self) -> Result<usize, Error> {
+        let start: usize = self.position;
         while self.peek_byte()? != b':' {
             match self.peek_byte()? {
                 b'0'..=b'9' => self.position += 1,
                 _ => return Err(Error::InvalidStringLength),
             }
         }
-
-        let len = std::str::from_utf8(&self.input[start..self.position])
+        let len: usize = std::str::from_utf8(&self.input[start..self.position])
             .map_err(|_| Error::InvalidStringLength)?
             .parse::<usize>()
             .map_err(|_| Error::InvalidStringLength)?;
 
         self.consume_byte(b':')?;
+        Ok(len)
+    }
 
-        if len > self.remaining() {
-            return Err(Error::UnexpectedEof);
+    fn parse_list(&mut self) -> Result<Bencode<'a>, Error> {
+        self.consume_byte(b'l')?;
+        let mut elements = Vec::<Bencode<'a>>::new();
+        while self.peek_byte()? != b'e' {
+            let element = self.parse()?;
+            elements.push(element);
         }
-
-        let start = self.position;
-        let end = start + len;
-        self.position = end;
-
-        Ok(Bencode::Bytes(&self.input[start..end]))
+        self.consume_byte(b'e')?;
+        Ok(Bencode::List(elements))
     }
 }
 
@@ -299,5 +311,96 @@ mod tests {
         let mut parser = Parser::new(data);
         let err = parser.parse_bytes().unwrap_err();
         assert_eq!(err, Error::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_parse_empty_list() {
+        let data = b"le";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(v, Bencode::List(vec![]));
+        assert!(parser.is_eof());
+    }
+
+    #[test]
+    fn test_parse_list_of_ints() {
+        let data = b"li1ei2ei3ee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3),])
+        );
+    }
+
+    #[test]
+    fn test_parse_list_of_bytes() {
+        let data = b"l4:spam4:eggs3:eyee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::List(vec![
+                Bencode::Bytes(b"spam"),
+                Bencode::Bytes(b"eggs"),
+                Bencode::Bytes(b"eye")
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_list() {
+        let data = b"lli1ei2eei3ee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::List(vec![
+                Bencode::List(vec![Bencode::Int(1), Bencode::Int(2),]),
+                Bencode::Int(3),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_mixed_list() {
+        let data = b"li1e4:spaml3:abceee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::List(vec![
+                Bencode::Int(1),
+                Bencode::Bytes(b"spam"),
+                Bencode::List(vec![Bencode::Bytes(b"abc"),]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_list_missing_end() {
+        let data = b"li1ei2e";
+        let mut parser = Parser::new(data);
+        let err = parser.parse().unwrap_err();
+        assert_eq!(err, Error::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_parse_list_invalid_token_inside() {
+        let data = b"lxe";
+        let mut parser = Parser::new(data);
+        let err = parser.parse().unwrap_err();
+        assert_eq!(err, Error::InvalidToken(b'x'));
+    }
+
+    #[test]
+    fn test_parse_list_sequential() {
+        let data = b"li1eel3:abce";
+        let mut parser = Parser::new(data);
+        let v1 = parser.parse().unwrap();
+        assert_eq!(v1, Bencode::List(vec![Bencode::Int(1)]));
+        let v2 = parser.parse().unwrap();
+        assert_eq!(v2, Bencode::List(vec![Bencode::Bytes(b"abc")]));
+        assert!(parser.is_eof());
     }
 }
