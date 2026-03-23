@@ -114,7 +114,7 @@ impl<'a> Parser<'a> {
         match self.peek_byte()? {
             b'i' => self.parse_int(),
             b'l' => self.parse_list(),
-            b'd' => unimplemented!(),
+            b'd' => self.parse_dict(),
             b'0'..=b'9' => self.parse_bytes(),
             byte => Err(Error::InvalidToken(byte)),
         }
@@ -148,6 +148,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_bytes(&mut self) -> Result<Bencode<'a>, Error> {
+        Ok(Bencode::Bytes(self.parse_byte_string()?))
+    }
+
+    fn parse_byte_string(&mut self) -> Result<&'a [u8], Error> {
         let len: usize = self.parse_len()?;
         if len > self.remaining() {
             return Err(Error::UnexpectedEof);
@@ -155,7 +159,7 @@ impl<'a> Parser<'a> {
         let start: usize = self.position;
         let end: usize = start + len;
         self.position = end;
-        Ok(Bencode::Bytes(&self.input[start..end]))
+        Ok(&self.input[start..end])
     }
 
     fn parse_len(&mut self) -> Result<usize, Error> {
@@ -177,13 +181,24 @@ impl<'a> Parser<'a> {
 
     fn parse_list(&mut self) -> Result<Bencode<'a>, Error> {
         self.consume_byte(b'l')?;
-        let mut elements = Vec::<Bencode<'a>>::new();
+        let mut elements = Vec::new();
         while self.peek_byte()? != b'e' {
-            let element = self.parse()?;
-            elements.push(element);
+            elements.push(self.parse()?);
         }
         self.consume_byte(b'e')?;
         Ok(Bencode::List(elements))
+    }
+
+    fn parse_dict(&mut self) -> Result<Bencode<'a>, Error> {
+        self.consume_byte(b'd')?;
+        let mut dict = Vec::new();
+        while self.peek_byte()? != b'e' {
+            let key = self.parse_byte_string()?;
+            let value = self.parse()?;
+            dict.push((key, value));
+        }
+        self.consume_byte(b'e')?;
+        Ok(Bencode::Dict(dict))
     }
 }
 
@@ -402,5 +417,133 @@ mod tests {
         let v2 = parser.parse().unwrap();
         assert_eq!(v2, Bencode::List(vec![Bencode::Bytes(b"abc")]));
         assert!(parser.is_eof());
+    }
+
+    #[test]
+    fn test_parse_empty_dict() {
+        let data = b"de";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(v, Bencode::Dict(vec![]));
+        assert!(parser.is_eof());
+    }
+
+    #[test]
+    fn test_parse_dict_single_pair() {
+        let data = b"d3:cow3:mooe";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::Dict(vec![(b"cow".as_slice(), Bencode::Bytes(b"moo")),])
+        );
+        assert!(parser.is_eof());
+    }
+
+    #[test]
+    fn test_parse_dict_multiple_pairs() {
+        let data = b"d3:cow3:moo4:spam4:eggse";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::Dict(vec![
+                (b"cow".as_slice(), Bencode::Bytes(b"moo")),
+                (b"spam".as_slice(), Bencode::Bytes(b"eggs")),
+            ])
+        );
+        assert!(parser.is_eof());
+    }
+
+    #[test]
+    fn test_parse_dict_with_int_values() {
+        let data = b"d3:fooi42e3:bari-7ee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::Dict(vec![
+                (b"foo".as_slice(), Bencode::Int(42)),
+                (b"bar".as_slice(), Bencode::Int(-7)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_dict_with_list_value() {
+        let data = b"d4:listli1ei2ei3eee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::Dict(vec![(
+                b"list".as_slice(),
+                Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3),]),
+            ),])
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_dict() {
+        let data = b"d3:food3:bari1eee";
+        let mut parser = Parser::new(data);
+        let v = parser.parse().unwrap();
+        assert_eq!(
+            v,
+            Bencode::Dict(vec![(
+                b"foo".as_slice(),
+                Bencode::Dict(vec![(b"bar".as_slice(), Bencode::Int(1)),]),
+            ),])
+        );
+    }
+
+    #[test]
+    fn test_parse_dict_sequentially() {
+        let data = b"d3:foo3:bared3:bazi1ee";
+        let mut parser = Parser::new(data);
+        let first = parser.parse().unwrap();
+        assert_eq!(
+            first,
+            Bencode::Dict(vec![(b"foo".as_slice(), Bencode::Bytes(b"bar")),])
+        );
+
+        let second = parser.parse().unwrap();
+        assert_eq!(
+            second,
+            Bencode::Dict(vec![(b"baz".as_slice(), Bencode::Int(1)),])
+        );
+        assert!(parser.is_eof());
+    }
+
+    #[test]
+    fn test_parse_dict_missing_end() {
+        let data = b"d3:cow3:moo";
+        let mut parser = Parser::new(data);
+        let err = parser.parse().unwrap_err();
+        assert_eq!(err, Error::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_parse_dict_missing_value() {
+        let data = b"d3:cowe";
+        let mut parser = Parser::new(data);
+        let err = parser.parse().unwrap_err();
+        assert_eq!(err, Error::InvalidToken(b'e'));
+    }
+
+    #[test]
+    fn test_parse_dict_invalid_key() {
+        let data = b"di1e3:mooe";
+        let mut parser = Parser::new(data);
+        let err = parser.parse().unwrap_err();
+        assert_eq!(err, Error::InvalidStringLength);
+    }
+
+    #[test]
+    fn test_parse_dict_invalid_key_length() {
+        let data = b"d3a:foo3:bare";
+        let mut parser = Parser::new(data);
+        let err = parser.parse_dict().unwrap_err();
+        assert_eq!(err, Error::InvalidStringLength);
     }
 }
