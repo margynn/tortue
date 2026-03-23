@@ -1,5 +1,4 @@
 mod decoder;
-mod encoder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bencode<'a> {
@@ -25,12 +24,18 @@ pub enum Error {
     InvalidDictKey,
 }
 
-impl<'a> Bencode<'a> {
+impl Bencode<'_> {
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         todo!("encoding not yet implemented")
     }
 }
 
+/// Decodes bencode data into a `Bencode` value.
+///
+/// # Errors
+///
+/// Returns an error if the input is not valid bencode format.
 pub fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
     decoder::Decoder::new(data).parse()
 }

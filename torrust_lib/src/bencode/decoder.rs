@@ -15,13 +15,9 @@ impl<'a> Decoder<'a> {
     }
 
     fn peek_byte(&self) -> Result<u8, Error> {
-        self.input
-            .get(self.position)
-            .copied()
-            .ok_or(Error::UnexpectedEof)
+        self.input.get(self.position).copied().ok_or(Error::UnexpectedEof)
     }
 
-    #[must_use]
     fn next_byte(&mut self) -> Result<u8, Error> {
         let byte: u8 = self.peek_byte()?;
         self.position += 1;
@@ -36,7 +32,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    #[must_use]
     pub(super) fn parse(&mut self) -> Result<Bencode<'a>, Error> {
         match self.peek_byte()? {
             b'i' => self.parse_int(),
@@ -120,9 +115,7 @@ impl<'a> Decoder<'a> {
         self.consume_byte(b'd')?;
         let mut dict = Vec::new();
         while self.peek_byte()? != b'e' {
-            let key = self
-                .parse_byte_string()
-                .map_err(|_| Error::InvalidDictKey)?;
+            let key = self.parse_byte_string().map_err(|_| Error::InvalidDictKey)?;
             let value = self.parse()?;
             dict.push((key, value));
         }
@@ -264,10 +257,7 @@ mod tests {
         let data = b"li1ei2ei3ee";
         let mut decoder = Decoder::new(data);
         let v = decoder.parse().unwrap();
-        assert_eq!(
-            v,
-            Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3),])
-        );
+        assert_eq!(v, Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3),]));
     }
 
     #[test]
@@ -353,10 +343,7 @@ mod tests {
         let data = b"d3:cow3:mooe";
         let mut decoder = Decoder::new(data);
         let v = decoder.parse().unwrap();
-        assert_eq!(
-            v,
-            Bencode::Dict(vec![(b"cow".as_slice(), Bencode::Bytes(b"moo")),])
-        );
+        assert_eq!(v, Bencode::Dict(vec![(b"cow".as_slice(), Bencode::Bytes(b"moo")),]));
     }
 
     #[test]
@@ -420,16 +407,10 @@ mod tests {
         let data = b"d3:foo3:bared3:bazi1ee";
         let mut decoder = Decoder::new(data);
         let first = decoder.parse().unwrap();
-        assert_eq!(
-            first,
-            Bencode::Dict(vec![(b"foo".as_slice(), Bencode::Bytes(b"bar")),])
-        );
+        assert_eq!(first, Bencode::Dict(vec![(b"foo".as_slice(), Bencode::Bytes(b"bar")),]));
 
         let second = decoder.parse().unwrap();
-        assert_eq!(
-            second,
-            Bencode::Dict(vec![(b"baz".as_slice(), Bencode::Int(1)),])
-        );
+        assert_eq!(second, Bencode::Dict(vec![(b"baz".as_slice(), Bencode::Int(1)),]));
     }
 
     #[test]
