@@ -1,18 +1,38 @@
-# Rustfmt configuration for consistent code formatting
-# Using stable features only
-
 edition = "2024"
+
 
 # Line length
 max_width = 100
 
 # Formatting style
 use_small_heuristics = "Max"
-
-# Match formatting
 match_block_trailing_comma = true
-
-# Misc
 remove_nested_parens = true
 use_field_init_shorthand = true
 use_try_shorthand = true
+
+# Indentation
+tab_spaces = 4
+
+# Control function and argument layout
+fn_call_width = 80
+fn_args_density = "Vertical"
+
+# Control struct and enum formatting
+struct_lit_width = 80
+struct_lit_multiline_style = "ForceVertical"
+enum_variant_width = 80
+enum_discrim_align = true
+
+# Trailing commas
+trailing_comma = "Always"
+
+# Reorder imports
+reorder_imports = true
+reorder_imported_names = true
+imports_granularity = "Crate"
+
+# Misc
+normalize_comments = true
+merge_imports = true
+wrap_comments = true

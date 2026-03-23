@@ -25,10 +25,10 @@ pub enum Error {
 }
 
 impl Bencode<'_> {
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        todo!("encoding not yet implemented")
-    }
+    // #[must_use]
+    // pub fn encode(&self) -> Vec<u8> {
+    //     unimplemented!("encoding not yet implemented")
+    // }
 }
 
 /// Decodes bencode data into a `Bencode` value.

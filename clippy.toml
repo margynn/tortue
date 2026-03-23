@@ -1,14 +1,17 @@
-# Clippy configuration for production-grade code quality
-
-# Deny clippy warnings - treat them as errors
+# Treat most lints as errors
 warn-on-all-wildcard-imports = true
-
-# Cognitive complexity threshold
 cognitive-complexity-threshold = 15
-
-# Documentation
-doc-valid-idents = ["BitTorrent", "SHA1", "SHA-1", "HTTP", "HTTPS", "TCP", "UDP"]
-
-# Performance
 large-error-threshold = 128
 vec-box-size-threshold = 4096
+
+
+# Documentation
+doc-valid-idents = [
+    "BitTorrent",
+    "SHA1",
+    "SHA-1",
+    "HTTP",
+    "HTTPS",
+    "TCP",
+    "UDP",
+]
