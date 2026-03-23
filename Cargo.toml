@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["torrust_lib"]
+members = ["torrust_lib", "fuzz"]
 
 [dependencies]
 torrust_lib = { path = "torrust_lib" }

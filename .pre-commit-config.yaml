@@ -37,7 +37,7 @@ repos:
         entry: cargo test
         language: system
         types: [rust]
-        args: ["--all"]
+        args: ["--all", "--locked"]
         pass_filenames: false
 
       - id: check
@@ -46,7 +46,7 @@ repos:
         entry: cargo check
         language: system
         types: [rust]
-        args: ["--all"]
+        args: ["--all", "--locked"]
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks

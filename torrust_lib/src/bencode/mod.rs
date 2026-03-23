@@ -1,21 +1,21 @@
 mod decoder;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Bencode<'a> {
-    Int(i64),
-    Bytes(&'a [u8]),
-    List(Vec<Bencode<'a>>),
-    Dict(Vec<(&'a [u8], Bencode<'a>)>),
+#[derive(Debug, Clone, PartialEq, Eq,)]
+pub enum Bencode<'a,> {
+    Int(i64,),
+    Bytes(&'a [u8],),
+    List(Vec<Bencode<'a,>,>,),
+    Dict(Vec<(&'a [u8], Bencode<'a,>,),>,),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error,)]
 pub enum Error {
     #[error("unexpected end of input")]
     UnexpectedEof,
     #[error("expected byte {expected:#x}, found {found:#x}")]
-    UnexpectedByte { expected: u8, found: u8 },
+    UnexpectedByte { expected: u8, found: u8, },
     #[error("invalid token: {0:#x}")]
-    InvalidToken(u8),
+    InvalidToken(u8,),
     #[error("invalid integer")]
     InvalidInteger,
     #[error("invalid string length")]
@@ -24,7 +24,7 @@ pub enum Error {
     InvalidDictKey,
 }
 
-impl Bencode<'_> {
+impl Bencode<'_,> {
     // #[must_use]
     // pub fn encode(&self) -> Vec<u8> {
     //     unimplemented!("encoding not yet implemented")
@@ -36,6 +36,6 @@ impl Bencode<'_> {
 /// # Errors
 ///
 /// Returns an error if the input is not valid bencode format.
-pub fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
-    decoder::Decoder::new(data).parse()
+pub fn decode(data: &[u8],) -> Result<Bencode<'_,>, Error,> {
+    decoder::Decoder::new(data,).parse()
 }
