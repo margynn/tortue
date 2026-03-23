@@ -16,6 +16,56 @@ pub enum Error {
     InvalidDictKey,
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::UnexpectedEof => write!(f, "unexpected end of input"),
+            Error::UnexpectedByte { expected, found } => {
+                write!(f, "expected byte {expected:#x}, found {found:#x}")
+            }
+            Error::InvalidToken(b) => write!(f, "invalid token: {b:#x}"),
+            Error::InvalidInteger => write!(f, "invalid integer"),
+            Error::InvalidStringLength => write!(f, "invalid string length"),
+            Error::InvalidDictKey => write!(f, "invalid dictionary key"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl std::fmt::Display for Bencode<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Bencode::Int(n) => write!(f, "{}", n),
+            Bencode::Bytes(b) => {
+                if let Ok(s) = std::str::from_utf8(b) {
+                    write!(f, "\"{}\"", s)
+                } else {
+                    write!(f, "<{} bytes>", b.len())
+                }
+            }
+            Bencode::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            Bencode::Dict(pairs) => {
+                writeln!(f, "{{")?;
+                for (key, value) in pairs {
+                    let key_str = std::str::from_utf8(key).unwrap_or("<binary>");
+                    writeln!(f, "  {}: {}", key_str, value)?;
+                }
+                write!(f, "}}")
+            }
+        }
+    }
+}
+
 pub struct Parser<'a> {
     input: &'a [u8],
     position: usize,
@@ -203,6 +253,10 @@ impl<'a> Parser<'a> {
         self.consume_byte(b'e')?;
         Ok(Bencode::Dict(dict))
     }
+}
+
+pub fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
+    Parser::new(data).parse()
 }
 
 #[cfg(test)]
