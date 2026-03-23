@@ -13,6 +13,7 @@ pub enum Error {
     InvalidToken(u8),
     InvalidInteger,
     InvalidStringLength,
+    InvalidDictKey,
 }
 
 pub struct Parser<'a> {
@@ -193,7 +194,9 @@ impl<'a> Parser<'a> {
         self.consume_byte(b'd')?;
         let mut dict = Vec::new();
         while self.peek_byte()? != b'e' {
-            let key = self.parse_byte_string()?;
+            let key = self
+                .parse_byte_string()
+                .map_err(|_| Error::InvalidDictKey)?;
             let value = self.parse()?;
             dict.push((key, value));
         }
@@ -536,7 +539,7 @@ mod tests {
         let data = b"di1e3:mooe";
         let mut parser = Parser::new(data);
         let err = parser.parse().unwrap_err();
-        assert_eq!(err, Error::InvalidStringLength);
+        assert_eq!(err, Error::InvalidDictKey);
     }
 
     #[test]
@@ -544,6 +547,6 @@ mod tests {
         let data = b"d3a:foo3:bare";
         let mut parser = Parser::new(data);
         let err = parser.parse_dict().unwrap_err();
-        assert_eq!(err, Error::InvalidStringLength);
+        assert_eq!(err, Error::InvalidDictKey);
     }
 }
