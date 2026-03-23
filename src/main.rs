@@ -11,6 +11,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let data = fs::read(&cli.path)?;
     let decoded = torrust_lib::bencode::decode(&data)?;
-    println!("{}", decoded);
+    println!("{:#?}", decoded);
     Ok(())
 }
