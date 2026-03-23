@@ -16,3 +16,4 @@
 #![deny(clippy::redundant_clone)]
 
 pub mod bencode;
+pub mod metainfo;
