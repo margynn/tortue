@@ -49,6 +49,30 @@ impl<'a> Bencode<'a> {
             _ => None,
         }
     }
+
+    /// Get bytes from a dictionary key
+    pub fn get_bytes(&self, key: &[u8]) -> Result<&'a [u8], Error> {
+        match self.get(key) {
+            Some(Bencode::Bytes(b)) => Ok(*b),
+            _ => Err(Error::InvalidDictKey),
+        }
+    }
+
+    /// Get integer from a dictionary key
+    pub fn get_int(&self, key: &[u8]) -> Result<usize, Error> {
+        match self.get(key) {
+            Some(Bencode::Int(n)) => Ok(*n as usize),
+            _ => Err(Error::InvalidDictKey),
+        }
+    }
+
+    /// Get list from a dictionary key
+    pub fn get_list(&self, key: &[u8]) -> Result<&Vec<Bencode<'a>>, Error> {
+        match self.get(key) {
+            Some(Bencode::List(l)) => Ok(l),
+            _ => Err(Error::InvalidDictKey),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,5 +110,68 @@ mod tests {
     fn test_get_empty_dict() {
         let empty_dict = Bencode::Dict(vec![]);
         assert_eq!(empty_dict.get(b"foo"), None);
+    }
+
+    #[test]
+    fn test_get_bytes_valid() {
+        let bencode = super::decode(b"d4:test5:valueee").unwrap();
+        let value = bencode.get_bytes(b"test").unwrap();
+        assert_eq!(value, b"value");
+    }
+
+    #[test]
+    fn test_get_bytes_missing_key() {
+        let bencode = super::decode(b"d4:test5:valueee").unwrap();
+        let err = bencode.get_bytes(b"missing").unwrap_err();
+        assert!(matches!(err, super::Error::InvalidDictKey));
+    }
+
+    #[test]
+    fn test_get_bytes_wrong_type() {
+        let bencode = super::decode(b"d4:testi42eee").unwrap();
+        let err = bencode.get_bytes(b"test").unwrap_err();
+        assert!(matches!(err, super::Error::InvalidDictKey));
+    }
+
+    #[test]
+    fn test_get_int_valid() {
+        let bencode = super::decode(b"d4:testi42eee").unwrap();
+        let value = bencode.get_int(b"test").unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn test_get_int_missing_key() {
+        let bencode = super::decode(b"d4:testi42eee").unwrap();
+        let err = bencode.get_int(b"missing").unwrap_err();
+        assert!(matches!(err, super::Error::InvalidDictKey));
+    }
+
+    #[test]
+    fn test_get_int_wrong_type() {
+        let bencode = super::decode(b"d4:test5:valueee").unwrap();
+        let err = bencode.get_int(b"test").unwrap_err();
+        assert!(matches!(err, super::Error::InvalidDictKey));
+    }
+
+    #[test]
+    fn test_get_list_valid() {
+        let bencode = super::decode(b"d4:testl5:valueee").unwrap();
+        let list = bencode.get_list(b"test").unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn test_get_list_missing_key() {
+        let bencode = super::decode(b"d4:testl5:valueee").unwrap();
+        let err = bencode.get_list(b"missing").unwrap_err();
+        assert!(matches!(err, super::Error::InvalidDictKey));
+    }
+
+    #[test]
+    fn test_get_list_wrong_type() {
+        let bencode = super::decode(b"d4:test5:valueee").unwrap();
+        let err = bencode.get_list(b"test").unwrap_err();
+        assert!(matches!(err, super::Error::InvalidDictKey));
     }
 }
