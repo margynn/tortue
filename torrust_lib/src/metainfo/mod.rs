@@ -1,4 +1,7 @@
-pub mod decode;
+mod decode;
+
+pub use decode::decode;
+
 const SHA_LENGTH: usize = 20;
 
 #[derive(Debug, thiserror::Error)]
@@ -133,10 +136,7 @@ mod tests {
 
     #[test]
     fn test_file_path_strs_empty() {
-        let file = File {
-            length: 100,
-            path: vec![],
-        };
+        let file = File { length: 100, path: vec![] };
         let path_strs = file.path_strs();
         assert_eq!(path_strs, Vec::<&str>::new());
     }
@@ -162,7 +162,7 @@ mod tests {
                 assert_eq!(f.len(), 2);
                 assert_eq!(f[0].length, 100);
                 assert_eq!(f[1].length, 200);
-            }
+            },
             Mode::Single { .. } => panic!("expected multiple mode"),
         }
     }

@@ -19,3 +19,11 @@ path = "fuzz_targets/bencode.rs"
 test = false
 doc = false
 bench = false
+
+
+[[bin]]
+name = "metainfo"
+path = "fuzz_targets/metainfo.rs"
+test = false
+doc = false
+bench = false
