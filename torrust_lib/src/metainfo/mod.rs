@@ -24,6 +24,7 @@ pub struct Metainfo {
 
 #[derive(Debug, Clone)]
 pub struct InfoDictionary {
+    hash: [u8; SHA_LENGTH],
     name: Vec<u8>,
     piece_length: usize,
     pieces: Vec<[u8; SHA_LENGTH]>,
@@ -69,6 +70,7 @@ mod tests {
         let metainfo = Metainfo {
             announce: b"http://tracker.example.com".to_vec(),
             info: InfoDictionary {
+                hash: [0; 20],
                 name: b"test".to_vec(),
                 piece_length: 16384,
                 pieces: vec![],
@@ -83,6 +85,7 @@ mod tests {
         let metainfo = Metainfo {
             announce: vec![0xFF, 0xFE],
             info: InfoDictionary {
+                hash: [0; 20],
                 name: b"test".to_vec(),
                 piece_length: 16384,
                 pieces: vec![],
@@ -95,6 +98,7 @@ mod tests {
     #[test]
     fn test_info_dictionary_name_str_valid() {
         let info = InfoDictionary {
+            hash: [0; 20],
             name: b"test_file".to_vec(),
             piece_length: 16384,
             pieces: vec![],
@@ -106,6 +110,7 @@ mod tests {
     #[test]
     fn test_info_dictionary_name_str_invalid_utf8() {
         let info = InfoDictionary {
+            hash: [0; 20],
             name: vec![0xFF, 0xFE],
             piece_length: 16384,
             pieces: vec![],

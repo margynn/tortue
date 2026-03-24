@@ -1,5 +1,6 @@
 use super::{Error, *};
 use crate::bencode::Bencode;
+use sha1::{Digest, Sha1};
 
 /// Decodes bencode data into a `Metainfo` value.
 ///
@@ -10,20 +11,28 @@ pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
     let decoded = crate::bencode::decode(data)?;
 
     let announce = decoded.get_bytes(b"announce")?.to_vec();
-    let info_bencode = decoded.get(b"info").ok_or(Error::InvalidDictKey)?;
+    let info = decoded.get(b"info").ok_or(Error::InvalidDictKey)?;
 
-    let name = info_bencode.get_bytes(b"name")?.to_vec();
-    let piece_length = info_bencode.get_int(b"piece length")?;
-    let pieces_bytes = info_bencode.get_bytes(b"pieces")?;
+    // TODO: re-encode info and then hash it
+    let reencoded_info = vec![];
+    let mut info_hash: [u8; 20] = [0u8; 20];
+    info_hash.copy_from_slice(&Sha1::digest(reencoded_info));
+
+    let name = info.get_bytes(b"name")?.to_vec();
+    let piece_length = info.get_int(b"piece length")?;
+    let pieces_bytes = info.get_bytes(b"pieces")?;
     let pieces = parse_pieces(pieces_bytes)?;
 
-    let mode = match info_bencode.get(b"length") {
+    let mode = match info.get(b"length") {
         Some(Bencode::Int(l)) => Mode::Single { length: *l as usize },
         Some(_) => return Err(Error::InvalidDictKey),
-        None => parse_multi_file(info_bencode)?,
+        None => parse_multi_file(info)?,
     };
 
-    Ok(Metainfo { announce, info: InfoDictionary { name, piece_length, pieces, mode } })
+    Ok(Metainfo {
+        announce,
+        info: InfoDictionary { hash: info_hash, name, piece_length, pieces, mode },
+    })
 }
 
 fn parse_pieces(data: &[u8]) -> Result<Vec<[u8; SHA_LENGTH]>, Error> {
