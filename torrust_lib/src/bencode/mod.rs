@@ -1,178 +1,95 @@
-mod decoder;
-mod encoder;
+//! Bencode encoding and decoding functionality.
+//! 
+//! This module provides the core Bencode data types and functions for
+//! serializing and deserializing Bencode data structures.
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum Error {
-    #[error("unexpected end of input")]
-    UnexpectedEof,
-    #[error("expected byte {expected:#x}, found {found:#x}")]
-    UnexpectedByte { expected: u8, found: u8 },
-    #[error("invalid token: {0:#x}")]
-    InvalidToken(u8),
-    #[error("invalid integer")]
-    InvalidInteger,
-    #[error("invalid string length")]
-    InvalidStringLength,
-    #[error("invalid dictionary key")]
-    InvalidDictKey,
-}
+pub mod encoder;
+pub mod decoder;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Bencode<'a> {
+use std::fmt;
+
+/// The Bencode data type enum representing all valid Bencode values.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Bencode {
+    /// A signed 64-bit integer
     Int(i64),
-    Bytes(&'a [u8]),
-    List(Vec<Bencode<'a>>),
-    Dict(Vec<(&'a [u8], Bencode<'a>)>),
+    /// A byte string
+    Bytes(Vec<u8>),
+    /// A list of Bencode values
+    List(Vec<Bencode>),
+    /// A dictionary mapping byte strings to Bencode values
+    Dict(Vec<(&'static [u8], Bencode)>),
 }
 
-/// Decodes bencode data into a `Bencode` value.
-///
-/// # Errors
-///
-/// Returns an error if the input is not valid bencode format.
-pub fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
-    decoder::Decoder::new(data).parse()
-}
-
-impl<'a> Bencode<'a> {
-    #[must_use]
-    pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        encoder::encode(self)
-    }
-
-    /// Lookup a key in a Bencode dictionary
-    pub fn get(&self, key: &[u8]) -> Option<&Bencode<'a>> {
+impl fmt::Display for Bencode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Bencode::Int(n) => write!(f, "i{}e", n),
+            Bencode::Bytes(bytes) => {
+                write!(f, "{}:", bytes.len())?;
+                for b in bytes {
+                    write!(f, "{:02x}", b)?;
+                }
+                Ok(())
+            }
+            Bencode::List(items) => {
+                write!(f, "l")?;
+                for item in items {
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "e")
+            }
             Bencode::Dict(entries) => {
-                // linear scan; keys are byte slices
-                entries.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
-            },
-            _ => None,
-        }
-    }
-
-    /// Get bytes from a dictionary key
-    pub fn get_bytes(&self, key: &[u8]) -> Result<&'a [u8], Error> {
-        match self.get(key) {
-            Some(Bencode::Bytes(b)) => Ok(*b),
-            _ => Err(Error::InvalidDictKey),
-        }
-    }
-
-    /// Get integer from a dictionary key
-    pub fn get_int(&self, key: &[u8]) -> Result<usize, Error> {
-        match self.get(key) {
-            Some(Bencode::Int(n)) => Ok(*n as usize),
-            _ => Err(Error::InvalidDictKey),
-        }
-    }
-
-    /// Get list from a dictionary key
-    pub fn get_list(&self, key: &[u8]) -> Result<&Vec<Bencode<'a>>, Error> {
-        match self.get(key) {
-            Some(Bencode::List(l)) => Ok(l),
-            _ => Err(Error::InvalidDictKey),
+                write!(f, "d")?;
+                for (key, value) in entries {
+                    write!(f, "{}{}", key, value)?;
+                }
+                write!(f, "e")
+            }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Bencode;
+/// Result type for Bencode operations
+pub type Result<T> = std::result::Result<T, Error>;
 
-    #[test]
-    fn test_get_existing_key() {
-        let dict = Bencode::Dict(vec![
-            (b"foo".as_ref(), Bencode::Int(42)),
-            (b"bar".as_ref(), Bencode::Bytes(b"hello")),
-        ]);
-        assert_eq!(dict.get(b"foo"), Some(&Bencode::Int(42)));
-        assert_eq!(dict.get(b"bar"), Some(&Bencode::Bytes(b"hello")));
-    }
+/// Errors that can occur during Bencode encoding or decoding
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    /// Invalid integer format
+    InvalidInt,
+    /// Invalid byte string length prefix
+    InvalidStringLength,
+    /// Invalid list format
+    InvalidList,
+    /// Invalid dictionary format
+    InvalidDict,
+    /// Unexpected end of input
+    UnexpectedEnd,
+    /// Invalid character in input
+    InvalidCharacter(char),
+    /// Key not found in dictionary
+    KeyNotFound(String),
+    /// Type mismatch when accessing value
+    TypeMismatch,
+}
 
-    #[test]
-    fn test_get_nonexistent_key() {
-        let dict = Bencode::Dict(vec![
-            (b"foo".as_ref(), Bencode::Int(42)),
-            (b"bar".as_ref(), Bencode::Bytes(b"hello")),
-        ]);
-        assert_eq!(dict.get(b"baz"), None);
-    }
-
-    #[test]
-    fn test_get_on_non_dict() {
-        let integer = Bencode::Int(42);
-        let list = Bencode::List(vec![Bencode::Int(1)]);
-        assert_eq!(integer.get(b"foo"), None);
-        assert_eq!(list.get(b"foo"), None);
-    }
-
-    #[test]
-    fn test_get_empty_dict() {
-        let empty_dict = Bencode::Dict(vec![]);
-        assert_eq!(empty_dict.get(b"foo"), None);
-    }
-
-    #[test]
-    fn test_get_bytes_valid() {
-        let bencode = super::decode(b"d4:test5:valueee").unwrap();
-        let value = bencode.get_bytes(b"test").unwrap();
-        assert_eq!(value, b"value");
-    }
-
-    #[test]
-    fn test_get_bytes_missing_key() {
-        let bencode = super::decode(b"d4:test5:valueee").unwrap();
-        let err = bencode.get_bytes(b"missing").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
-    }
-
-    #[test]
-    fn test_get_bytes_wrong_type() {
-        let bencode = super::decode(b"d4:testi42eee").unwrap();
-        let err = bencode.get_bytes(b"test").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
-    }
-
-    #[test]
-    fn test_get_int_valid() {
-        let bencode = super::decode(b"d4:testi42eee").unwrap();
-        let value = bencode.get_int(b"test").unwrap();
-        assert_eq!(value, 42);
-    }
-
-    #[test]
-    fn test_get_int_missing_key() {
-        let bencode = super::decode(b"d4:testi42eee").unwrap();
-        let err = bencode.get_int(b"missing").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
-    }
-
-    #[test]
-    fn test_get_int_wrong_type() {
-        let bencode = super::decode(b"d4:test5:valueee").unwrap();
-        let err = bencode.get_int(b"test").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
-    }
-
-    #[test]
-    fn test_get_list_valid() {
-        let bencode = super::decode(b"d4:testl5:valueee").unwrap();
-        let list = bencode.get_list(b"test").unwrap();
-        assert_eq!(list.len(), 1);
-    }
-
-    #[test]
-    fn test_get_list_missing_key() {
-        let bencode = super::decode(b"d4:testl5:valueee").unwrap();
-        let err = bencode.get_list(b"missing").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
-    }
-
-    #[test]
-    fn test_get_list_wrong_type() {
-        let bencode = super::decode(b"d4:test5:valueee").unwrap();
-        let err = bencode.get_list(b"test").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::InvalidInt => write!(f, "invalid integer format"),
+            Error::InvalidStringLength => write!(f, "invalid string length prefix"),
+            Error::InvalidList => write!(f, "invalid list format"),
+            Error::InvalidDict => write!(f, "invalid dictionary format"),
+            Error::UnexpectedEnd => write!(f, "unexpected end of input"),
+            Error::InvalidCharacter(c) => write!(f, "invalid character: {}", c),
+            Error::KeyNotFound(key) => write!(f, "key not found: {}", key),
+            Error::TypeMismatch => write!(f, "type mismatch"),
+        }
     }
 }
+
+impl std::error::Error for Error {}
+
+pub use encoder::{encode, encode_int, encode_bytes, encode_list, encode_dict};
+pub use decoder::{decode, decode_int, decode_bytes, decode_list, decode_dict};

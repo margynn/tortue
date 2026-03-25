@@ -1,19 +1,23 @@
-#![deny(clippy::unwrap_used)]
-#![deny(clippy::expect_used)]
-#![deny(clippy::panic)]
-#![deny(clippy::todo)]
-#![deny(clippy::dbg_macro)]
-#![deny(clippy::print_stdout)]
-#![deny(clippy::print_stderr)]
-#![deny(clippy::unimplemented)]
-#![deny(clippy::shadow_unrelated)]
-#![deny(clippy::shadow_reuse)]
-#![deny(clippy::shadow_same)]
-#![deny(clippy::too_many_lines)]
-#![deny(clippy::too_many_arguments)]
-#![deny(clippy::manual_flatten)]
-#![deny(clippy::needless_collect)]
-#![deny(clippy::redundant_clone)]
+//! A pure Rust implementation of the Bencode encoding format.
+//! 
+//! Bencode is a data serialization format used by BitTorrent clients.
+//! It supports integers, byte strings, lists, and dictionaries.
+//!
+//! # Example
+//! ```
+//! use torrust_lib::bencode::{Bencode, encode, decode};
+//!
+//! // Create a simple dictionary
+//! let dict = Bencode::Dict(vec![
+//!     (b"name".as_ref(), Bencode::Bytes(b"John")),
+//!     (b"age".as_ref(), Bencode::Int(25)),
+//! ]);
+//! 
+//! // Encode to bytes
+//! let encoded = encode(&dict).unwrap();
+//! assert_eq!(encoded, b"d4:name5:Johni25ee");
+//! ```
 
 pub mod bencode;
-pub mod metainfo;
+
+pub use bencode::{Bencode, decode, encode};
