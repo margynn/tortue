@@ -10,29 +10,24 @@ use sha1::{Digest, Sha1};
 pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
     let decoded = crate::bencode::decode(data)?;
 
-    let announce = decoded.get_bytes(b"announce")?.to_vec();
+    let announce = String::from_utf8(decoded.get_bytes(b"announce")?.to_vec())
+        .map_err(|_| Error::InvalidUtf8String)?;
+
     let info = decoded.get(b"info").ok_or(Error::InvalidDictKey)?;
+    let mut hash: [u8; 20] = [0u8; 20];
+    hash.copy_from_slice(&Sha1::digest(info.encode()?));
 
-    // TODO: re-encode info and then hash it
-    let reencoded_info = vec![];
-    let mut info_hash: [u8; 20] = [0u8; 20];
-    info_hash.copy_from_slice(&Sha1::digest(reencoded_info));
-
-    let name = info.get_bytes(b"name")?.to_vec();
+    let name = String::from_utf8(info.get_bytes(b"name")?.to_vec())
+        .map_err(|_| Error::InvalidUtf8String)?;
     let piece_length = info.get_int(b"piece length")?;
     let pieces_bytes = info.get_bytes(b"pieces")?;
     let pieces = parse_pieces(pieces_bytes)?;
-
     let mode = match info.get(b"length") {
         Some(Bencode::Int(l)) => Mode::Single { length: *l as usize },
         Some(_) => return Err(Error::InvalidDictKey),
         None => parse_multi_file(info)?,
     };
-
-    Ok(Metainfo {
-        announce,
-        info: InfoDictionary { hash: info_hash, name, piece_length, pieces, mode },
-    })
+    Ok(Metainfo { announce, name, hash, piece_length, pieces, mode })
 }
 
 fn parse_pieces(data: &[u8]) -> Result<Vec<[u8; SHA_LENGTH]>, Error> {
@@ -57,12 +52,17 @@ fn parse_multi_file(info: &Bencode) -> Result<Mode, Error> {
         let length = file.get_int(b"length")?;
         let path_list = file.get_list(b"path")?;
         let mut path = Vec::with_capacity(path_list.len());
+
         for p in path_list {
             match p {
-                Bencode::Bytes(b) => path.push(b.to_vec()),
+                Bencode::Bytes(b) => {
+                    let s = String::from_utf8(b.to_vec()).map_err(|_| Error::InvalidDictKey)?;
+                    path.push(s);
+                },
                 _ => return Err(Error::InvalidDictKey),
             }
         }
+
         files.push(File { length, path });
     }
 
@@ -81,11 +81,11 @@ mod tests {
     fn test_decode_single_file() {
         let data = b"d8:announce8:test_url4:infod6:lengthi100e4:name9:test_file12:piece lengthi16384e6:pieces20:12345678901234567890ee";
         let metainfo = decode(data).unwrap();
-        assert_eq!(metainfo.announce, b"test_url");
-        assert_eq!(metainfo.info.name, b"test_file");
-        assert_eq!(metainfo.info.piece_length, 16384);
-        assert_eq!(metainfo.info.pieces.len(), 1);
-        match &metainfo.info.mode {
+        assert_eq!(metainfo.announce, "test_url");
+        assert_eq!(metainfo.name, "test_file");
+        assert_eq!(metainfo.piece_length, 16384);
+        assert_eq!(metainfo.pieces.len(), 1);
+        match &metainfo.mode {
             Mode::Single { length } => assert_eq!(*length, 100),
             Mode::Multiple { .. } => panic!("expected single-file mode"),
         }
@@ -95,14 +95,14 @@ mod tests {
     fn test_decode_multi_file() {
         let data = b"d8:announce8:test_url4:infod5:filesld6:lengthi100e4:pathl5:file1eee4:name4:test12:piece lengthi16384e6:pieces20:12345678901234567890ee";
         let metainfo = decode(data).unwrap();
-        assert_eq!(metainfo.announce, b"test_url");
-        assert_eq!(metainfo.info.name, b"test");
-        match &metainfo.info.mode {
+        assert_eq!(metainfo.announce, "test_url");
+        assert_eq!(metainfo.name, "test");
+        match &metainfo.mode {
             Mode::Multiple { files } => {
                 assert_eq!(files.len(), 1);
                 assert_eq!(files[0].length, 100);
                 assert_eq!(files[0].path.len(), 1);
-                assert_eq!(files[0].path[0], b"file1");
+                assert_eq!(files[0].path[0], "file1");
             },
             Mode::Single { .. } => panic!("expected multi-file mode"),
         }
