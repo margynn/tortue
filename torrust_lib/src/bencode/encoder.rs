@@ -83,4 +83,86 @@ mod tests {
     #[test]
     fn test_encode_bytes() {
         let bytes = b"hello";
-        let result = encode_bytes(bytes
+        let result = encode_bytes(bytes);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b":5 hello");
+    }
+
+    #[test]
+    fn test_encode_empty_bytes() {
+        let bytes: &[u8] = &[];
+        let result = encode_bytes(bytes);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b":0 ");
+    }
+
+    #[test]
+    fn test_encode_list() {
+        let items = vec![
+            Bencode::Int(1),
+            Bencode::Bytes(b"test".to_vec()),
+            Bencode::List(vec![]),
+        ];
+        let result = encode_list(&items);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b"li1e:4 teste");
+    }
+
+    #[test]
+    fn test_encode_dict() {
+        let entries = vec![
+            (b"name".as_slice(), Bencode::Bytes(b"John".to_vec())),
+            (b"age".as_slice(), Bencode::Int(30)),
+        ];
+        let result = encode_dict(&entries);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b"d4:name5:Johni30ee");
+    }
+
+    #[test]
+    fn test_encode() {
+        let bencode = Bencode::Int(123);
+        let result = encode(&bencode);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b"i123e");
+    }
+
+    #[test]
+    fn test_encode_bytes_with_special_chars() {
+        let bytes = b"hello world!";
+        let result = encode_bytes(bytes);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b":12 hello world!");
+    }
+
+    #[test]
+    fn test_encode_list_with_mixed_types() {
+        let items = vec![
+            Bencode::Int(0),
+            Bencode::Bytes(b"empty".to_vec()),
+            Bencode::List(vec![Bencode::Int(1)]),
+        ];
+        let result = encode_list(&items);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b"li0e:5 emptyli1ee");
+    }
+
+    #[test]
+    fn test_encode_dict_with_empty_values() {
+        let entries = vec![
+            (b"a".as_slice(), Bencode::Int(0)),
+            (b"b".as_slice(), Bencode::Bytes(b"".to_vec())),
+        ];
+        let result = encode_dict(&entries);
+        assert!(result.is_ok());
+        let encoded = result.unwrap();
+        assert_eq!(encoded, b"d1:ai0e1:b:e");
+    }
+}
