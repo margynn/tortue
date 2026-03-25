@@ -2,16 +2,12 @@ use crate::bencode::{Bencode, Error};
 
 /// Encoder for Bencode data structures
 pub struct Encoder<'a> {
-    pub(super) output: Vec<u8>,
-    pub(super) position: usize,
+    output: Vec<u8>,
 }
 
 impl<'a> Encoder<'a> {
     pub(super) fn new() -> Self {
-        Self {
-            output: Vec::new(),
-            position: 0,
-        }
+        Self { output: Vec::new(), position: 0 }
     }
 
     fn remaining(&self) -> usize {
@@ -20,12 +16,10 @@ impl<'a> Encoder<'a> {
 
     fn push_byte(&mut self, byte: u8) {
         self.output.push(byte);
-        self.position += 1;
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) {
         self.output.extend_from_slice(bytes);
-        self.position += bytes.len();
     }
 
     fn encode_int(&mut self, value: i64) -> Result<(), Error> {
