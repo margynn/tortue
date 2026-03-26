@@ -1,7 +1,7 @@
 mod announce;
 mod peer_id;
 
-use peer_id::PeerId;
+pub use peer_id::PeerId;
 use reqwest::Client;
 use std::{net::IpAddr, time::Duration};
 

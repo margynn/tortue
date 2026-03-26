@@ -4,17 +4,21 @@ pub struct PeerId([u8; 20]);
 impl PeerId {
     /// Create a new PeerId from 20 bytes
     pub fn new(bytes: [u8; 20]) -> Self {
-        PeerId(bytes)
+        Self(bytes)
     }
 
-    // /// Generate a random PeerId with a given client prefix
-    // pub fn generate(prefix: &str) -> Self {
-    //     assert!(prefix.len() <= 8, "Prefix must be <= 8 bytes");
-    //     let mut bytes = [0u8; 20];
-    //     bytes[..prefix.len()].copy_from_slice(prefix.as_bytes());
-    //     getrandom::getrandom(&mut bytes[prefix.len()..]).unwrap();
-    //     PeerId(bytes)
-    // }
+    /// Generate a random PeerId with a given client prefix (up to 8 bytes)
+    pub fn generate(prefix: &str) -> Self {
+        // if prefix.len() > 8 {
+        //     return Err("Prefix must be <= 8 bytes".to_string());
+        // }
+        let mut bytes = [0u8; 20];
+        bytes[..prefix.len()].copy_from_slice(prefix.as_bytes());
+        // Fill the rest with random bytes; panic on failure
+        getrandom::fill(&mut bytes[prefix.len()..])
+            .expect("Failed to generate random PeerId bytes");
+        Self(bytes)
+    }
 }
 
 impl AsRef<[u8]> for PeerId {

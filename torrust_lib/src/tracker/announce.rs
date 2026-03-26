@@ -11,6 +11,9 @@ const TRACKER_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC;
 impl Tracker {
     pub async fn announce(&self, metainfo: &Metainfo) -> Result<TrackerResponse, Error> {
         let url = self.build_announce_url(metainfo)?;
+
+        println!("Announce URL: {}", url);
+
         let response = self
             .client
             .get(url)
