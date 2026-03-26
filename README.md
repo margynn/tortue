@@ -14,8 +14,8 @@ storage/
 
 Steps:
 
-- bencode ✅
-- metainfo + info_hash
+- ✅ bencode
+- ✅ metainfo + info_hash
 - tracker (HTTP + compact peers)
 - TCP connection
 - handshake

@@ -16,12 +16,12 @@ pub enum Error {
 
 #[derive(Debug, Clone)]
 pub struct Metainfo {
-    announce: String,
-    name: String,
-    hash: [u8; SHA_LENGTH],
-    piece_length: usize,
-    pieces: Vec<[u8; SHA_LENGTH]>,
-    mode: Mode,
+    pub announce: String,
+    pub name: String,
+    pub hash: [u8; SHA_LENGTH],
+    pub piece_length: usize,
+    pub pieces: Vec<[u8; SHA_LENGTH]>,
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +32,6 @@ pub enum Mode {
 
 #[derive(Debug, Clone)]
 pub struct File {
-    length: usize,
-    path: Vec<String>,
+    pub length: usize,
+    pub path: Vec<String>,
 }
