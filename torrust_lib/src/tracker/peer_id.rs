@@ -1,23 +1,31 @@
+use rand::TryRng;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);
 
 impl PeerId {
-    /// Create a new PeerId from 20 bytes
     pub fn new(bytes: [u8; 20]) -> Self {
         Self(bytes)
     }
 
-    /// Generate a random PeerId with a given client prefix (up to 8 bytes)
-    pub fn generate(prefix: &str) -> Self {
-        // if prefix.len() > 8 {
-        //     return Err("Prefix must be <= 8 bytes".to_string());
-        // }
-        let mut bytes = [0u8; 20];
-        bytes[..prefix.len()].copy_from_slice(prefix.as_bytes());
-        // Fill the rest with random bytes; panic on failure
-        getrandom::fill(&mut bytes[prefix.len()..])
-            .expect("Failed to generate random PeerId bytes");
-        Self(bytes)
+    pub fn as_bytes(&self) -> &[u8; 20] {
+        &self.0
+    }
+
+    pub fn generate(client: &str, version: &str) -> Self {
+        let mut id = [0u8; 20];
+
+        let prefix = format!("-{}{}-", client, version);
+        let prefix_bytes = prefix.as_bytes();
+
+        let n = prefix_bytes.len().min(20);
+        id[..n].copy_from_slice(&prefix_bytes[..n]);
+
+        // new API in rand 0.9
+        let mut rng = rand::rng();
+        rng.try_fill_bytes(&mut id[n..]);
+
+        Self(id)
     }
 }
 
