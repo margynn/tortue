@@ -21,6 +21,9 @@ async fn main() -> Result<()> {
     let endpoint = TrackerEndpoint::parse(&metainfo.announce)?;
     let peer_id = PeerId::generate("TR", "0.1.0");
 
+    println!("{:#?}", metainfo.announce);
+    println!("{:#?}", metainfo.announce_list);
+
     let left = match &metainfo.mode {
         Mode::Single { length } => *length as u64,
         Mode::Multiple { files } => files.iter().map(|f| f.length as u64).sum(),

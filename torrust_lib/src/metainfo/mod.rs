@@ -17,6 +17,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Metainfo {
     pub announce: String,
+    pub announce_list: Vec<Vec<String>>,
     pub name: String,
     pub hash: [u8; SHA_LENGTH],
     pub piece_length: usize,

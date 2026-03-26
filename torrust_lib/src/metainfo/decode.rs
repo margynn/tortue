@@ -13,6 +13,11 @@ pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
     let announce = String::from_utf8(decoded.get_bytes(b"announce")?.to_vec())
         .map_err(|_| Error::InvalidUtf8String)?;
 
+    let announce_list = match decoded.get_list(b"announce-list").ok() {
+        Some(tiers) => parse_announce_list(tiers),
+        None => Vec::new(),
+    };
+
     let info = decoded.get(b"info").ok_or(Error::InvalidDictKey)?;
     let mut hash: [u8; 20] = [0u8; 20];
     hash.copy_from_slice(&Sha1::digest(info.encode()?));
@@ -27,7 +32,27 @@ pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
         Some(_) => return Err(Error::InvalidDictKey),
         None => parse_multi_file(info)?,
     };
-    Ok(Metainfo { announce, name, hash, piece_length, pieces, mode })
+    Ok(Metainfo { announce, announce_list, name, hash, piece_length, pieces, mode })
+}
+
+fn parse_announce_list(tiers: &Vec<Bencode>) -> Vec<Vec<String>> {
+    let mut list = Vec::new();
+    for tier in tiers {
+        if let Bencode::List(urls) = tier {
+            let mut tier_vec = Vec::new();
+            for url in urls {
+                if let Bencode::Bytes(bytes) = url {
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        tier_vec.push(s.to_string());
+                    }
+                }
+            }
+            if !tier_vec.is_empty() {
+                list.push(tier_vec);
+            }
+        }
+    }
+    list
 }
 
 fn parse_pieces(data: &[u8]) -> Result<Vec<[u8; SHA_LENGTH]>, Error> {
