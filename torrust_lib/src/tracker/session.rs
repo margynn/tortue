@@ -32,7 +32,6 @@ impl TrackerSession {
                 stats: SessionStats { uploaded: 0, downloaded: 0, left },
                 event: AnnounceEvent::Started,
                 compact: true,
-                numwant: Some(50),
             },
             interval: None,
             started: false,

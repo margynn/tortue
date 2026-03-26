@@ -45,7 +45,6 @@ pub struct AnnounceRequest {
     pub stats: SessionStats,
     pub event: AnnounceEvent,
     pub compact: bool,
-    pub numwant: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,4 +58,6 @@ pub struct Peer {
 pub struct TrackerResponse {
     pub interval: u32,
     pub peers: Vec<Peer>,
+    pub seeders: Option<u32>,
+    pub leechers: Option<u32>,
 }
