@@ -35,4 +35,7 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("timeout: {0}")]
+    Timeout(String),
 }

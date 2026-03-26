@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 
-use tokio::net::{UdpSocket, lookup_host};
-
 use super::{
     error::Error,
     model::{AnnounceRequest, TrackerResponse},
     parse_compact_ipv4_peers,
 };
+use tokio::net::{UdpSocket, lookup_host};
+use tokio::time::{Duration, timeout};
 
 const UDP_PROTOCOL_ID: u64 = 0x41727101980;
 const ACTION_CONNECT: u32 = 0;
@@ -26,7 +26,9 @@ pub async fn announce(
     socket.send(&connect_req).await?;
 
     let mut buf = [0u8; 4096];
-    let n = socket.recv(&mut buf).await?;
+    let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
+        .await
+        .map_err(|_| Error::Timeout("tracker connect timeout".into()))??;
     let connection_id = parse_connect_response(&buf[..n], tx_id)?;
 
     let announce_tx = rand::random::<u32>();

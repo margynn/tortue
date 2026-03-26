@@ -17,8 +17,6 @@ async fn main() -> Result<()> {
     let data = fs::read(&cli.path)?;
 
     let metainfo = torrust_lib::metainfo::decode(&data)?;
-
-    let endpoint = TrackerEndpoint::parse(&metainfo.announce)?;
     let peer_id = PeerId::generate("TR", "0.1.0");
 
     println!("{:#?}", metainfo.announce);
@@ -29,10 +27,25 @@ async fn main() -> Result<()> {
         Mode::Multiple { files } => files.iter().map(|f| f.length as u64).sum(),
     };
 
-    let mut tracker = TrackerSession::new(endpoint, metainfo.hash, peer_id, 2940, left)?;
-
-    let response = tracker.start().await?;
-    println!("{response:#?}");
+    for tier in metainfo.announce_list {
+        for tracker in tier {
+            let endpoint = match TrackerEndpoint::parse(&tracker) {
+                Ok(e) => e,
+                _ => continue,
+            };
+            let mut session =
+                match TrackerSession::new(endpoint, metainfo.hash, peer_id, 4444, left) {
+                    Ok(t) => t,
+                    _ => continue,
+                };
+            let response = match session.start().await {
+                Ok(r) => r,
+                _ => continue,
+            };
+            println!("{response:#?}");
+            break;
+        }
+    }
 
     Ok(())
 }
