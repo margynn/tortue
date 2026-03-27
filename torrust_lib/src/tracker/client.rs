@@ -30,8 +30,9 @@ impl TrackerClient {
 
     pub async fn announce(&self, req: &AnnounceRequest) -> Result<TrackerResponse, Error> {
         match &self.endpoint {
-            TrackerEndpoint::Http(url) => http::announce(&self.http, url, req).await,
+            TrackerEndpoint::Http { url } => http::announce(&self.http, url, req).await,
             TrackerEndpoint::Udp { host, port } => udp::announce(host, *port, req).await,
+            TrackerEndpoint::Ws { url } => todo!(),
         }
     }
 }
