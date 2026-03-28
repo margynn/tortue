@@ -1,5 +1,6 @@
 mod bencode;
 mod metainfo;
+mod peer;
 mod tracker;
 
 use anyhow::Result;

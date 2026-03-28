@@ -1,6 +1,41 @@
+mod bitfield;
+
 use std::net::IpAddr;
 
 use rand::TryRng;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("piece out of range")]
+    PieceOutOfRange,
+}
+
+pub struct PeerClient {
+    stream: tokio::net::TcpStream,
+    peer: Peer,
+    state: PeerState,
+}
+
+pub struct PeerState {
+    pub am_choking: bool,
+    pub am_interested: bool,
+    pub peer_choking: bool,
+    pub peer_interested: bool,
+    // pub bitfield: Bitfield,
+}
+
+pub enum PeerMessage {
+    KeepAlive,
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have(u32),
+    Bitfield(Vec<u8>),
+    Request { index: u32, begin: u32, length: u32 },
+    Piece { index: u32, begin: u32, block: Vec<u8> },
+    Cancel { index: u32, begin: u32, length: u32 },
+}
 
 #[derive(Debug, Clone)]
 pub struct Peer {
