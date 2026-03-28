@@ -1,4 +1,6 @@
 mod bitfield;
+mod client;
+mod handshake;
 
 use std::net::IpAddr;
 
@@ -8,20 +10,37 @@ use rand::TryRng;
 pub enum Error {
     #[error("piece out of range")]
     PieceOutOfRange,
+
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("timeout")]
+    Timeout,
+
+    #[error("invalid handshake: {0}")]
+    InvalidHandshake(&'static str),
+
+    #[error("info hash mismatch")]
+    InfoHashMismatch,
+
+    #[error("peer id mismatch")]
+    PeerIdMismatch,
 }
 
+#[derive(Debug)]
 pub struct PeerClient {
     stream: tokio::net::TcpStream,
     peer: Peer,
     state: PeerState,
 }
 
+#[derive(Debug)]
 pub struct PeerState {
     pub am_choking: bool,
     pub am_interested: bool,
     pub peer_choking: bool,
     pub peer_interested: bool,
-    // pub bitfield: Bitfield,
+    pub bitfield: bitfield::Bitfield,
 }
 
 pub enum PeerMessage {

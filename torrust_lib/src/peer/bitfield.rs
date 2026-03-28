@@ -3,6 +3,7 @@ use super::Error;
 const BITS_PER_BYTE: usize = 8;
 
 // MSB-first bitfield.
+#[derive(Debug)]
 pub(super) struct Bitfield {
     data: Vec<u8>,
     pieces: usize,
