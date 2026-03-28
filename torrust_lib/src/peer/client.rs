@@ -4,7 +4,23 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use super::handshake::Handshake;
-use super::{Error, Peer, PeerClient, PeerId};
+use super::{Error, Peer, PeerId, bitfield};
+
+#[derive(Debug)]
+pub struct PeerClient {
+    stream: tokio::net::TcpStream,
+    peer: Peer,
+    state: PeerState,
+}
+
+#[derive(Debug)]
+pub struct PeerState {
+    pub am_choking: bool,
+    pub am_interested: bool,
+    pub peer_choking: bool,
+    pub peer_interested: bool,
+    pub bitfield: bitfield::Bitfield,
+}
 
 impl PeerClient {
     pub async fn connect(
@@ -40,12 +56,12 @@ impl PeerClient {
             }
         }
 
-        let state = super::PeerState {
+        let state = PeerState {
             am_choking: true,
             am_interested: false,
             peer_choking: true,
             peer_interested: false,
-            bitfield: super::bitfield::Bitfield::new(pieces),
+            bitfield: bitfield::Bitfield::new(pieces),
         };
 
         Ok(Self { stream, peer, state })

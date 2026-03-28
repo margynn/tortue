@@ -34,17 +34,11 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
 
         println!("{response:#?}");
 
-        for peer in response.peers {
-            let peer_client = peer::PeerClient::connect(
-                peer,
-                torrent_info_hash,
-                local_peer_id,
-                pieces,
-            )
-            .await?;
+        let mut sw = peer::Swarm::new(torrent_info_hash, local_peer_id, pieces);
+        sw.connect(response.peers).await?;
 
-            println!("{peer_client:#?}");
-        }
+        println!("connected to swarm");
+
         break;
     }
 
