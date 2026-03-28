@@ -1,13 +1,27 @@
 use super::{Bencode, Error};
 
-pub(super) struct Decoder<'a> {
+pub(super) fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
+    Decoder::new(data).parse()
+}
+
+struct Decoder<'a> {
     input: &'a [u8],
     position: usize,
 }
 
 impl<'a> Decoder<'a> {
-    pub(super) fn new(input: &'a [u8]) -> Self {
+    fn new(input: &'a [u8]) -> Self {
         Self { input, position: 0 }
+    }
+
+    fn parse(&mut self) -> Result<Bencode<'a>, Error> {
+        match self.peek_byte()? {
+            b'i' => self.parse_int(),
+            b'l' => self.parse_list(),
+            b'd' => self.parse_dict(),
+            b'0'..=b'9' => self.parse_bytes(),
+            byte => Err(Error::InvalidToken(byte)),
+        }
     }
 
     fn remaining(&self) -> usize {
@@ -30,16 +44,6 @@ impl<'a> Decoder<'a> {
             return Err(Error::UnexpectedByte { expected, found });
         }
         Ok(())
-    }
-
-    pub(super) fn parse(&mut self) -> Result<Bencode<'a>, Error> {
-        match self.peek_byte()? {
-            b'i' => self.parse_int(),
-            b'l' => self.parse_list(),
-            b'd' => self.parse_dict(),
-            b'0'..=b'9' => self.parse_bytes(),
-            byte => Err(Error::InvalidToken(byte)),
-        }
     }
 
     fn parse_int(&mut self) -> Result<Bencode<'a>, Error> {
@@ -115,7 +119,8 @@ impl<'a> Decoder<'a> {
         self.consume_byte(b'd')?;
         let mut dict = Vec::new();
         while self.peek_byte()? != b'e' {
-            let key = self.parse_byte_string().map_err(|_| Error::InvalidDictKey)?;
+            let key =
+                self.parse_byte_string().map_err(|_| Error::InvalidDictKey)?;
             let value = self.parse()?;
             dict.push((key, value));
         }
@@ -257,7 +262,14 @@ mod tests {
         let data = b"li1ei2ei3ee";
         let mut decoder = Decoder::new(data);
         let v = decoder.parse().unwrap();
-        assert_eq!(v, Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3),]));
+        assert_eq!(
+            v,
+            Bencode::List(vec![
+                Bencode::Int(1),
+                Bencode::Int(2),
+                Bencode::Int(3),
+            ])
+        );
     }
 
     #[test]
@@ -343,7 +355,10 @@ mod tests {
         let data = b"d3:cow3:mooe";
         let mut decoder = Decoder::new(data);
         let v = decoder.parse().unwrap();
-        assert_eq!(v, Bencode::Dict(vec![(b"cow".as_slice(), Bencode::Bytes(b"moo")),]));
+        assert_eq!(
+            v,
+            Bencode::Dict(vec![(b"cow".as_slice(), Bencode::Bytes(b"moo")),])
+        );
     }
 
     #[test]
@@ -383,7 +398,11 @@ mod tests {
             v,
             Bencode::Dict(vec![(
                 b"list".as_slice(),
-                Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3),]),
+                Bencode::List(vec![
+                    Bencode::Int(1),
+                    Bencode::Int(2),
+                    Bencode::Int(3),
+                ]),
             ),])
         );
     }
@@ -407,10 +426,16 @@ mod tests {
         let data = b"d3:foo3:bared3:bazi1ee";
         let mut decoder = Decoder::new(data);
         let first = decoder.parse().unwrap();
-        assert_eq!(first, Bencode::Dict(vec![(b"foo".as_slice(), Bencode::Bytes(b"bar")),]));
+        assert_eq!(
+            first,
+            Bencode::Dict(vec![(b"foo".as_slice(), Bencode::Bytes(b"bar")),])
+        );
 
         let second = decoder.parse().unwrap();
-        assert_eq!(second, Bencode::Dict(vec![(b"baz".as_slice(), Bencode::Int(1)),]));
+        assert_eq!(
+            second,
+            Bencode::Dict(vec![(b"baz".as_slice(), Bencode::Int(1)),])
+        );
     }
 
     #[test]

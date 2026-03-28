@@ -1,14 +1,41 @@
-edition = "2024"
+# ---- Core width / layout ----
+max_width = 80
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
 
-# Line length
-max_width = 100
+# ---- Line breaking ----
+use_small_heuristics = "Max"   # pack more aggressively, fewer vertical expansions
+fn_call_width = 100
+attr_fn_like_width = 100
+struct_lit_width = 40
+struct_variant_width = 40
+array_width = 60
+chain_width = 80
+single_line_if_else_max_width = 60
 
-# Formatting style (stable features only)
-use_small_heuristics = "Max"
+# ---- Imports ----
+reorder_imports = true
+reorder_modules = true
+imports_granularity = "Module"   # stable: Item is still unstable in some toolchains
+group_imports = "StdExternalCrate"
+
+# ---- Formatting style ----
 match_block_trailing_comma = true
-remove_nested_parens = true
+trailing_comma = "Vertical"
 use_field_init_shorthand = true
 use_try_shorthand = true
 
-# Indentation
-tab_spaces = 4
+# ---- Functions / items ----
+fn_params_layout = "Tall"   # more readable diffs for long signatures
+
+# ---- Misc ----
+remove_nested_parens = true
+normalize_comments = true
+normalize_doc_attributes = true
+format_strings = false   # keep literals stable (important for tests / hashes)
+format_macro_matchers = false
+format_macro_bodies = true
+
+# ---- Control ----
+edition = "2024"

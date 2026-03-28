@@ -1,6 +1,6 @@
 mod decode;
 
-pub use decode::decode;
+use std::collections::HashSet;
 
 const SHA_LENGTH: usize = 20;
 
@@ -8,16 +8,23 @@ const SHA_LENGTH: usize = 20;
 pub enum Error {
     #[error("bencode parsing failed: {0}")]
     Bencode(#[from] crate::bencode::Error),
+
     #[error("invalid UTF-8 string")]
     InvalidUtf8String,
+
     #[error("invalid dictionary key")]
     InvalidDictKey,
 }
 
+pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
+    let root = crate::bencode::decode(data)?;
+    decode::decode(root)
+}
+
 #[derive(Debug, Clone)]
 pub struct Metainfo {
-    pub announce: String,
-    pub announce_list: Vec<Vec<String>>,
+    announce: String,
+    announce_list: Vec<Vec<String>>,
     pub name: String,
     pub hash: [u8; SHA_LENGTH],
     pub piece_length: usize,
@@ -35,4 +42,18 @@ pub enum Mode {
 pub struct File {
     pub length: usize,
     pub path: Vec<String>,
+}
+
+impl Metainfo {
+    pub fn trackers(&self) -> Vec<String> {
+        let cap = 1 + self.announce_list.iter().map(Vec::len).sum::<usize>();
+        let mut trackers = HashSet::with_capacity(cap);
+        trackers.insert(self.announce.clone());
+        for tier in &self.announce_list {
+            for tracker in tier {
+                trackers.insert(tracker.clone());
+            }
+        }
+        trackers.into_iter().collect()
+    }
 }

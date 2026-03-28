@@ -1,4 +1,13 @@
+use std::net::IpAddr;
+
 use rand::TryRng;
+
+#[derive(Debug, Clone)]
+pub struct Peer {
+    pub peer_id: Option<PeerId>,
+    pub ip: IpAddr,
+    pub port: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);

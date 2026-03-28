@@ -1,11 +1,6 @@
-//! Bencode encoding functions.
-//!
-//! This module provides functions to encode Rust data types into Bencode format.
-
 use crate::bencode::{Bencode, Error};
 
-/// Encode a Bencode value to bytes
-pub fn encode(bencode: &Bencode) -> Result<Vec<u8>, Error> {
+pub(super) fn encode(bencode: &Bencode) -> Result<Vec<u8>, Error> {
     let buffer = match bencode {
         Bencode::Int(n) => encode_int(*n),
         Bencode::Bytes(bytes) => encode_bytes(bytes),
@@ -15,7 +10,6 @@ pub fn encode(bencode: &Bencode) -> Result<Vec<u8>, Error> {
     Ok(buffer)
 }
 
-/// Encode an integer to bencode format
 fn encode_int(n: i64) -> Result<Vec<u8>, Error> {
     let s = n.to_string();
     let mut buffer = Vec::new();
@@ -25,7 +19,6 @@ fn encode_int(n: i64) -> Result<Vec<u8>, Error> {
     Ok(buffer)
 }
 
-/// Encode bytes to bencode format
 fn encode_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let len_str = bytes.len().to_string();
     let mut buffer = Vec::new();
@@ -35,7 +28,6 @@ fn encode_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(buffer)
 }
 
-/// Encode a list of Bencode values
 fn encode_list(items: &Vec<Bencode>) -> Result<Vec<u8>, Error> {
     let mut buffer = Vec::new();
     buffer.push(b'l');
@@ -46,7 +38,6 @@ fn encode_list(items: &Vec<Bencode>) -> Result<Vec<u8>, Error> {
     Ok(buffer)
 }
 
-/// Encode a dictionary of Bencode values
 fn encode_dict(entries: &Vec<(&[u8], Bencode)>) -> Result<Vec<u8>, Error> {
     let mut buffer = Vec::new();
     buffer.push(b'd');
@@ -98,7 +89,11 @@ mod tests {
 
     #[test]
     fn test_encode_list() {
-        let items = vec![Bencode::Int(1), Bencode::Bytes(b"test"), Bencode::List(vec![])];
+        let items = vec![
+            Bencode::Int(1),
+            Bencode::Bytes(b"test"),
+            Bencode::List(vec![]),
+        ];
         let result = encode_list(&items);
         assert!(result.is_ok());
         let encoded = result.unwrap();
@@ -137,8 +132,11 @@ mod tests {
 
     #[test]
     fn test_encode_list_with_mixed_types() {
-        let items =
-            vec![Bencode::Int(0), Bencode::Bytes(b"empty"), Bencode::List(vec![Bencode::Int(1)])];
+        let items = vec![
+            Bencode::Int(0),
+            Bencode::Bytes(b"empty"),
+            Bencode::List(vec![Bencode::Int(1)]),
+        ];
         let result = encode_list(&items);
         assert!(result.is_ok());
         let encoded = result.unwrap();
@@ -147,8 +145,10 @@ mod tests {
 
     #[test]
     fn test_encode_dict_with_empty_values() {
-        let entries =
-            vec![(b"a".as_slice(), Bencode::Int(0)), (b"b".as_slice(), Bencode::Bytes(b""))];
+        let entries = vec![
+            (b"a".as_slice(), Bencode::Int(0)),
+            (b"b".as_slice(), Bencode::Bytes(b"")),
+        ];
         let result = encode_dict(&entries);
         assert!(result.is_ok());
         let encoded = result.unwrap();

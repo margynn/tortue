@@ -1,7 +1,3 @@
-//! Bencode encoding and decoding functionality.
-//!
-//! This module provides the core Bencode data types and functions for
-//! serializing and deserializing Bencode data structures.
 mod decoder;
 mod encoder;
 
@@ -9,14 +5,19 @@ mod encoder;
 pub enum Error {
     #[error("unexpected end of input")]
     UnexpectedEof,
+
     #[error("expected byte {expected:#x}, found {found:#x}")]
     UnexpectedByte { expected: u8, found: u8 },
+
     #[error("invalid token: {0:#x}")]
     InvalidToken(u8),
+
     #[error("invalid integer")]
     InvalidInteger,
+
     #[error("invalid string length")]
     InvalidStringLength,
+
     #[error("invalid dictionary key")]
     InvalidDictKey,
 }
@@ -29,13 +30,8 @@ pub enum Bencode<'a> {
     Dict(Vec<(&'a [u8], Bencode<'a>)>),
 }
 
-/// Decodes bencode data into a `Bencode` value.
-///
-/// # Errors
-///
-/// Returns an error if the input is not valid bencode format.
 pub fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
-    decoder::Decoder::new(data).parse()
+    decoder::decode(data)
 }
 
 impl<'a> Bencode<'a> {
@@ -44,37 +40,37 @@ impl<'a> Bencode<'a> {
         encoder::encode(self)
     }
 
-    /// Lookup a key in a Bencode dictionary
+    /// Lookup a key in a Bencode dictionary.
+    #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&Bencode<'a>> {
         match self {
             Bencode::Dict(entries) => {
-                // linear scan; keys are byte slices
                 entries.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
             },
             _ => None,
         }
     }
 
-    /// Get bytes from a dictionary key
+    /// Get bytes from a dictionary key.
     pub fn get_bytes(&self, key: &[u8]) -> Result<&'a [u8], Error> {
         match self.get(key) {
-            Some(Bencode::Bytes(b)) => Ok(*b),
+            Some(Bencode::Bytes(bytes)) => Ok(bytes),
             _ => Err(Error::InvalidDictKey),
         }
     }
 
-    /// Get integer from a dictionary key
-    pub fn get_int(&self, key: &[u8]) -> Result<usize, Error> {
+    /// Get integer from a dictionary key.
+    pub fn get_int(&self, key: &[u8]) -> Result<i64, Error> {
         match self.get(key) {
-            Some(Bencode::Int(n)) => Ok(*n as usize),
+            Some(Bencode::Int(n)) => Ok(*n),
             _ => Err(Error::InvalidDictKey),
         }
     }
 
-    /// Get list from a dictionary key
-    pub fn get_list(&self, key: &[u8]) -> Result<&Vec<Bencode<'a>>, Error> {
+    /// Get list from a dictionary key.
+    pub fn get_list(&self, key: &[u8]) -> Result<&[Bencode<'a>], Error> {
         match self.get(key) {
-            Some(Bencode::List(l)) => Ok(l),
+            Some(Bencode::List(list)) => Ok(list.as_slice()),
             _ => Err(Error::InvalidDictKey),
         }
     }

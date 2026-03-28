@@ -1,18 +1,15 @@
 use std::net::SocketAddr;
 
-use super::{
-    error::Error,
-    model::{AnnounceRequest, TrackerResponse},
-    parse_compact_ipv4_peers,
-};
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::time::{Duration, timeout};
+
+use crate::tracker::{AnnounceRequest, Error, TrackerResponse};
 
 const UDP_PROTOCOL_ID: u64 = 0x41727101980;
 const ACTION_CONNECT: u32 = 0;
 const ACTION_ANNOUNCE: u32 = 1;
 
-pub async fn announce(
+pub(super) async fn announce(
     host: &str,
     port: u16,
     req: &AnnounceRequest,
@@ -39,13 +36,17 @@ pub async fn announce(
     parse_announce_response(&buf[..n], announce_tx)
 }
 
-async fn resolve_udp_tracker(host: &str, port: u16) -> Result<SocketAddr, Error> {
-    let mut addrs =
-        lookup_host((host, port)).await.map_err(|e| Error::UdpRequest(e.to_string()))?;
+async fn resolve_udp_tracker(
+    host: &str,
+    port: u16,
+) -> Result<SocketAddr, Error> {
+    let mut addrs = lookup_host((host, port))
+        .await
+        .map_err(|e| Error::UdpRequest(e.to_string()))?;
 
-    addrs
-        .next()
-        .ok_or_else(|| Error::UdpRequest("tracker hostname resolved to no address".to_owned()))
+    addrs.next().ok_or_else(|| {
+        Error::UdpRequest("tracker hostname resolved to no address".to_owned())
+    })
 }
 
 fn build_connect_request(tx_id: u32) -> [u8; 16] {
@@ -56,9 +57,14 @@ fn build_connect_request(tx_id: u32) -> [u8; 16] {
     buf
 }
 
-fn parse_connect_response(bytes: &[u8], expected_tx_id: u32) -> Result<u64, Error> {
+fn parse_connect_response(
+    bytes: &[u8],
+    expected_tx_id: u32,
+) -> Result<u64, Error> {
     if bytes.len() < 16 {
-        return Err(Error::InvalidTrackerResponse("udp connect response too short".to_owned()));
+        return Err(Error::InvalidTrackerResponse(
+            "udp connect response too short".to_owned(),
+        ));
     }
 
     let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
@@ -80,7 +86,11 @@ fn parse_connect_response(bytes: &[u8], expected_tx_id: u32) -> Result<u64, Erro
     Ok(connection_id)
 }
 
-fn build_announce_request(connection_id: u64, tx_id: u32, req: &AnnounceRequest) -> [u8; 98] {
+fn build_announce_request(
+    connection_id: u64,
+    tx_id: u32,
+    req: &AnnounceRequest,
+) -> [u8; 98] {
     let mut buf = [0u8; 98];
     buf[0..8].copy_from_slice(&connection_id.to_be_bytes());
     buf[8..12].copy_from_slice(&ACTION_ANNOUNCE.to_be_bytes());
@@ -102,9 +112,14 @@ fn build_announce_request(connection_id: u64, tx_id: u32, req: &AnnounceRequest)
     buf
 }
 
-fn parse_announce_response(bytes: &[u8], expected_tx_id: u32) -> Result<TrackerResponse, Error> {
+fn parse_announce_response(
+    bytes: &[u8],
+    expected_tx_id: u32,
+) -> Result<TrackerResponse, Error> {
     if bytes.len() < 20 {
-        return Err(Error::InvalidTrackerResponse("udp announce response too short".to_owned()));
+        return Err(Error::InvalidTrackerResponse(
+            "udp announce response too short".to_owned(),
+        ));
     }
 
     let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
@@ -124,7 +139,12 @@ fn parse_announce_response(bytes: &[u8], expected_tx_id: u32) -> Result<TrackerR
     let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
     let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
     let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-    let peers = parse_compact_ipv4_peers(&bytes[20..])?;
+    let peers = super::utils::parse_compact_ipv4_peers(&bytes[20..])?;
 
-    Ok(TrackerResponse { interval, peers, seeders: Some(seeders), leechers: Some(leechers) })
+    Ok(TrackerResponse {
+        interval,
+        peers,
+        seeders: Some(seeders),
+        leechers: Some(leechers),
+    })
 }
