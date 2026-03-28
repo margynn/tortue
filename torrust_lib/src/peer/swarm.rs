@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use super::client::PeerClient;
-use super::{Error, Peer, PeerId};
+use super::{Error, Peer};
 use crate::tracker::TrackerSession;
 use crate::tracker::session::Node;
 
@@ -13,8 +15,13 @@ pub struct Swarm {
     torrent_info_hash: [u8; 20],
     node: Node,
     pieces: usize,
-    sessions: Vec<Arc<TrackerSession>>,
-    //
+    peers_rx: mpsc::Receiver<(Vec<Peer>, Arc<TrackerSession>)>,
+    peers: HashMap<Peer, PeerConnection>,
+}
+
+struct PeerConnection {
+    session: Arc<TrackerSession>,
+    client: PeerClient,
 }
 
 impl Swarm {
@@ -22,60 +29,79 @@ impl Swarm {
         torrent_info_hash: [u8; 20],
         node: Node,
         pieces: usize,
-        sessions: Vec<Arc<TrackerSession>>,
+        peers_rx: mpsc::Receiver<(Vec<Peer>, Arc<TrackerSession>)>,
     ) -> Self {
         Self {
             torrent_info_hash,
             node,
             pieces,
-            sessions,
+            peers_rx,
+            peers: HashMap::new(),
         }
     }
 
-    // pub async fn connect(&mut self, peers: Vec<Peer>) -> Result<(), Error> {
-    //     let info_hash = self.info_hash;
-    //     let peer_id = self.peer_id;
-    //     let pieces = self.pieces;
-    //     let mut set = JoinSet::new();
+    pub fn start(mut self) {
+        tokio::spawn(async move {
+            self.run_swarm().await;
+        });
+    }
 
-    //     for peer in peers {
-    //         set.spawn(async move {
-    //             let res = timeout(
-    //                 Duration::from_secs(5),
-    //                 PeerClient::connect(
-    //                     peer.clone(),
-    //                     info_hash,
-    //                     peer_id,
-    //                     pieces,
-    //                 ),
-    //             )
-    //             .await;
+    async fn run_swarm(&mut self) {
+        while let Some((peers, session)) = self.peers_rx.recv().await {
+            // todo: should run the connect in parallel instead
+            let _ = self.connect(peers, session).await;
+        }
+    }
 
-    //             match res {
-    //                 Ok(Ok(client)) => Ok(client),
-    //                 Ok(Err(err)) => Err((peer, err)),
-    //                 Err(_) => Err((peer, Error::Timeout)),
-    //             }
-    //         });
-    //     }
+    async fn connect(
+        &mut self,
+        peers: Vec<Peer>,
+        session: Arc<TrackerSession>,
+    ) -> Result<(), Error> {
+        let info_hash = self.torrent_info_hash;
+        let local_peer_id = self.node.id;
+        let pieces = self.pieces;
+        let mut set = JoinSet::new();
 
-    //     while let Some(joined) = set.join_next().await {
-    //         match joined {
-    //             Ok(Ok(client)) => {
-    //                 self.clients.push(client);
-    //                 println!("connection accepted!");
-    //             },
-    //             Ok(Err((peer, err))) => {
-    //                 // expected peer-level failure: log, metric, blacklist, ignore, etc.
-    //                 println!("peer {:#?} connect failed: {:?}", peer, err);
-    //             },
-    //             Err(join_err) => {
-    //                 // task panicked or was cancelled: usually more serious
-    //                 println!("connect task failed: {:?}", join_err);
-    //             },
-    //         }
-    //     }
+        for peer in peers {
+            let session = session.clone();
+            set.spawn(async move {
+                let res = timeout(
+                    Duration::from_secs(5),
+                    PeerClient::connect(
+                        peer.clone(),
+                        info_hash,
+                        local_peer_id,
+                        pieces,
+                    ),
+                )
+                .await;
 
-    //     Ok(())
-    // }
+                match res {
+                    Ok(Ok(client)) => Ok((peer, client, session)),
+                    Ok(Err(err)) => Err((peer, err)),
+                    Err(_) => Err((peer, Error::Timeout)),
+                }
+            });
+        }
+
+        while let Some(task) = set.join_next().await {
+            match task {
+                Ok(res) => match res {
+                    Ok((peer, client, session)) => {
+                        println!("connect to peer");
+                        self.peers
+                            .entry(peer)
+                            .or_insert(PeerConnection { session, client });
+                    },
+                    // Error in connect
+                    _ => continue,
+                },
+                // Error in task - timeout
+                _ => continue,
+            }
+        }
+
+        Ok(())
+    }
 }

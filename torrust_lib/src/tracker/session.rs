@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
 use super::{Error, Peer, PeerId, TrackerClient};
@@ -66,6 +67,7 @@ pub struct Node {
 
 pub struct TrackerSession {
     client: TrackerClient,
+    sender: mpsc::Sender<(Vec<Peer>, Arc<TrackerSession>)>,
     node: Node,
     torrent_info_hash: [u8; 20],
     state: Arc<RwLock<State>>,
@@ -88,6 +90,7 @@ impl TrackerSession {
         torrent_info_hash: [u8; 20],
         node: Node,
         content_size: u64,
+        sender: mpsc::Sender<(Vec<Peer>, Arc<TrackerSession>)>,
     ) -> Result<Arc<Self>, Error> {
         let client = TrackerClient::new(endpoint)?;
         let state = Arc::new(RwLock::new(State {
@@ -100,7 +103,13 @@ impl TrackerSession {
             seeders: 0,
             leechers: 0,
         }));
-        Ok(Arc::new(Self { client, torrent_info_hash, node, state }))
+        Ok(Arc::new(Self {
+            client,
+            sender,
+            torrent_info_hash,
+            node,
+            state,
+        }))
     }
 
     pub fn start(self: Arc<Self>) {
@@ -162,20 +171,25 @@ impl TrackerSession {
             match self.client.announce(&request).await {
                 Ok(resp) => {
                     let now = Instant::now();
-                    let mut s = self.state.write().unwrap();
+                    {
+                        let mut s = self.state.write().unwrap();
+                        s.peers = resp.peers.clone();
+                        s.seeders = resp.seeders.unwrap_or_default();
+                        s.leechers = resp.leechers.unwrap_or_default();
 
-                    // replace peers
-                    s.peers = resp.peers;
-                    s.seeders = resp.seeders.unwrap_or_default();
-                    s.leechers = resp.leechers.unwrap_or_default();
-
-                    // schedule next announce (clamp 1min minimum)
-                    let interval = resp.interval.max(60);
-                    s.next_announce =
-                        now + Duration::from_secs(interval as u64);
+                        // schedule next announce (clamp 1min minimum)
+                        let interval = resp.interval.max(60);
+                        s.next_announce =
+                            now + Duration::from_secs(interval as u64);
+                    }
 
                     // reset backoff
                     backoff = Duration::from_secs(30);
+
+                    let _ = self
+                        .sender
+                        .send((resp.peers.clone(), self.clone()))
+                        .await;
                 },
 
                 Err(_) => {

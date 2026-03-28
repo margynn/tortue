@@ -31,7 +31,7 @@ impl Handshake {
         out[1..20].copy_from_slice(PSTR);
         out[20..28].copy_from_slice(&self.reserved);
         out[28..48].copy_from_slice(&self.info_hash);
-        out[48..68].copy_from_slice(self.peer_id.as_bytes());
+        out[48..68].copy_from_slice(self.peer_id.as_ref());
         out
     }
 

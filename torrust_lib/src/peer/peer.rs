@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use rand::TryRng;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Peer {
     pub peer_id: Option<PeerId>,
     pub ip: IpAddr,
@@ -15,10 +15,6 @@ pub struct PeerId([u8; 20]);
 impl PeerId {
     pub fn new(bytes: [u8; 20]) -> Self {
         Self(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 20] {
-        &self.0
     }
 
     pub fn generate(client: &str, version: &str) -> Self {
