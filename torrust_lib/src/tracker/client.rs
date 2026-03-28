@@ -13,7 +13,6 @@ use super::{AnnounceRequest, Error, TrackerResponse};
 enum TrackerEndpoint {
     Udp { host: String, port: u16 },
     Http { url: Url },
-    Ws { url: Url },
 }
 
 impl TrackerEndpoint {
@@ -27,7 +26,6 @@ impl TrackerEndpoint {
                 let port = url.port().ok_or(Error::MissingUdpPort)?;
                 Ok(Self::Udp { host, port })
             },
-            "ws" | "wss" => unimplemented!("websocket not yet implemented"),
             other => Err(Error::UnsupportedScheme(other.to_owned())),
         }
     }
@@ -64,7 +62,6 @@ impl TrackerClient {
             TrackerEndpoint::Udp { host, port } => {
                 udp::announce(host, *port, req).await
             },
-            TrackerEndpoint::Ws { url } => todo!(),
         }
     }
 }

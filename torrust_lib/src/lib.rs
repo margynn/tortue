@@ -1,10 +1,9 @@
-pub mod bencode;
-pub mod metainfo;
-pub mod tracker;
+mod bencode;
+mod metainfo;
+mod tracker;
 
 use anyhow::Result;
 
-use crate::metainfo::Mode;
 use crate::tracker::{PeerId, TrackerSession};
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
@@ -14,23 +13,18 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
 
     println!("{:#?}", trackers);
 
-    let left = match &metainfo.mode {
-        Mode::Single { length } => *length as u64,
-        Mode::Multiple { files } => files.iter().map(|f| f.length as u64).sum(),
-    };
-
     for tracker in trackers {
-        let mut session = match TrackerSession::new(
+        let session = match TrackerSession::new(
             &tracker,
             metainfo.hash,
             peer_id,
             4444,
-            left,
+            metainfo.size(),
         ) {
             Ok(t) => t,
             _ => continue,
         };
-        let response = match session.start().await {
+        let response = match session.announce_started().await {
             Ok(r) => r,
             _ => continue,
         };

@@ -27,20 +27,20 @@ pub struct Metainfo {
     announce_list: Vec<Vec<String>>,
     pub name: String,
     pub hash: [u8; SHA_LENGTH],
-    pub piece_length: usize,
+    pub piece_length: u64,
     pub pieces: Vec<[u8; SHA_LENGTH]>,
     pub mode: Mode,
 }
 
 #[derive(Debug, Clone)]
 pub enum Mode {
-    Single { length: usize },
+    Single { length: u64 },
     Multiple { files: Vec<File> },
 }
 
 #[derive(Debug, Clone)]
 pub struct File {
-    pub length: usize,
+    pub length: u64,
     pub path: Vec<String>,
 }
 
@@ -55,5 +55,12 @@ impl Metainfo {
             }
         }
         trackers.into_iter().collect()
+    }
+
+    pub fn size(&self) -> u64 {
+        match &self.mode {
+            Mode::Single { length } => *length,
+            Mode::Multiple { files } => files.iter().map(|f| f.length).sum(),
+        }
     }
 }

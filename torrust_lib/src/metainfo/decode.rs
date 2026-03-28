@@ -29,14 +29,14 @@ pub(super) fn decode(root: Bencode<'_>) -> Result<Metainfo, Error> {
 
 fn parse_info(
     info: &Bencode,
-) -> Result<(String, usize, Vec<[u8; SHA_LENGTH]>, Mode), Error> {
+) -> Result<(String, u64, Vec<[u8; SHA_LENGTH]>, Mode), Error> {
     let name = get_utf8(info, b"name")?;
-    let piece_length = to_usize(info.get_int(b"piece length")?)?;
+    let piece_length = to_u64(info.get_int(b"piece length")?)?;
     let pieces = parse_pieces(info.get_bytes(b"pieces")?)?;
 
     let mode = match info.get(b"length") {
         Some(Bencode::Int(length)) => {
-            let length = to_usize(*length)?;
+            let length = to_u64(*length)?;
             Mode::Single { length }
         },
         Some(_) => return Err(Error::InvalidDictKey),
@@ -109,7 +109,7 @@ fn parse_multi_file(info: &Bencode) -> Result<Mode, Error> {
 }
 
 fn parse_file(file: &Bencode) -> Result<File, Error> {
-    let length = to_usize(file.get_int(b"length")?)?;
+    let length = to_u64(file.get_int(b"length")?)?;
     let path = file
         .get_list(b"path")?
         .iter()
@@ -124,6 +124,6 @@ fn parse_file(file: &Bencode) -> Result<File, Error> {
     Ok(File { length, path })
 }
 
-fn to_usize(value: i64) -> Result<usize, Error> {
-    usize::try_from(value).map_err(|_| Error::InvalidDictKey)
+fn to_u64(value: i64) -> Result<u64, Error> {
+    u64::try_from(value).map_err(|_| Error::InvalidDictKey)
 }
