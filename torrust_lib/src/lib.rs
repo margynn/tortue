@@ -5,42 +5,40 @@ mod tracker;
 
 use anyhow::Result;
 
+use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let metainfo = metainfo::decode(&torrent_file)?;
     let torrent_info_hash = metainfo.hash;
-    let trackers = metainfo.trackers();
+    let content_size = metainfo.size();
     let pieces = metainfo.pieces.len();
     let local_peer_id = PeerId::generate("TR", "0.1.0");
+    let node = Node { id: local_peer_id, port: 1234 };
+    let mut sessions = Vec::new();
 
-    println!("{:#?}", trackers);
-
-    for tracker in trackers {
+    // Start all trackers sessions concurrently
+    for endpoint in metainfo.trackers() {
         let session = match TrackerSession::new(
-            &tracker,
+            &endpoint,
             torrent_info_hash,
-            local_peer_id,
-            4444,
-            metainfo.size(),
+            node,
+            content_size,
         ) {
             Ok(t) => t,
             _ => continue,
         };
-        let response = match session.announce_started().await {
-            Ok(r) => r,
-            _ => continue,
-        };
-
-        println!("{response:#?}");
-
-        let mut sw = peer::Swarm::new(torrent_info_hash, local_peer_id, pieces);
-        sw.connect(response.peers).await?;
-
-        println!("connected to swarm");
-
-        break;
+        session.clone().start();
+        sessions.push(session);
+        println!("start tracker: {endpoint}");
     }
+
+    // Send the sessions to the swarm
+    let mut swarm = peer::Swarm::new(torrent_info_hash, node, pieces, sessions);
+
+    //     let mut sw = peer::Swarm::new(torrent_info_hash, local_peer_id, pieces);
+    //     sw.connect(response.peers).await?;
+    //     println!("connected to swarm");
 
     Ok(())
 }
