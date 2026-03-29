@@ -44,8 +44,15 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let swarm = peer::Swarm::new(torrent_info_hash, node, pieces, rx);
     swarm.start();
     println!("swarm started");
-
-    // Be sure to not exit to early
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    shutdown_signal().await;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = sigterm.recv() => {},
+    }
 }

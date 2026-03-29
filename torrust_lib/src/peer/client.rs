@@ -7,10 +7,18 @@ use tokio::time::timeout;
 use super::handshake::Handshake;
 use super::{Error, Peer, PeerId, bitfield};
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const MAX_MESSAGE_SIZE: u32 = 1 << 20; // 1MB safety cap
+
 #[derive(Debug)]
 pub struct PeerClient {
-    stream: tokio::net::TcpStream,
     peer: Peer,
+
+    torrent_info_hash: [u8; 20],
+    local_peer_id: PeerId,
+    pieces: usize,
+
     state: PeerState,
 }
 
@@ -21,6 +29,10 @@ struct PeerState {
     peer_choking: bool,
     peer_interested: bool,
     bitfield: bitfield::Bitfield,
+}
+
+struct Connection {
+    stream: TcpStream,
 }
 
 #[derive(Debug)]
@@ -39,29 +51,34 @@ pub enum Message {
 
 impl Message {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut buf: Vec<u8> = Vec::new();
+        let mut buf = Vec::new();
+
         match self {
             Message::Choke => buf.extend([0, 0, 0, 1, 0]),
             Message::Unchoke => buf.extend([0, 0, 0, 1, 1]),
             Message::Interested => buf.extend([0, 0, 0, 1, 2]),
             Message::NotInterested => buf.extend([0, 0, 0, 1, 3]),
             _ => unimplemented!(),
-        };
+        }
+
         Ok(buf)
     }
 }
 
 pub fn decode(data: &[u8]) -> Result<Message, Error> {
-    if data.len() == 0 {
+    if data.is_empty() {
         return Ok(Message::KeepAlive);
     }
+
     let msg_id = data[0];
     let data = &data[1..];
+
     match msg_id {
         0 => Ok(Message::Choke),
         1 => Ok(Message::Unchoke),
         2 => Ok(Message::Interested),
         3 => Ok(Message::NotInterested),
+
         4 => {
             if data.len() != 4 {
                 return Err(Error::InvalidMessage);
@@ -69,7 +86,9 @@ pub fn decode(data: &[u8]) -> Result<Message, Error> {
             let piece = u32::from_be_bytes(data.try_into().unwrap());
             Ok(Message::Have(piece))
         },
+
         5 => Ok(Message::Bitfield(data.to_vec())),
+
         7 => {
             if data.len() < 8 {
                 return Err(Error::InvalidMessage);
@@ -81,108 +100,150 @@ pub fn decode(data: &[u8]) -> Result<Message, Error> {
 
             Ok(Message::Piece { index, begin, block })
         },
+
         _ => Err(Error::InvalidMessage),
     }
 }
 
 impl PeerClient {
-    pub async fn connect(
+    pub fn new(
         peer: Peer,
         torrent_info_hash: [u8; 20],
         local_peer_id: PeerId,
         pieces: usize,
-    ) -> Result<Self, Error> {
-        let addr = std::net::SocketAddr::new(peer.ip, peer.port);
-        let mut stream =
-            timeout(Duration::from_secs(10), TcpStream::connect(addr))
-                .await
-                .map_err(|_| Error::Timeout)?
-                .map_err(Error::Io)?;
+    ) -> Self {
+        Self {
+            peer,
+            torrent_info_hash,
+            local_peer_id,
+            pieces,
+            state: PeerState {
+                am_choking: true,
+                am_interested: false,
+                peer_choking: true,
+                peer_interested: false,
+                bitfield: bitfield::Bitfield::new(pieces),
+            },
+        }
+    }
 
-        let outbound = Handshake::new(torrent_info_hash, local_peer_id);
-        timeout(Duration::from_secs(10), outbound.write_to(&mut stream))
+    pub async fn run(mut self) {
+        let mut backoff = RECONNECT_DELAY;
+
+        loop {
+            match self.connect().await {
+                Ok(mut conn) => {
+                    backoff = RECONNECT_DELAY;
+                    println!("connected to {:?}", self.peer);
+                    let res = self.run_connection(&mut conn).await;
+                    println!("connection lost {:?}: {:?}", self.peer, res);
+                },
+                Err(err) => {
+                    println!("connect failed {:?}: {:?}", self.peer, err);
+                },
+            }
+
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(3600));
+        }
+    }
+
+    async fn connect(&mut self) -> Result<Connection, Error> {
+        let addr = std::net::SocketAddr::new(self.peer.ip, self.peer.port);
+
+        let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(Error::Io)?;
+
+        // handshake (outbound)
+        let outbound =
+            Handshake::new(self.torrent_info_hash, self.local_peer_id);
+        timeout(CONNECT_TIMEOUT, outbound.write_to(&mut stream))
             .await
             .map_err(|_| Error::Timeout)??;
 
+        // handshake (inbound)
         let inbound =
-            timeout(Duration::from_secs(10), Handshake::read_from(&mut stream))
+            timeout(CONNECT_TIMEOUT, Handshake::read_from(&mut stream))
                 .await
                 .map_err(|_| Error::Timeout)??;
 
-        if inbound.info_hash != torrent_info_hash {
+        if inbound.info_hash != self.torrent_info_hash {
             return Err(Error::InfoHashMismatch);
         }
 
-        if let Some(expected_peer_id) = peer.peer_id {
-            if inbound.peer_id != expected_peer_id {
+        if let Some(expected) = self.peer.peer_id {
+            if inbound.peer_id != expected {
                 return Err(Error::PeerIdMismatch);
             }
         }
+        self.peer.peer_id = Some(inbound.peer_id);
 
-        let state = PeerState {
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            bitfield: bitfield::Bitfield::new(pieces),
-        };
-
-        Ok(Self { stream, peer, state })
+        Ok(Connection { stream })
     }
 
-    pub async fn run(mut self) -> Result<(), Error> {
+    async fn run_connection(
+        &mut self,
+        conn: &mut Connection,
+    ) -> Result<(), Error> {
+        // reset peer-specific state on new connection
+        self.state.peer_choking = true;
+        self.state.peer_interested = false;
+        self.state.bitfield = bitfield::Bitfield::new(self.pieces);
+
         loop {
-            let msg = self.read_message().await?;
-
+            let msg = self.read_message(&mut conn.stream).await?;
             match msg {
-                Message::Choke => {
-                    self.state.peer_choking = true;
-                },
-
-                Message::Unchoke => {
-                    self.state.peer_choking = false;
-                },
-
-                Message::Interested => {
-                    self.state.peer_interested = true;
-                },
-
-                Message::NotInterested => {
-                    self.state.peer_interested = false;
-                },
-
+                Message::Choke => self.state.peer_choking = true,
+                Message::Unchoke => self.state.peer_choking = false,
+                Message::Interested => self.state.peer_interested = true,
+                Message::NotInterested => self.state.peer_interested = false,
                 Message::Bitfield(bits) => {
                     self.state.bitfield =
                         bitfield::Bitfield::try_from(bits.as_ref()).unwrap();
                 },
-
                 Message::Have(piece) => {
                     let _ = self.state.bitfield.set_bit(piece as usize);
                 },
-
-                _ => {
-                    // ignore for now
+                Message::Piece { .. } => {
+                    // TODO: forward to swarm / piece manager
                 },
+                Message::KeepAlive => {},
+
+                _ => {},
             }
         }
     }
 
-    async fn read_message(&mut self) -> Result<Message, Error> {
+    async fn read_message(
+        &mut self,
+        stream: &mut TcpStream,
+    ) -> Result<Message, Error> {
         let mut len_buf = [0u8; 4];
-
-        self.stream.read_exact(&mut len_buf).await.map_err(Error::Io)?;
+        stream.read_exact(&mut len_buf).await.map_err(Error::Io)?;
         let length = u32::from_be_bytes(len_buf);
+
         if length == 0 {
-            return decode(&[0; 0]);
+            return Ok(Message::KeepAlive);
+        }
+        if length > MAX_MESSAGE_SIZE {
+            return Err(Error::InvalidMessage);
         }
 
         let mut payload = vec![0u8; length as usize];
-        self.stream.read_exact(&mut payload).await.map_err(Error::Io)?;
-        decode(payload.as_ref())
+        stream.read_exact(&mut payload).await.map_err(Error::Io)?;
+
+        decode(&payload)
     }
 
-    // async fn send(&mut self, msg: Message) -> Result<(), Error> {
-    //     self.stream.write_all(msg.encode()?.as_ref()).await?;
-    //     Ok(())
-    // }
+    pub async fn send(
+        &mut self,
+        stream: &mut TcpStream,
+        msg: Message,
+    ) -> Result<(), Error> {
+        let buf = msg.encode()?;
+        stream.write_all(&buf).await.map_err(Error::Io)?;
+        Ok(())
+    }
 }
