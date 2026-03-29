@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("peer id mismatch")]
     PeerIdMismatch,
+
+    #[error("invalid message")]
+    InvalidMessage,
 }
 
 pub enum PeerMessage {

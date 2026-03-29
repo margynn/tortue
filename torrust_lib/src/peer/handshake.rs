@@ -9,7 +9,6 @@ const RESERVED_LEN: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Handshake {
-    pub reserved: [u8; RESERVED_LEN],
     pub info_hash: [u8; 20],
     pub peer_id: PeerId,
 }
@@ -17,11 +16,7 @@ pub(super) struct Handshake {
 impl Handshake {
     #[must_use]
     pub fn new(info_hash: [u8; 20], peer_id: PeerId) -> Self {
-        Self {
-            reserved: [0; RESERVED_LEN],
-            info_hash,
-            peer_id,
-        }
+        Self { info_hash, peer_id }
     }
 
     #[must_use]
@@ -29,7 +24,7 @@ impl Handshake {
         let mut out = [0u8; HANDSHAKE_LEN];
         out[0] = PSTR.len() as u8;
         out[1..20].copy_from_slice(PSTR);
-        out[20..28].copy_from_slice(&self.reserved);
+        out[20..28].copy_from_slice(&[0; RESERVED_LEN]);
         out[28..48].copy_from_slice(&self.info_hash);
         out[48..68].copy_from_slice(self.peer_id.as_ref());
         out
@@ -55,9 +50,6 @@ impl Handshake {
             return Err(Error::InvalidHandshake("invalid protocol string"));
         }
 
-        let mut reserved = [0u8; RESERVED_LEN];
-        reserved.copy_from_slice(&buf[20..28]);
-
         let mut info_hash = [0u8; 20];
         info_hash.copy_from_slice(&buf[28..48]);
 
@@ -65,7 +57,6 @@ impl Handshake {
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
         Ok(Self {
-            reserved,
             info_hash,
             peer_id: PeerId::new(peer_id_bytes),
         })

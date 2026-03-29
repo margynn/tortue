@@ -50,6 +50,16 @@ impl Bitfield {
     }
 }
 
+impl TryFrom<&[u8]> for Bitfield {
+    type Error = &'static str;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let mut bf = Self::new(bytes.len() * BITS_PER_BYTE);
+        bf.extend_bytes(bytes).map_err(|_| "failed to extend bytes")?;
+        Ok(bf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

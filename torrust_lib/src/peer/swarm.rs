@@ -89,7 +89,6 @@ impl Swarm {
             match task {
                 Ok(res) => match res {
                     Ok((peer, client, session)) => {
-                        println!("connect to peer");
                         self.peers
                             .entry(peer)
                             .or_insert(PeerConnection { session, client });
