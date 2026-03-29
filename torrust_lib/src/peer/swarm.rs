@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use super::client::PeerClient;
 use crate::peer::PeerAddr;
+use crate::peer::bitfield::Bitfield;
 use crate::tracker::session::Node;
 
 pub struct Swarm {
@@ -11,20 +12,35 @@ pub struct Swarm {
     node: Node,
     pieces: usize,
     peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
-    peers: HashMap<PeerAddr, PeerEntry>,
+    peers_cmd: HashMap<PeerAddr, mpsc::Sender<PeerCommand>>,
+    peer_events_rx: mpsc::Receiver<PeerEvent>,
+    peer_events_tx: mpsc::Sender<PeerEvent>,
 }
 
-struct PeerEntry {
-    peer: PeerAddr,
-    status: PeerStatus,
-    failures: u32,
+const PEER_CMD_CHAN_SIZE: usize = 32;
+const SWARM_EVENT_CHAN_SIZE: usize = 256;
+
+#[derive(Debug)]
+pub enum PeerEvent {
+    Connected(PeerAddr),
+    Disconnected(PeerAddr),
+    Bitfield(PeerAddr, Bitfield),
+    Have(PeerAddr, u32),
+    Unchoke(PeerAddr),
+    Choke(PeerAddr),
+    Piece {
+        peer: PeerAddr,
+        index: u32,
+        begin: u32,
+        block: Vec<u8>,
+    },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum PeerStatus {
-    New,
-    Connecting,
-    Running,
+#[derive(Debug)]
+pub enum PeerCommand {
+    Interested,
+    NotInterested,
+    Request { index: u32, begin: u32, length: u32 },
 }
 
 impl Swarm {
@@ -34,12 +50,15 @@ impl Swarm {
         pieces: usize,
         peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     ) -> Self {
+        let (tx, rx) = mpsc::channel(SWARM_EVENT_CHAN_SIZE);
         Self {
             torrent_info_hash,
             node,
             pieces,
             peers_rx,
-            peers: HashMap::new(),
+            peers_cmd: HashMap::new(),
+            peer_events_rx: rx,
+            peer_events_tx: tx,
         }
     }
 
@@ -50,40 +69,44 @@ impl Swarm {
     }
 
     async fn run_swarm(&mut self) {
-        while let Some(peers) = self.peers_rx.recv().await {
-            self.add_peers(peers);
-            self.spawn_peers();
+        loop {
+            tokio::select! {
+                Some(peers) = self.peers_rx.recv() => {
+                   self.spawn_peers(peers);
+                }
+
+                Some(event) = self.peer_events_rx.recv() => {
+                    self.handle_event(event);
+                }
+            }
         }
     }
 
-    fn add_peers(&mut self, peers: Vec<PeerAddr>) {
-        for peer in peers {
-            self.peers.entry(peer).or_insert(PeerEntry {
-                peer,
-                status: PeerStatus::New,
-                failures: 0,
-            });
-        }
+    fn handle_event(&mut self, event: PeerEvent) {
+        todo!()
     }
 
-    fn spawn_peers(&mut self) {
+    fn spawn_peers(&mut self, peers: Vec<PeerAddr>) {
         let info_hash = self.torrent_info_hash;
-        let local_peer_id = self.node.id;
+        let client_id = self.node.id;
         let pieces = self.pieces;
 
-        for entry in self.peers.values_mut() {
-            if matches!(entry.status, PeerStatus::New) {
-                entry.status = PeerStatus::Connecting;
-
-                let peer = entry.peer.clone();
-
-                tokio::spawn(async move {
-                    let client =
-                        PeerClient::new(peer, info_hash, local_peer_id, pieces);
-
-                    client.run().await;
-                });
+        for peer_addr in peers {
+            if self.peers_cmd.contains_key(&peer_addr) {
+                continue;
             }
+
+            let (cmd_tx, cmd_rx) = mpsc::channel(PEER_CMD_CHAN_SIZE);
+            let event_tx = self.peer_events_tx.clone();
+            self.peers_cmd.insert(peer_addr, cmd_tx);
+
+            tokio::spawn(async move {
+                PeerClient::new(
+                    peer_addr, cmd_rx, event_tx, info_hash, client_id, pieces,
+                )
+                .run()
+                .await;
+            });
         }
     }
 }

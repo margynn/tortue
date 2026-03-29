@@ -5,13 +5,6 @@ use rand::TryRng;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct PeerAddr(pub IpAddr, pub u16);
 
-// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-// pub struct Peer {
-//     pub peer_id: Option<PeerId>,
-//     pub ip: IpAddr,
-//     pub port: u16,
-// }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);
 

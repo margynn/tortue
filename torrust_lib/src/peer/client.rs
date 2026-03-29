@@ -2,10 +2,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::handshake::Handshake;
 use super::{Error, PeerAddr, PeerId, bitfield};
+use crate::peer::swarm::{PeerCommand, PeerEvent};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -17,6 +19,10 @@ pub struct PeerClient {
     peer_id: PeerId,
     peer_addr: PeerAddr,
     peer_state: PeerState,
+
+    // Control
+    cmd_rx: mpsc::Receiver<PeerCommand>,
+    event_tx: mpsc::Sender<PeerEvent>,
 
     // Torrent info
     torrent_info_hash: [u8; 20],
@@ -110,6 +116,8 @@ pub fn decode(data: &[u8]) -> Result<Message, Error> {
 impl PeerClient {
     pub fn new(
         peer_addr: PeerAddr,
+        cmd_rx: mpsc::Receiver<PeerCommand>,
+        event_tx: mpsc::Sender<PeerEvent>,
         torrent_info_hash: [u8; 20],
         client_id: PeerId,
         pieces: usize,
@@ -124,6 +132,8 @@ impl PeerClient {
                 peer_interested: false,
                 bitfield: bitfield::Bitfield::new(pieces),
             },
+            cmd_rx,
+            event_tx,
             torrent_info_hash,
             client_id,
             pieces,
@@ -182,6 +192,8 @@ impl PeerClient {
         self.peer_state.peer_choking = true;
         self.peer_state.peer_interested = false;
         self.peer_state.bitfield = bitfield::Bitfield::new(self.pieces);
+
+        // TODO: should send existing bitfield
 
         loop {
             let msg = self.read_message(&mut conn.stream).await?;
