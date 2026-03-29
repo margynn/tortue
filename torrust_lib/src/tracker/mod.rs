@@ -4,7 +4,7 @@ pub mod session;
 pub use client::TrackerClient;
 pub use session::{AnnounceRequest, TrackerResponse, TrackerSession};
 
-pub use crate::peer::{Peer, PeerId};
+pub use crate::peer::{PeerAddr, PeerId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

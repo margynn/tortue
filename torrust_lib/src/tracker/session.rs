@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
-use super::{Error, Peer, PeerId, TrackerClient};
+use super::{Error, PeerAddr, PeerId, TrackerClient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnounceEvent {
@@ -54,7 +54,7 @@ pub struct AnnounceRequest {
 #[derive(Debug, Clone)]
 pub struct TrackerResponse {
     pub interval: u32,
-    pub peers: Vec<Peer>,
+    pub peers: Vec<PeerAddr>,
     pub seeders: Option<u32>,
     pub leechers: Option<u32>,
 }
@@ -67,14 +67,14 @@ pub struct Node {
 
 pub struct TrackerSession {
     client: TrackerClient,
-    sender: mpsc::Sender<(Vec<Peer>, Arc<TrackerSession>)>,
+    peers_tx: mpsc::Sender<Vec<PeerAddr>>,
     node: Node,
     torrent_info_hash: [u8; 20],
     state: Arc<RwLock<State>>,
 }
 
 struct State {
-    peers: Vec<Peer>,
+    peers: Vec<PeerAddr>,
     next_announce: Instant,
     stopped: bool,
     seeders: u32,
@@ -90,7 +90,7 @@ impl TrackerSession {
         torrent_info_hash: [u8; 20],
         node: Node,
         content_size: u64,
-        sender: mpsc::Sender<(Vec<Peer>, Arc<TrackerSession>)>,
+        peers_tx: mpsc::Sender<Vec<PeerAddr>>,
     ) -> Result<Arc<Self>, Error> {
         let client = TrackerClient::new(endpoint)?;
         let state = Arc::new(RwLock::new(State {
@@ -105,7 +105,7 @@ impl TrackerSession {
         }));
         Ok(Arc::new(Self {
             client,
-            sender,
+            peers_tx,
             torrent_info_hash,
             node,
             state,
@@ -120,7 +120,7 @@ impl TrackerSession {
         });
     }
 
-    pub fn peers(&self) -> Vec<Peer> {
+    pub fn peers(&self) -> Vec<PeerAddr> {
         self.state.read().unwrap().peers.clone()
     }
 
@@ -186,10 +186,7 @@ impl TrackerSession {
                     // reset backoff
                     backoff = Duration::from_secs(30);
 
-                    let _ = self
-                        .sender
-                        .send((resp.peers.clone(), self.clone()))
-                        .await;
+                    let _ = self.peers_tx.send(resp.peers.clone()).await;
                 },
 
                 Err(_) => {

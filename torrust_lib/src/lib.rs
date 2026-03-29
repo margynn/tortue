@@ -3,12 +3,10 @@ mod metainfo;
 mod peer;
 mod tracker;
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::peer::Peer;
+use crate::peer::PeerAddr;
 use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
@@ -21,7 +19,7 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let node = Node { id: local_peer_id, port: 1234 };
     let mut sessions = Vec::new();
 
-    let (tx, rx) = mpsc::channel::<(Vec<Peer>, Arc<TrackerSession>)>(1024);
+    let (tx, rx) = mpsc::channel::<Vec<PeerAddr>>(1024);
 
     // Start all trackers sessions concurrently
     for endpoint in metainfo.trackers() {

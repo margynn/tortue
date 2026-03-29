@@ -5,7 +5,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use super::handshake::Handshake;
-use super::{Error, Peer, PeerId, bitfield};
+use super::{Error, PeerAddr, PeerId, bitfield};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -13,13 +13,15 @@ const MAX_MESSAGE_SIZE: u32 = 1 << 20; // 1MB safety cap
 
 #[derive(Debug)]
 pub struct PeerClient {
-    peer: Peer,
+    // Peer info
+    peer_id: PeerId,
+    peer_addr: PeerAddr,
+    peer_state: PeerState,
 
+    // Torrent info
     torrent_info_hash: [u8; 20],
-    local_peer_id: PeerId,
+    client_id: PeerId,
     pieces: usize,
-
-    state: PeerState,
 }
 
 #[derive(Debug)]
@@ -107,23 +109,24 @@ pub fn decode(data: &[u8]) -> Result<Message, Error> {
 
 impl PeerClient {
     pub fn new(
-        peer: Peer,
+        peer_addr: PeerAddr,
         torrent_info_hash: [u8; 20],
-        local_peer_id: PeerId,
+        client_id: PeerId,
         pieces: usize,
     ) -> Self {
         Self {
-            peer,
-            torrent_info_hash,
-            local_peer_id,
-            pieces,
-            state: PeerState {
+            peer_id: PeerId::new([0; 20]),
+            peer_addr,
+            peer_state: PeerState {
                 am_choking: true,
                 am_interested: false,
                 peer_choking: true,
                 peer_interested: false,
                 bitfield: bitfield::Bitfield::new(pieces),
             },
+            torrent_info_hash,
+            client_id,
+            pieces,
         }
     }
 
@@ -131,16 +134,9 @@ impl PeerClient {
         let mut backoff = RECONNECT_DELAY;
 
         loop {
-            match self.connect().await {
-                Ok(mut conn) => {
-                    backoff = RECONNECT_DELAY;
-                    println!("connected to {:?}", self.peer);
-                    let res = self.run_connection(&mut conn).await;
-                    println!("connection lost {:?}: {:?}", self.peer, res);
-                },
-                Err(err) => {
-                    println!("connect failed {:?}: {:?}", self.peer, err);
-                },
+            if let Ok(mut conn) = self.connect().await {
+                backoff = RECONNECT_DELAY;
+                let _ = self.run_connection(&mut conn).await;
             }
 
             tokio::time::sleep(backoff).await;
@@ -149,7 +145,8 @@ impl PeerClient {
     }
 
     async fn connect(&mut self) -> Result<Connection, Error> {
-        let addr = std::net::SocketAddr::new(self.peer.ip, self.peer.port);
+        let addr =
+            std::net::SocketAddr::new(self.peer_addr.0, self.peer_addr.1);
 
         let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
@@ -157,8 +154,7 @@ impl PeerClient {
             .map_err(Error::Io)?;
 
         // handshake (outbound)
-        let outbound =
-            Handshake::new(self.torrent_info_hash, self.local_peer_id);
+        let outbound = Handshake::new(self.torrent_info_hash, self.client_id);
         timeout(CONNECT_TIMEOUT, outbound.write_to(&mut stream))
             .await
             .map_err(|_| Error::Timeout)??;
@@ -173,12 +169,7 @@ impl PeerClient {
             return Err(Error::InfoHashMismatch);
         }
 
-        if let Some(expected) = self.peer.peer_id {
-            if inbound.peer_id != expected {
-                return Err(Error::PeerIdMismatch);
-            }
-        }
-        self.peer.peer_id = Some(inbound.peer_id);
+        self.peer_id = inbound.peer_id;
 
         Ok(Connection { stream })
     }
@@ -188,23 +179,25 @@ impl PeerClient {
         conn: &mut Connection,
     ) -> Result<(), Error> {
         // reset peer-specific state on new connection
-        self.state.peer_choking = true;
-        self.state.peer_interested = false;
-        self.state.bitfield = bitfield::Bitfield::new(self.pieces);
+        self.peer_state.peer_choking = true;
+        self.peer_state.peer_interested = false;
+        self.peer_state.bitfield = bitfield::Bitfield::new(self.pieces);
 
         loop {
             let msg = self.read_message(&mut conn.stream).await?;
             match msg {
-                Message::Choke => self.state.peer_choking = true,
-                Message::Unchoke => self.state.peer_choking = false,
-                Message::Interested => self.state.peer_interested = true,
-                Message::NotInterested => self.state.peer_interested = false,
+                Message::Choke => self.peer_state.peer_choking = true,
+                Message::Unchoke => self.peer_state.peer_choking = false,
+                Message::Interested => self.peer_state.peer_interested = true,
+                Message::NotInterested => {
+                    self.peer_state.peer_interested = false
+                },
                 Message::Bitfield(bits) => {
-                    self.state.bitfield =
+                    self.peer_state.bitfield =
                         bitfield::Bitfield::try_from(bits.as_ref()).unwrap();
                 },
                 Message::Have(piece) => {
-                    let _ = self.state.bitfield.set_bit(piece as usize);
+                    let _ = self.peer_state.bitfield.set_bit(piece as usize);
                 },
                 Message::Piece { .. } => {
                     // TODO: forward to swarm / piece manager

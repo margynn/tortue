@@ -4,7 +4,7 @@ mod handshake;
 mod peer;
 mod swarm;
 
-pub use peer::{Peer, PeerId};
+pub use peer::{PeerAddr, PeerId};
 pub use swarm::Swarm;
 
 #[derive(Debug, thiserror::Error)]

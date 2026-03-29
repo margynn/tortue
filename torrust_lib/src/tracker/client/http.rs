@@ -5,7 +5,9 @@ use reqwest::Client;
 use url::Url;
 
 use crate::bencode::{Bencode, decode};
-use crate::tracker::{AnnounceRequest, Error, Peer, PeerId, TrackerResponse};
+use crate::tracker::{
+    AnnounceRequest, Error, PeerAddr, PeerId, TrackerResponse,
+};
 
 const TRACKER_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC;
 
@@ -86,7 +88,9 @@ fn build_announce_url(base_url: &Url, req: &AnnounceRequest) -> String {
     out
 }
 
-fn parse_peers_list<'a>(peer_list: &[Bencode<'a>]) -> Result<Vec<Peer>, Error> {
+fn parse_peers_list<'a>(
+    peer_list: &[Bencode<'a>],
+) -> Result<Vec<PeerAddr>, Error> {
     let mut peers = Vec::new();
     for peer in peer_list {
         let ip_raw = peer.get_bytes(b"ip")?;
@@ -104,16 +108,7 @@ fn parse_peers_list<'a>(peer_list: &[Bencode<'a>]) -> Result<Vec<Peer>, Error> {
             Error::InvalidTrackerResponse("peer port out of range".to_owned())
         })?;
 
-        let peer_id = match peer.get_bytes(b"peer id") {
-            Ok(raw) => {
-                let bytes: [u8; 20] =
-                    raw.try_into().map_err(|_| Error::InvalidPeerId)?;
-                Some(PeerId::new(bytes))
-            },
-            Err(_) => None,
-        };
-
-        peers.push(Peer { peer_id, ip, port });
+        peers.push(PeerAddr(ip, port));
     }
     Ok(peers)
 }
