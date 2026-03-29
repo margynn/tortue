@@ -13,6 +13,8 @@ pub(super) struct Handshake {
     pub peer_id: PeerId,
 }
 
+// TODO: should be sync / io free -> only contains ser/deser code
+
 impl Handshake {
     #[must_use]
     pub fn new(info_hash: [u8; 20], peer_id: PeerId) -> Self {

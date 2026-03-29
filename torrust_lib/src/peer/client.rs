@@ -146,6 +146,8 @@ impl PeerClient {
         loop {
             if let Ok(mut conn) = self.connect().await {
                 backoff = RECONNECT_DELAY;
+                let s = String::from_utf8_lossy(self.peer_id.as_ref());
+                println!("connected: {s:#?}");
                 let _ = self.run_connection(&mut conn).await;
             }
 

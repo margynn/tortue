@@ -72,7 +72,10 @@ impl Swarm {
         loop {
             tokio::select! {
                 Some(peers) = self.peers_rx.recv() => {
-                   self.spawn_peers(peers);
+                    // println!("peers: {peers:#?}");
+                    for peer_addr in peers {
+                        self.spawn_peer(peer_addr);
+                    }
                 }
 
                 Some(event) = self.peer_events_rx.recv() => {
@@ -86,27 +89,25 @@ impl Swarm {
         todo!()
     }
 
-    fn spawn_peers(&mut self, peers: Vec<PeerAddr>) {
+    fn spawn_peer(&mut self, peer_addr: PeerAddr) {
+        if self.peers_cmd.contains_key(&peer_addr) {
+            return;
+        }
+
         let info_hash = self.torrent_info_hash;
         let client_id = self.node.id;
         let pieces = self.pieces;
 
-        for peer_addr in peers {
-            if self.peers_cmd.contains_key(&peer_addr) {
-                continue;
-            }
+        let (cmd_tx, cmd_rx) = mpsc::channel(PEER_CMD_CHAN_SIZE);
+        let event_tx = self.peer_events_tx.clone();
+        self.peers_cmd.insert(peer_addr, cmd_tx);
 
-            let (cmd_tx, cmd_rx) = mpsc::channel(PEER_CMD_CHAN_SIZE);
-            let event_tx = self.peer_events_tx.clone();
-            self.peers_cmd.insert(peer_addr, cmd_tx);
-
-            tokio::spawn(async move {
-                PeerClient::new(
-                    peer_addr, cmd_rx, event_tx, info_hash, client_id, pieces,
-                )
-                .run()
-                .await;
-            });
-        }
+        tokio::spawn(async move {
+            PeerClient::new(
+                peer_addr, cmd_rx, event_tx, info_hash, client_id, pieces,
+            )
+            .run()
+            .await;
+        });
     }
 }
