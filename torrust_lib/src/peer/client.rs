@@ -5,13 +5,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use super::handshake::Handshake;
 use super::{Error, PeerAddr, PeerId, bitfield};
 use crate::peer::swarm::{PeerCommand, PeerEvent};
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-const MAX_MESSAGE_SIZE: u32 = 1 << 20; // 1MB safety cap
 
 #[derive(Debug)]
 pub struct PeerClient {
@@ -19,10 +14,6 @@ pub struct PeerClient {
     peer_id: PeerId,
     peer_addr: PeerAddr,
     peer_state: PeerState,
-
-    // Control
-    cmd_rx: mpsc::Receiver<PeerCommand>,
-    event_tx: mpsc::Sender<PeerEvent>,
 
     // Torrent info
     torrent_info_hash: [u8; 20],
@@ -114,10 +105,12 @@ pub fn decode(data: &[u8]) -> Result<Message, Error> {
 }
 
 impl PeerClient {
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+    const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+    const MAX_MESSAGE_SIZE: u32 = 1 << 20; // 1MB safety cap
+
     pub fn new(
         peer_addr: PeerAddr,
-        cmd_rx: mpsc::Receiver<PeerCommand>,
-        event_tx: mpsc::Sender<PeerEvent>,
         torrent_info_hash: [u8; 20],
         client_id: PeerId,
         pieces: usize,
@@ -132,22 +125,24 @@ impl PeerClient {
                 peer_interested: false,
                 bitfield: bitfield::Bitfield::new(pieces),
             },
-            cmd_rx,
-            event_tx,
             torrent_info_hash,
             client_id,
             pieces,
         }
     }
 
-    pub async fn run(mut self) {
-        let mut backoff = RECONNECT_DELAY;
+    pub async fn run(
+        mut self,
+        cmd_rx: mpsc::Receiver<PeerCommand>,
+        event_tx: mpsc::Sender<PeerEvent>,
+    ) {
+        let mut backoff = Self::RECONNECT_DELAY;
 
         loop {
             if let Ok(mut conn) = self.connect().await {
-                backoff = RECONNECT_DELAY;
-                let s = String::from_utf8_lossy(self.peer_id.as_ref());
-                println!("connected: {s:#?}");
+                backoff = Self::RECONNECT_DELAY;
+                // let s = String::from_utf8_lossy(self.peer_id.as_ref());
+                // println!("connected: {s:#?}");
                 let _ = self.run_connection(&mut conn).await;
             }
 
@@ -160,27 +155,28 @@ impl PeerClient {
         let addr =
             std::net::SocketAddr::new(self.peer_addr.0, self.peer_addr.1);
 
-        let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(Error::Io)?;
+        let mut stream =
+            timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(addr))
+                .await
+                .map_err(|_| Error::Timeout)?
+                .map_err(Error::Io)?;
 
         // handshake (outbound)
         let outbound = Handshake::new(self.torrent_info_hash, self.client_id);
-        timeout(CONNECT_TIMEOUT, outbound.write_to(&mut stream))
+        timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)??;
 
         // handshake (inbound)
-        let inbound =
-            timeout(CONNECT_TIMEOUT, Handshake::read_from(&mut stream))
-                .await
-                .map_err(|_| Error::Timeout)??;
+        let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
+        timeout(Self::CONNECT_TIMEOUT, stream.read_exact(&mut buf))
+            .await
+            .map_err(|_| Error::Timeout)??;
+        let inbound = Handshake::decode(&buf)?;
 
         if inbound.info_hash != self.torrent_info_hash {
             return Err(Error::InfoHashMismatch);
         }
-
         self.peer_id = inbound.peer_id;
 
         Ok(Connection { stream })
@@ -234,7 +230,7 @@ impl PeerClient {
         if length == 0 {
             return Ok(Message::KeepAlive);
         }
-        if length > MAX_MESSAGE_SIZE {
+        if length > Self::MAX_MESSAGE_SIZE {
             return Err(Error::InvalidMessage);
         }
 
@@ -252,5 +248,50 @@ impl PeerClient {
         let buf = msg.encode()?;
         stream.write_all(&buf).await.map_err(Error::Io)?;
         Ok(())
+    }
+}
+
+struct Handshake {
+    info_hash: [u8; 20],
+    peer_id: PeerId,
+}
+
+impl Handshake {
+    const PSTR: &[u8; 19] = b"BitTorrent protocol";
+    const HANDSHAKE_LEN: usize = 68;
+    const RESERVED_LEN: usize = 8;
+
+    fn new(info_hash: [u8; 20], peer_id: PeerId) -> Self {
+        Self { info_hash, peer_id }
+    }
+
+    fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
+        let mut out = [0u8; Self::HANDSHAKE_LEN];
+        out[0] = Self::PSTR.len() as u8;
+        out[1..20].copy_from_slice(Self::PSTR);
+        out[20..28].copy_from_slice(&[0; Self::RESERVED_LEN]);
+        out[28..48].copy_from_slice(&self.info_hash);
+        out[48..68].copy_from_slice(self.peer_id.as_ref());
+        out
+    }
+
+    fn decode(buf: &[u8]) -> Result<Self, Error> {
+        let pstrlen = buf[0] as usize;
+        if pstrlen != Self::PSTR.len() {
+            return Err(Error::InvalidHandshake(
+                "invalid protocol string length",
+            ));
+        }
+        if &buf[1..20] != Self::PSTR {
+            return Err(Error::InvalidHandshake("invalid protocol string"));
+        }
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&buf[28..48]);
+        let mut peer_id_bytes = [0u8; 20];
+        peer_id_bytes.copy_from_slice(&buf[48..68]);
+        Ok(Self {
+            info_hash,
+            peer_id: PeerId::new(peer_id_bytes),
+        })
     }
 }

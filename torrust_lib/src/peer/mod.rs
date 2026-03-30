@@ -1,6 +1,5 @@
 mod bitfield;
 mod client;
-mod handshake;
 mod peer;
 mod swarm;
 

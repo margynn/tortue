@@ -7,18 +7,21 @@ use crate::peer::PeerAddr;
 use crate::peer::bitfield::Bitfield;
 use crate::tracker::session::Node;
 
+// TODO: replace
+// pub struct TorrentInfo {
+//     pub hash: [u8; 20],
+//     pub pieces: usize,
+// }
+
 pub struct Swarm {
     torrent_info_hash: [u8; 20],
-    node: Node,
+    node: Node, // todo rename
     pieces: usize,
     peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     peers_cmd: HashMap<PeerAddr, mpsc::Sender<PeerCommand>>,
     peer_events_rx: mpsc::Receiver<PeerEvent>,
     peer_events_tx: mpsc::Sender<PeerEvent>,
 }
-
-const PEER_CMD_CHAN_SIZE: usize = 32;
-const SWARM_EVENT_CHAN_SIZE: usize = 256;
 
 #[derive(Debug)]
 pub enum PeerEvent {
@@ -44,13 +47,16 @@ pub enum PeerCommand {
 }
 
 impl Swarm {
+    const PEER_CMD_CHAN_SIZE: usize = 32;
+    const SWARM_EVENT_CHAN_SIZE: usize = 256;
+
     pub fn new(
         torrent_info_hash: [u8; 20],
         node: Node,
         pieces: usize,
         peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(SWARM_EVENT_CHAN_SIZE);
+        let (tx, rx) = mpsc::channel(Self::SWARM_EVENT_CHAN_SIZE);
         Self {
             torrent_info_hash,
             node,
@@ -72,7 +78,6 @@ impl Swarm {
         loop {
             tokio::select! {
                 Some(peers) = self.peers_rx.recv() => {
-                    // println!("peers: {peers:#?}");
                     for peer_addr in peers {
                         self.spawn_peer(peer_addr);
                     }
@@ -98,16 +103,14 @@ impl Swarm {
         let client_id = self.node.id;
         let pieces = self.pieces;
 
-        let (cmd_tx, cmd_rx) = mpsc::channel(PEER_CMD_CHAN_SIZE);
+        let (cmd_tx, cmd_rx) = mpsc::channel(Self::PEER_CMD_CHAN_SIZE);
         let event_tx = self.peer_events_tx.clone();
         self.peers_cmd.insert(peer_addr, cmd_tx);
 
         tokio::spawn(async move {
-            PeerClient::new(
-                peer_addr, cmd_rx, event_tx, info_hash, client_id, pieces,
-            )
-            .run()
-            .await;
+            PeerClient::new(peer_addr, info_hash, client_id, pieces)
+                .run(cmd_rx, event_tx)
+                .await;
         });
     }
 }
