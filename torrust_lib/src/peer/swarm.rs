@@ -41,6 +41,7 @@ pub enum PeerEvent {
 
 #[derive(Debug)]
 pub enum PeerCommand {
+    Shutdown,
     Interested,
     NotInterested,
     Request { index: u32, begin: u32, length: u32 },
@@ -90,8 +91,18 @@ impl Swarm {
         }
     }
 
-    fn handle_event(&mut self, event: PeerEvent) {
-        todo!()
+    fn handle_event(&mut self, evt: PeerEvent) {
+        match evt {
+            PeerEvent::Connected(p) => println!("connected: {p:#?}"),
+            PeerEvent::Disconnected(p) => {
+                self.peers_cmd.remove(&p);
+            },
+            PeerEvent::Bitfield(peer_addr, bitfield) => todo!(),
+            PeerEvent::Have(peer_addr, _) => todo!(),
+            PeerEvent::Unchoke(peer_addr) => todo!(),
+            PeerEvent::Choke(peer_addr) => todo!(),
+            PeerEvent::Piece { peer, index, begin, block } => todo!(),
+        }
     }
 
     fn spawn_peer(&mut self, peer_addr: PeerAddr) {
