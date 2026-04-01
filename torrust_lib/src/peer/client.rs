@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 
 use super::{Error, PeerAddr, PeerId, bitfield};
 use crate::peer::swarm::{PeerCommand, PeerEvent};
@@ -30,11 +30,44 @@ struct PeerState {
     bitfield: bitfield::Bitfield,
 }
 
-struct Connection {
-    stream: TcpStream,
+impl PeerState {
+    fn new(pieces: usize) -> Self {
+        Self {
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
+            bitfield: bitfield::Bitfield::new(pieces),
+        }
+    }
+
+    fn reset(&mut self, pieces: usize) {
+        *self = Self::new(pieces);
+    }
+
+    fn apply(&mut self, msg: &Message) {
+        match msg {
+            Message::Choke => self.peer_choking = true,
+            Message::Unchoke => self.peer_choking = false,
+            Message::Interested => self.peer_interested = true,
+            Message::NotInterested => self.peer_interested = false,
+            Message::Bitfield(bits) => {
+                if let Ok(bitfield) =
+                    bitfield::Bitfield::try_from(bits.as_ref())
+                {
+                    self.bitfield = bitfield;
+                }
+            },
+            Message::Have(piece) => {
+                let _ = self.bitfield.set_bit(*piece as usize);
+            },
+            Message::KeepAlive | Message::Piece { .. } => {},
+            _ => {},
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Message {
     KeepAlive,
     Choke,
@@ -48,23 +81,53 @@ pub enum Message {
     Cancel { index: u32, begin: u32, length: u32 },
 }
 
-// #[derive(Debug)]
-// pub enum PeerCommand {
-//     Interested,
-//     NotInterested,
-//     Request { index: u32, begin: u32, length: u32 },
-// }
-
 impl Message {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut buf = Vec::new();
 
         match self {
-            Message::Choke => buf.extend([0, 0, 0, 1, 0]),
-            Message::Unchoke => buf.extend([0, 0, 0, 1, 1]),
-            Message::Interested => buf.extend([0, 0, 0, 1, 2]),
-            Message::NotInterested => buf.extend([0, 0, 0, 1, 3]),
-            _ => unimplemented!(),
+            Message::KeepAlive => buf.extend_from_slice(&0u32.to_be_bytes()),
+            Message::Choke => buf.extend_from_slice(&[0, 0, 0, 1, 0]),
+            Message::Unchoke => buf.extend_from_slice(&[0, 0, 0, 1, 1]),
+            Message::Interested => buf.extend_from_slice(&[0, 0, 0, 1, 2]),
+            Message::NotInterested => buf.extend_from_slice(&[0, 0, 0, 1, 3]),
+            Message::Have(piece) => {
+                buf.extend_from_slice(&5u32.to_be_bytes());
+                buf.push(4);
+                buf.extend_from_slice(&piece.to_be_bytes());
+            },
+            Message::Bitfield(bits) => {
+                let len = 1u32
+                    .checked_add(bits.len() as u32)
+                    .ok_or(Error::InvalidMessage)?;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.push(5);
+                buf.extend_from_slice(bits);
+            },
+            Message::Request { index, begin, length } => {
+                buf.extend_from_slice(&13u32.to_be_bytes());
+                buf.push(6);
+                buf.extend_from_slice(&index.to_be_bytes());
+                buf.extend_from_slice(&begin.to_be_bytes());
+                buf.extend_from_slice(&length.to_be_bytes());
+            },
+            Message::Piece { index, begin, block } => {
+                let len = 9u32
+                    .checked_add(block.len() as u32)
+                    .ok_or(Error::InvalidMessage)?;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.push(7);
+                buf.extend_from_slice(&index.to_be_bytes());
+                buf.extend_from_slice(&begin.to_be_bytes());
+                buf.extend_from_slice(block);
+            },
+            Message::Cancel { index, begin, length } => {
+                buf.extend_from_slice(&13u32.to_be_bytes());
+                buf.push(8);
+                buf.extend_from_slice(&index.to_be_bytes());
+                buf.extend_from_slice(&begin.to_be_bytes());
+                buf.extend_from_slice(&length.to_be_bytes());
+            },
         }
 
         Ok(buf)
@@ -76,7 +139,7 @@ impl Message {
         }
 
         let msg_id = data[0];
-        let data = &data[1..];
+        let payload = &data[1..];
 
         match msg_id {
             0 => Ok(Message::Choke),
@@ -84,31 +147,91 @@ impl Message {
             2 => Ok(Message::Interested),
             3 => Ok(Message::NotInterested),
             4 => {
-                if data.len() != 4 {
+                if payload.len() != 4 {
                     return Err(Error::InvalidMessage);
                 }
-                let piece = u32::from_be_bytes(data.try_into().unwrap());
+                let piece = u32::from_be_bytes(
+                    payload.try_into().map_err(|_| Error::InvalidMessage)?,
+                );
                 Ok(Message::Have(piece))
             },
-            6 => Ok(Message::Request { index: 0, begin: 0, length: 0 }),
-            5 => Ok(Message::Bitfield(data.to_vec())),
-            7 => {
-                if data.len() < 8 {
+            5 => Ok(Message::Bitfield(payload.to_vec())),
+            6 => {
+                if payload.len() != 12 {
                     return Err(Error::InvalidMessage);
                 }
-                let index = u32::from_be_bytes(data[0..4].try_into().unwrap());
-                let begin = u32::from_be_bytes(data[4..8].try_into().unwrap());
-                let block = data[8..].to_vec();
+                let index = u32::from_be_bytes(
+                    payload[0..4]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                let begin = u32::from_be_bytes(
+                    payload[4..8]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                let length = u32::from_be_bytes(
+                    payload[8..12]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                Ok(Message::Request { index, begin, length })
+            },
+            7 => {
+                if payload.len() < 8 {
+                    return Err(Error::InvalidMessage);
+                }
+                let index = u32::from_be_bytes(
+                    payload[0..4]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                let begin = u32::from_be_bytes(
+                    payload[4..8]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                let block = payload[8..].to_vec();
                 Ok(Message::Piece { index, begin, block })
+            },
+            8 => {
+                if payload.len() != 12 {
+                    return Err(Error::InvalidMessage);
+                }
+                let index = u32::from_be_bytes(
+                    payload[0..4]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                let begin = u32::from_be_bytes(
+                    payload[4..8]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                let length = u32::from_be_bytes(
+                    payload[8..12]
+                        .try_into()
+                        .map_err(|_| Error::InvalidMessage)?,
+                );
+                Ok(Message::Cancel { index, begin, length })
             },
             _ => Err(Error::InvalidMessage),
         }
     }
 }
 
+enum ConnectionState {
+    Disconnected {
+        next_retry_at: Instant,
+        backoff: Duration,
+    },
+    Connected(TcpStream),
+}
+
 impl PeerClient {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
     const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+    const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
     const MAX_MESSAGE_SIZE: u32 = 1 << 20; // 1MB safety cap
 
     pub fn new(
@@ -120,13 +243,7 @@ impl PeerClient {
         Self {
             peer_id: PeerId::new([0; 20]),
             peer_addr,
-            peer_state: PeerState {
-                am_choking: true,
-                am_interested: false,
-                peer_choking: true,
-                peer_interested: false,
-                bitfield: bitfield::Bitfield::new(pieces),
-            },
+            peer_state: PeerState::new(pieces),
             torrent_info_hash,
             client_id,
             pieces,
@@ -138,86 +255,96 @@ impl PeerClient {
         mut cmd_rx: mpsc::Receiver<PeerCommand>,
         event_tx: mpsc::Sender<PeerEvent>,
     ) {
-        let mut backoff = Self::RECONNECT_DELAY;
+        let mut state = ConnectionState::Disconnected {
+            next_retry_at: Instant::now(),
+            backoff: Self::RECONNECT_DELAY,
+        };
 
         loop {
-            tokio::select! {
-                // allow external shutdown / commands
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(PeerCommand::Shutdown) | None => break,
-                        _ => {} // extend as needed
-                    }
-                }
-
-                res = self.connect() => {
-                    match res {
-                        Ok(mut conn) => {
-                            backoff = Self::RECONNECT_DELAY;
-
-                            let _ = event_tx
-                                .send(PeerEvent::Connected(self.peer_addr))
-                                .await;
-
-                            let _ = self.run_connection(&mut conn, &event_tx).await;
-
-                            let _ = event_tx
-                                .send(PeerEvent::Disconnected(self.peer_addr))
-                                .await;
+            match state {
+                ConnectionState::Disconnected { next_retry_at, backoff } => {
+                    tokio::select! {
+                        cmd = cmd_rx.recv() => {
+                            match cmd {
+                                Some(PeerCommand::Shutdown) | None => break,
+                                Some(_) => {
+                                    state = ConnectionState::Disconnected {
+                                        next_retry_at,
+                                        backoff,
+                                    };
+                                }
+                            }
                         }
-                        Err(_) => {
-                            let _ = event_tx
-                                .send(PeerEvent::Disconnected(self.peer_addr))
-                                .await;
+
+                        _ = tokio::time::sleep_until(next_retry_at) => {
+                            match self.connect().await {
+                                Ok(conn) => {
+                                    self.peer_state.reset(self.pieces);
+                                    let _ = event_tx
+                                        .send(PeerEvent::Connected(self.peer_addr))
+                                        .await;
+                                    state = ConnectionState::Connected(conn);
+                                }
+                                Err(_) => {
+                                    let next_backoff = (backoff * 2).min(Self::MAX_RECONNECT_DELAY);
+                                    state = ConnectionState::Disconnected {
+                                        next_retry_at: Instant::now() + backoff,
+                                        backoff: next_backoff,
+                                    };
+                                }
+                            }
                         }
                     }
+                },
 
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(3600));
-                }
+                ConnectionState::Connected(mut conn) => {
+                    tokio::select! {
+                        cmd = cmd_rx.recv() => {
+                            match cmd {
+                                Some(PeerCommand::Shutdown) | None => {
+                                    let _ = event_tx
+                                        .send(PeerEvent::Disconnected(self.peer_addr))
+                                        .await;
+                                    break;
+                                }
+                                Some(_) => {
+                                    // Map concrete commands to wire messages here when needed.
+                                    // For now, unknown/non-shutdown commands are ignored.
+                                    state = ConnectionState::Connected(conn);
+                                }
+                            }
+                        }
+
+                        res = self.read_message(&mut conn) => {
+                            match res {
+                                Ok(msg) => {
+                                    self.peer_state.apply(&msg);
+
+                                    let _ = event_tx
+                                        .send(PeerEvent::Message(self.peer_addr, msg))
+                                        .await;
+
+                                    state = ConnectionState::Connected(conn);
+                                }
+                                Err(_) => {
+                                    let _ = event_tx
+                                        .send(PeerEvent::Disconnected(self.peer_addr))
+                                        .await;
+
+                                    state = ConnectionState::Disconnected {
+                                        next_retry_at: Instant::now() + Self::RECONNECT_DELAY,
+                                        backoff: Self::RECONNECT_DELAY,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                },
             }
         }
     }
 
-    async fn run_connection(
-        &mut self,
-        conn: &mut Connection,
-        event_tx: &mpsc::Sender<PeerEvent>,
-    ) -> Result<(), Error> {
-        // reset peer-specific state on new connection
-        self.peer_state.peer_choking = true;
-        self.peer_state.peer_interested = false;
-        self.peer_state.bitfield = bitfield::Bitfield::new(self.pieces);
-
-        // TODO: should send existing bitfield
-
-        loop {
-            let msg = self.read_message(&mut conn.stream).await?;
-            match msg {
-                Message::Choke => self.peer_state.peer_choking = true,
-                Message::Unchoke => self.peer_state.peer_choking = false,
-                Message::Interested => self.peer_state.peer_interested = true,
-                Message::NotInterested => {
-                    self.peer_state.peer_interested = false
-                },
-                Message::Bitfield(bits) => {
-                    self.peer_state.bitfield =
-                        bitfield::Bitfield::try_from(bits.as_ref()).unwrap();
-                },
-                Message::Have(piece) => {
-                    let _ = self.peer_state.bitfield.set_bit(piece as usize);
-                },
-                Message::Piece { .. } => {
-                    // TODO: forward to swarm / piece manager
-                },
-                Message::KeepAlive => {},
-
-                _ => {},
-            }
-        }
-    }
-
-    async fn connect(&mut self) -> Result<Connection, Error> {
+    async fn connect(&mut self) -> Result<TcpStream, Error> {
         let addr =
             std::net::SocketAddr::new(self.peer_addr.0, self.peer_addr.1);
 
@@ -227,25 +354,27 @@ impl PeerClient {
                 .map_err(|_| Error::Timeout)?
                 .map_err(Error::Io)?;
 
-        // handshake (outbound)
         let outbound = Handshake::new(self.torrent_info_hash, self.client_id);
         timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
-            .map_err(|_| Error::Timeout)??;
+            .map_err(|_| Error::Timeout)?
+            .map_err(Error::Io)?;
 
-        // handshake (inbound)
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
         timeout(Self::CONNECT_TIMEOUT, stream.read_exact(&mut buf))
             .await
-            .map_err(|_| Error::Timeout)??;
+            .map_err(|_| Error::Timeout)?
+            .map_err(Error::Io)?;
+
         let inbound = Handshake::decode(&buf)?;
 
         if inbound.info_hash != self.torrent_info_hash {
             return Err(Error::InfoHashMismatch);
         }
+
         self.peer_id = inbound.peer_id;
 
-        Ok(Connection { stream })
+        Ok(stream)
     }
 
     async fn read_message(
@@ -305,6 +434,10 @@ impl Handshake {
     }
 
     fn decode(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() != Self::HANDSHAKE_LEN {
+            return Err(Error::InvalidHandshake("invalid handshake length"));
+        }
+
         let pstrlen = buf[0] as usize;
         if pstrlen != Self::PSTR.len() {
             return Err(Error::InvalidHandshake(
@@ -314,10 +447,13 @@ impl Handshake {
         if &buf[1..20] != Self::PSTR {
             return Err(Error::InvalidHandshake("invalid protocol string"));
         }
+
         let mut info_hash = [0u8; 20];
         info_hash.copy_from_slice(&buf[28..48]);
+
         let mut peer_id_bytes = [0u8; 20];
         peer_id_bytes.copy_from_slice(&buf[48..68]);
+
         Ok(Self {
             info_hash,
             peer_id: PeerId::new(peer_id_bytes),

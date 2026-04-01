@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use super::client::PeerClient;
 use crate::peer::PeerAddr;
 use crate::peer::bitfield::Bitfield;
+use crate::peer::client::Message;
 use crate::tracker::session::Node;
 
 // TODO: replace
@@ -27,16 +28,7 @@ pub struct Swarm {
 pub enum PeerEvent {
     Connected(PeerAddr),
     Disconnected(PeerAddr),
-    Bitfield(PeerAddr, Bitfield),
-    Have(PeerAddr, u32),
-    Unchoke(PeerAddr),
-    Choke(PeerAddr),
-    Piece {
-        peer: PeerAddr,
-        index: u32,
-        begin: u32,
-        block: Vec<u8>,
-    },
+    Message(PeerAddr, Message),
 }
 
 #[derive(Debug)]
@@ -97,11 +89,10 @@ impl Swarm {
             PeerEvent::Disconnected(p) => {
                 self.peers_cmd.remove(&p);
             },
-            PeerEvent::Bitfield(peer_addr, bitfield) => todo!(),
-            PeerEvent::Have(peer_addr, _) => todo!(),
-            PeerEvent::Unchoke(peer_addr) => todo!(),
-            PeerEvent::Choke(peer_addr) => todo!(),
-            PeerEvent::Piece { peer, index, begin, block } => todo!(),
+            PeerEvent::Message(_, msg) => match msg {
+                Message::Choke => {},
+                _ => {},
+            },
         }
     }
 
