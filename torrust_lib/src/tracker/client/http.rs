@@ -5,9 +5,7 @@ use reqwest::Client;
 use url::Url;
 
 use crate::bencode::{Bencode, decode};
-use crate::tracker::{
-    AnnounceRequest, Error, PeerAddr, PeerId, TrackerResponse,
-};
+use crate::tracker::{AnnounceRequest, Error, PeerAddr, TrackerResponse};
 
 const TRACKER_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC;
 

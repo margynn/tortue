@@ -6,19 +6,16 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
 use super::{Error, PeerAddr, PeerId, bitfield};
+use crate::metainfo::Metainfo;
 use crate::peer::swarm::{PeerCommand, PeerEvent};
 
 #[derive(Debug)]
 pub struct PeerClient {
-    // Peer info
+    client_id: PeerId,
     peer_id: PeerId,
     peer_addr: PeerAddr,
     peer_state: PeerState,
-
-    // Torrent info
-    torrent_info_hash: [u8; 20],
-    client_id: PeerId,
-    pieces: usize,
+    metainfo: Metainfo,
 }
 
 #[derive(Debug)]
@@ -236,17 +233,16 @@ impl PeerClient {
 
     pub fn new(
         peer_addr: PeerAddr,
-        torrent_info_hash: [u8; 20],
         client_id: PeerId,
-        pieces: usize,
+        metainfo: Metainfo,
     ) -> Self {
+        let pieces = metainfo.piece_length as usize;
         Self {
+            client_id,
             peer_id: PeerId::new([0; 20]),
             peer_addr,
             peer_state: PeerState::new(pieces),
-            torrent_info_hash,
-            client_id,
-            pieces,
+            metainfo,
         }
     }
 
@@ -279,7 +275,7 @@ impl PeerClient {
                         _ = tokio::time::sleep_until(next_retry_at) => {
                             match self.connect().await {
                                 Ok(conn) => {
-                                    self.peer_state.reset(self.pieces);
+                                    self.peer_state.reset(self.metainfo.piece_length as usize);
                                     let _ = event_tx
                                         .send(PeerEvent::Connected(self.peer_addr))
                                         .await;
@@ -354,7 +350,7 @@ impl PeerClient {
                 .map_err(|_| Error::Timeout)?
                 .map_err(Error::Io)?;
 
-        let outbound = Handshake::new(self.torrent_info_hash, self.client_id);
+        let outbound = Handshake::new(self.metainfo.hash, self.client_id);
         timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)?
@@ -368,7 +364,7 @@ impl PeerClient {
 
         let inbound = Handshake::decode(&buf)?;
 
-        if inbound.info_hash != self.torrent_info_hash {
+        if inbound.info_hash != self.metainfo.hash {
             return Err(Error::InfoHashMismatch);
         }
 

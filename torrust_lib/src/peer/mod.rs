@@ -1,4 +1,4 @@
-mod bitfield;
+pub mod bitfield;
 mod client;
 mod peer;
 mod swarm;

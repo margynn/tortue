@@ -3,21 +3,16 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use super::client::PeerClient;
+use crate::metainfo::Metainfo;
 use crate::peer::PeerAddr;
-use crate::peer::bitfield::Bitfield;
 use crate::peer::client::Message;
+use crate::pieces::PieceManager;
 use crate::tracker::session::Node;
 
-// TODO: replace
-// pub struct TorrentInfo {
-//     pub hash: [u8; 20],
-//     pub pieces: usize,
-// }
-
 pub struct Swarm {
-    torrent_info_hash: [u8; 20],
+    metainfo: Metainfo,
+    piece_manager: PieceManager,
     node: Node, // todo rename
-    pieces: usize,
     peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     peers_cmd: HashMap<PeerAddr, mpsc::Sender<PeerCommand>>,
     peer_events_rx: mpsc::Receiver<PeerEvent>,
@@ -34,6 +29,7 @@ pub enum PeerEvent {
 #[derive(Debug)]
 pub enum PeerCommand {
     Shutdown,
+    Cancel,
     Interested,
     NotInterested,
     Request { index: u32, begin: u32, length: u32 },
@@ -44,16 +40,16 @@ impl Swarm {
     const SWARM_EVENT_CHAN_SIZE: usize = 256;
 
     pub fn new(
-        torrent_info_hash: [u8; 20],
+        metainfo: Metainfo,
+        piece_manager: PieceManager,
         node: Node,
-        pieces: usize,
         peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(Self::SWARM_EVENT_CHAN_SIZE);
         Self {
-            torrent_info_hash,
+            metainfo,
+            piece_manager,
             node,
-            pieces,
             peers_rx,
             peers_cmd: HashMap::new(),
             peer_events_rx: rx,
@@ -89,9 +85,19 @@ impl Swarm {
             PeerEvent::Disconnected(p) => {
                 self.peers_cmd.remove(&p);
             },
-            PeerEvent::Message(_, msg) => match msg {
-                Message::Choke => {},
-                _ => {},
+            PeerEvent::Message(p, msg) => {
+                println!("msg: {p:#?} - {msg:#?}");
+
+                // Leecher: (I am downloading data from peers)
+                // Bitfield / Have -> send interrested if only we need the pieces
+                // Chocke -> cancel requests / messages / inflights
+                // Unchocke -> send request for the missing pieces
+                // Piece -> store the piece
+
+                // Seeder: (I am uploading data to peers)
+                // Interrested -> send unchoke
+                // NotInterrested -> send chocke
+                // Request -> send the piece
             },
         }
     }
@@ -101,16 +107,14 @@ impl Swarm {
             return;
         }
 
-        let info_hash = self.torrent_info_hash;
+        let metainfo = self.metainfo.clone();
         let client_id = self.node.id;
-        let pieces = self.pieces;
-
         let (cmd_tx, cmd_rx) = mpsc::channel(Self::PEER_CMD_CHAN_SIZE);
         let event_tx = self.peer_events_tx.clone();
         self.peers_cmd.insert(peer_addr, cmd_tx);
 
         tokio::spawn(async move {
-            PeerClient::new(peer_addr, info_hash, client_id, pieces)
+            PeerClient::new(peer_addr, client_id, metainfo)
                 .run(cmd_rx, event_tx)
                 .await;
         });

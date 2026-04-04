@@ -17,9 +17,9 @@ Steps:
 - ✅ bencode
 - ✅ metainfo + info_hash
 - ✅ tracker (HTTP + compact peers)
-- TCP connection
-- handshake
-- read bitfield
+- ✅ TCP connection
+- ✅ handshake
+- ✅ read bitfield
 - send interested
 - wait unchoke
 - request 1 block

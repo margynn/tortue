@@ -1,12 +1,16 @@
 mod bencode;
 mod metainfo;
 mod peer;
+mod pieces;
 mod tracker;
+
+use std::path::PathBuf;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::peer::PeerAddr;
+use crate::pieces::PieceManager;
 use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
@@ -14,7 +18,6 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let metainfo = metainfo::decode(&torrent_file)?;
     let torrent_info_hash = metainfo.hash;
     let content_size = metainfo.size();
-    let pieces = metainfo.pieces.len();
     let local_peer_id = PeerId::generate("TR", "0.1.0");
     let node = Node { id: local_peer_id, port: 1234 };
     let mut sessions = Vec::new();
@@ -38,8 +41,12 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
         println!("tracker: {endpoint}");
     }
 
+    // Create piece manager
+    let path = PathBuf::from("./out");
+    let piece_manager = PieceManager::new(metainfo.clone(), path).await?;
+
     // Send the sessions to the swarm
-    let swarm = peer::Swarm::new(torrent_info_hash, node, pieces, rx);
+    let swarm = peer::Swarm::new(metainfo.clone(), piece_manager, node, rx);
     swarm.start();
     println!("swarm started");
     shutdown_signal().await;
