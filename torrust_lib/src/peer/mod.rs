@@ -1,6 +1,7 @@
 pub mod bitfield;
 mod client;
 mod peer;
+mod state;
 mod swarm;
 
 pub use peer::{PeerAddr, PeerId};

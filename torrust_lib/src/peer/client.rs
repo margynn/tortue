@@ -5,7 +5,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
-use super::{Error, PeerAddr, PeerId, bitfield};
+use super::{Error, PeerAddr, PeerId};
 use crate::metainfo::Metainfo;
 use crate::peer::swarm::{PeerCommand, PeerEvent};
 
@@ -14,54 +14,7 @@ pub struct PeerClient {
     client_id: PeerId,
     peer_id: PeerId,
     peer_addr: PeerAddr,
-    peer_state: PeerState,
     metainfo: Metainfo,
-}
-
-#[derive(Debug)]
-struct PeerState {
-    am_choking: bool,
-    am_interested: bool,
-    peer_choking: bool,
-    peer_interested: bool,
-    bitfield: bitfield::Bitfield,
-}
-
-impl PeerState {
-    fn new(pieces: usize) -> Self {
-        Self {
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            bitfield: bitfield::Bitfield::new(pieces),
-        }
-    }
-
-    fn reset(&mut self, pieces: usize) {
-        *self = Self::new(pieces);
-    }
-
-    fn apply(&mut self, msg: &Message) {
-        match msg {
-            Message::Choke => self.peer_choking = true,
-            Message::Unchoke => self.peer_choking = false,
-            Message::Interested => self.peer_interested = true,
-            Message::NotInterested => self.peer_interested = false,
-            Message::Bitfield(bits) => {
-                if let Ok(bitfield) =
-                    bitfield::Bitfield::try_from(bits.as_ref())
-                {
-                    self.bitfield = bitfield;
-                }
-            },
-            Message::Have(piece) => {
-                let _ = self.bitfield.set_bit(*piece as usize);
-            },
-            Message::KeepAlive | Message::Piece { .. } => {},
-            _ => {},
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -236,12 +189,10 @@ impl PeerClient {
         client_id: PeerId,
         metainfo: Metainfo,
     ) -> Self {
-        let pieces = metainfo.piece_length as usize;
         Self {
             client_id,
             peer_id: PeerId::new([0; 20]),
             peer_addr,
-            peer_state: PeerState::new(pieces),
             metainfo,
         }
     }
@@ -257,88 +208,204 @@ impl PeerClient {
         };
 
         loop {
-            match state {
+            state = match state {
                 ConnectionState::Disconnected { next_retry_at, backoff } => {
-                    tokio::select! {
-                        cmd = cmd_rx.recv() => {
-                            match cmd {
-                                Some(PeerCommand::Shutdown) | None => break,
-                                Some(_) => {
-                                    state = ConnectionState::Disconnected {
-                                        next_retry_at,
-                                        backoff,
-                                    };
-                                }
-                            }
-                        }
-
-                        _ = tokio::time::sleep_until(next_retry_at) => {
-                            match self.connect().await {
-                                Ok(conn) => {
-                                    self.peer_state.reset(self.metainfo.piece_length as usize);
-                                    let _ = event_tx
-                                        .send(PeerEvent::Connected(self.peer_addr))
-                                        .await;
-                                    state = ConnectionState::Connected(conn);
-                                }
-                                Err(_) => {
-                                    let next_backoff = (backoff * 2).min(Self::MAX_RECONNECT_DELAY);
-                                    state = ConnectionState::Disconnected {
-                                        next_retry_at: Instant::now() + backoff,
-                                        backoff: next_backoff,
-                                    };
-                                }
-                            }
-                        }
-                    }
+                    self.handle_disconnected(
+                        next_retry_at,
+                        backoff,
+                        &mut cmd_rx,
+                        &event_tx,
+                    )
+                    .await
                 },
 
-                ConnectionState::Connected(mut conn) => {
-                    tokio::select! {
-                        cmd = cmd_rx.recv() => {
-                            match cmd {
-                                Some(PeerCommand::Shutdown) | None => {
-                                    let _ = event_tx
-                                        .send(PeerEvent::Disconnected(self.peer_addr))
-                                        .await;
-                                    break;
-                                }
-                                Some(_) => {
-                                    // Map concrete commands to wire messages here when needed.
-                                    // For now, unknown/non-shutdown commands are ignored.
-                                    state = ConnectionState::Connected(conn);
-                                }
-                            }
-                        }
-
-                        res = self.read_message(&mut conn) => {
-                            match res {
-                                Ok(msg) => {
-                                    self.peer_state.apply(&msg);
-
-                                    let _ = event_tx
-                                        .send(PeerEvent::Message(self.peer_addr, msg))
-                                        .await;
-
-                                    state = ConnectionState::Connected(conn);
-                                }
-                                Err(_) => {
-                                    let _ = event_tx
-                                        .send(PeerEvent::Disconnected(self.peer_addr))
-                                        .await;
-
-                                    state = ConnectionState::Disconnected {
-                                        next_retry_at: Instant::now() + Self::RECONNECT_DELAY,
-                                        backoff: Self::RECONNECT_DELAY,
-                                    };
-                                }
-                            }
-                        }
+                ConnectionState::Connected(conn) => {
+                    match self
+                        .handle_connected(conn, &mut cmd_rx, &event_tx)
+                        .await
+                    {
+                        Some(new_state) => new_state,
+                        None => break,
                     }
                 },
+            };
+        }
+    }
+
+    async fn handle_disconnected(
+        &mut self,
+        next_retry_at: Instant,
+        backoff: Duration,
+        cmd_rx: &mut mpsc::Receiver<PeerCommand>,
+        event_tx: &mpsc::Sender<PeerEvent>,
+    ) -> ConnectionState {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(PeerCommand::Shutdown) | None => {
+                        return ConnectionState::Disconnected {
+                            next_retry_at,
+                            backoff,
+                        }; // loop will exit via outer logic if needed
+                    }
+                    Some(_) => {}
+                }
+                ConnectionState::Disconnected { next_retry_at, backoff }
+            }
+
+            _ = tokio::time::sleep_until(next_retry_at) => {
+                match self.connect().await {
+                    Ok(conn) => {
+                        let _ = event_tx
+                            .send(PeerEvent::Connected(self.peer_addr))
+                            .await;
+
+                        ConnectionState::Connected(conn)
+                    }
+
+                    Err(_) => {
+                        let next_backoff =
+                            (backoff * 2).min(Self::MAX_RECONNECT_DELAY);
+
+                        ConnectionState::Disconnected {
+                            next_retry_at: Instant::now() + backoff,
+                            backoff: next_backoff,
+                        }
+                    }
+                }
             }
         }
     }
+
+    async fn handle_connected(
+        &mut self,
+        mut conn: TcpStream,
+        cmd_rx: &mut mpsc::Receiver<PeerCommand>,
+        event_tx: &mpsc::Sender<PeerEvent>,
+    ) -> Option<ConnectionState> {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(PeerCommand::Shutdown) | None => {
+                        let _ = event_tx
+                            .send(PeerEvent::Disconnected(self.peer_addr))
+                            .await;
+
+                        return None;
+                    }
+
+                    Some(PeerCommand::Send(msg)) => {
+                        let _ = self.send(&mut conn, msg).await;
+                    }
+                }
+
+                Some(ConnectionState::Connected(conn))
+            }
+
+            res = self.read_message(&mut conn) => {
+                match res {
+                    Ok(msg) => {
+                        let _ = event_tx
+                            .send(PeerEvent::Message(self.peer_addr, msg))
+                            .await;
+
+                        Some(ConnectionState::Connected(conn))
+                    }
+
+                    Err(_) => {
+                        let _ = event_tx
+                            .send(PeerEvent::Disconnected(self.peer_addr))
+                            .await;
+
+                        Some(ConnectionState::Disconnected {
+                            next_retry_at: Instant::now() + Self::RECONNECT_DELAY,
+                            backoff: Self::RECONNECT_DELAY,
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    // pub async fn run(
+    //     mut self,
+    //     mut cmd_rx: mpsc::Receiver<PeerCommand>,
+    //     event_tx: mpsc::Sender<PeerEvent>,
+    // ) {
+    //     let mut state = ConnectionState::Disconnected {
+    //         next_retry_at: Instant::now(),
+    //         backoff: Self::RECONNECT_DELAY,
+    //     };
+
+    //     loop {
+    //         match state {
+    //             // WHILE DISCONNECTED TO NOT READ CMD
+    //             ConnectionState::Disconnected { next_retry_at, backoff } => {
+
+    //                     _ = tokio::time::sleep_until(next_retry_at) => {
+    //                         match self.connect().await {
+    //                             Ok(conn) => {
+    //                                 let _ = event_tx
+    //                                     .send(PeerEvent::Connected(self.peer_addr))
+    //                                     .await;
+    //                                 state = ConnectionState::Connected(conn);
+    //                             }
+    //                             Err(_) => {
+    //                                 let next_backoff = (backoff * 2).min(Self::MAX_RECONNECT_DELAY);
+    //                                 state = ConnectionState::Disconnected {
+    //                                     next_retry_at: Instant::now() + backoff,
+    //                                     backoff: next_backoff,
+    //                                 };
+    //                             }
+    //                         }
+    //                     }
+
+    //             },
+
+    //             ConnectionState::Connected(mut conn) => {
+    //                 tokio::select! {
+    //                     cmd = cmd_rx.recv() => {
+    //                         match cmd {
+    //                             Some(PeerCommand::Shutdown) | None => {
+    //                                 let _ = event_tx
+    //                                     .send(PeerEvent::Disconnected(self.peer_addr))
+    //                                     .await;
+    //                                 break;
+    //                             }
+    //                             Some(_) => {
+    //                                 // Map concrete commands to wire messages here when needed.
+    //                                 // For now, unknown/non-shutdown commands are ignored.
+    //                                 state = ConnectionState::Connected(conn);
+    //                             }
+    //                         }
+    //                     }
+
+    //                     res = self.read_message(&mut conn) => {
+    //                         match res {
+    //                             Ok(msg) => {
+    //                                 let _ = event_tx
+    //                                     .send(PeerEvent::Message(self.peer_addr, msg))
+    //                                     .await;
+
+    //                                 state = ConnectionState::Connected(conn);
+    //                             }
+    //                             Err(_) => {
+    //                                 let _ = event_tx
+    //                                     .send(PeerEvent::Disconnected(self.peer_addr))
+    //                                     .await;
+
+    //                                 state = ConnectionState::Disconnected {
+    //                                     next_retry_at: Instant::now() + Self::RECONNECT_DELAY,
+    //                                     backoff: Self::RECONNECT_DELAY,
+    //                                 };
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             },
+    //         }
+    //     }
+    // }
 
     async fn connect(&mut self) -> Result<TcpStream, Error> {
         let addr =

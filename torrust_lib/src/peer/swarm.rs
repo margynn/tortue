@@ -1,18 +1,22 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::sync::mpsc;
 
 use super::client::PeerClient;
 use crate::metainfo::Metainfo;
 use crate::peer::PeerAddr;
+use crate::peer::bitfield::Bitfield;
 use crate::peer::client::Message;
+use crate::peer::state::PeerState;
 use crate::pieces::PieceManager;
 use crate::tracker::session::Node;
 
 pub struct Swarm {
     metainfo: Metainfo,
-    piece_manager: PieceManager,
     node: Node, // todo rename
+    piece_manager: PieceManager,
+    piece_to_peers: HashMap<u32, HashSet<PeerAddr>>,
+    peers_state: HashMap<PeerAddr, PeerState>,
     peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     peers_cmd: HashMap<PeerAddr, mpsc::Sender<PeerCommand>>,
     peer_events_rx: mpsc::Receiver<PeerEvent>,
@@ -29,10 +33,7 @@ pub enum PeerEvent {
 #[derive(Debug)]
 pub enum PeerCommand {
     Shutdown,
-    Cancel,
-    Interested,
-    NotInterested,
-    Request { index: u32, begin: u32, length: u32 },
+    Send(Message),
 }
 
 impl Swarm {
@@ -48,8 +49,10 @@ impl Swarm {
         let (tx, rx) = mpsc::channel(Self::SWARM_EVENT_CHAN_SIZE);
         Self {
             metainfo,
-            piece_manager,
             node,
+            piece_manager,
+            piece_to_peers: HashMap::new(),
+            peers_state: HashMap::new(),
             peers_rx,
             peers_cmd: HashMap::new(),
             peer_events_rx: rx,
@@ -73,27 +76,115 @@ impl Swarm {
                 }
 
                 Some(event) = self.peer_events_rx.recv() => {
-                    self.handle_event(event);
+                    self.handle_event(event).await;
                 }
             }
         }
     }
 
-    fn handle_event(&mut self, evt: PeerEvent) {
+    // TODO: should be sync latter
+    async fn handle_event(&mut self, evt: PeerEvent) {
         match evt {
-            PeerEvent::Connected(p) => println!("connected: {p:#?}"),
+            PeerEvent::Connected(p) => {
+                println!("connected {p:#?}");
+
+                self.peers_state.insert(
+                    p,
+                    PeerState {
+                        am_choking: true,
+                        am_interested: false,
+                        peer_choking: true,
+                        peer_interested: false,
+                        bitfield: Bitfield::new(0),
+                    },
+                );
+
+                // Directly send interrested to be unchocked
+                if let Some(cmd) = self.peers_cmd.get_mut(&p) {
+                    let _ =
+                        cmd.try_send(PeerCommand::Send(Message::Interested));
+                }
+            },
             PeerEvent::Disconnected(p) => {
-                self.peers_cmd.remove(&p);
+                self.peers_state.remove(&p);
             },
             PeerEvent::Message(p, msg) => {
-                println!("msg: {p:#?} - {msg:#?}");
+                let state = match self.peers_state.get_mut(&p) {
+                    Some(s) => s,
+                    None => return,
+                };
 
-                // Leecher: (I am downloading data from peers)
-                // Bitfield / Have -> send interrested if only we need the pieces
-                // Chocke -> cancel requests / messages / inflights
-                // Unchocke -> send request for the missing pieces
-                // Piece -> store the piece
+                state.apply(&msg);
 
+                match msg {
+                    // Update bitfields
+                    Message::Bitfield(_) | Message::Have(_) => {
+                        // remove peer from all pieces
+                        for peers in self.piece_to_peers.values_mut() {
+                            peers.remove(&p);
+                        }
+                        // re-add
+                        for i in &state.bitfield {
+                            let set = self
+                                .piece_to_peers
+                                .entry(i)
+                                .or_insert(HashSet::new());
+                            set.insert(p);
+                        }
+                    },
+
+                    // Store the data
+                    Message::Piece { index, begin, block } => {
+                        println!(
+                            "got piece: {index} [{begin}:] {:#?}",
+                            block.len()
+                        );
+
+                        let _ = self
+                            .piece_manager
+                            .write_block(index, begin, block.as_ref())
+                            .await;
+                    },
+
+                    // Unchoke
+                    Message::Unchoke => {
+                        // pick a missing piece that the peer has
+                        for (piece_index, peers) in &self.piece_to_peers {
+                            if !self.piece_manager.has_piece(*piece_index)
+                                && peers.contains(&p)
+                            {
+                                // request first missing block
+                                for block in self
+                                    .piece_manager
+                                    .missing_blocks(*piece_index)
+                                {
+                                    let _ = self.peers_cmd.get(&p).map(|tx| {
+                                        let _ = tx.try_send(PeerCommand::Send(
+                                            Message::Request {
+                                                index: *piece_index,
+                                                begin: block * 16 * 1024,
+                                                length: 16 * 1024,
+                                            },
+                                        ));
+                                    });
+                                    break;
+                                }
+                                break;
+                            }
+                        }
+                    },
+
+                    // peer stops allowing requests
+                    Message::Choke => {
+                        // if let Some(cmd) = self.peers_cmd.get(&p) {
+                        // let _ = cmd.try_send(PeerCommand::Se);
+                        // }
+                    },
+
+                    _ => {},
+                }
+
+                // DO NOT IMPLEMENT YET:
                 // Seeder: (I am uploading data to peers)
                 // Interrested -> send unchoke
                 // NotInterrested -> send chocke

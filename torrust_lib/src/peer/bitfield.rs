@@ -60,6 +60,48 @@ impl TryFrom<&[u8]> for Bitfield {
     }
 }
 
+impl<'a> IntoIterator for &'a Bitfield {
+    type Item = u32;
+    type IntoIter = BitfieldIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        BitfieldIter {
+            bitfield: &self.data.as_ref(),
+            byte_idx: 0,
+            bit_idx: 0,
+        }
+    }
+}
+
+pub struct BitfieldIter<'a> {
+    bitfield: &'a [u8],
+    byte_idx: usize,
+    bit_idx: u8,
+}
+
+impl<'a> Iterator for BitfieldIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.byte_idx < self.bitfield.len() {
+            let byte = self.bitfield[self.byte_idx];
+
+            while self.bit_idx < 8 {
+                if (byte >> (7 - self.bit_idx)) & 1 == 1 {
+                    let idx = self.byte_idx * 8 + self.bit_idx as usize;
+                    self.bit_idx += 1;
+                    return Some(idx as u32);
+                }
+                self.bit_idx += 1;
+            }
+
+            self.byte_idx += 1;
+            self.bit_idx = 0;
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
