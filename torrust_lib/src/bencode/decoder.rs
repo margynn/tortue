@@ -1,8 +1,34 @@
-use super::{Bencode, Error};
+use super::{Bencode, Error, Result};
 
-pub(super) fn decode(data: &[u8]) -> Result<Bencode<'_>, Error> {
+pub(super) fn decode(data: &[u8]) -> Result<Bencode<'_>> {
     Decoder::new(data).parse()
 }
+
+struct Cursor<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn peek(&self) -> Result<u8> {
+        todo!()
+    }
+    fn next(&mut self) -> Result<u8> {
+        todo!()
+    }
+    fn expect(&mut self, byte: u8) -> Result<()> {
+        todo!()
+    }
+    fn take_while<F>(&mut self, f: F) -> &'a [u8] {
+        todo!()
+    }
+}
+
+// fn parse_int(cursor: &mut Cursor) -> Result<i64>;
+// fn parse_bytes(cursor: &mut Cursor) -> Result<&[u8]>;
+// fn parse_list(cursor: &mut Cursor) -> Result<Vec<Bencode>>;
+// fn parse_dict(cursor: &mut Cursor) -> Result<...>;
+// fn parse(cursor: &mut Cursor) -> Result<Bencode>
 
 struct Decoder<'a> {
     input: &'a [u8],
@@ -14,7 +40,7 @@ impl<'a> Decoder<'a> {
         Self { input, position: 0 }
     }
 
-    fn parse(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse(&mut self) -> Result<Bencode<'a>> {
         match self.peek_byte()? {
             b'i' => self.parse_int(),
             b'l' => self.parse_list(),
@@ -28,17 +54,17 @@ impl<'a> Decoder<'a> {
         self.input.len().saturating_sub(self.position)
     }
 
-    fn peek_byte(&self) -> Result<u8, Error> {
+    fn peek_byte(&self) -> Result<u8> {
         self.input.get(self.position).copied().ok_or(Error::UnexpectedEof)
     }
 
-    fn next_byte(&mut self) -> Result<u8, Error> {
+    fn next_byte(&mut self) -> Result<u8> {
         let byte: u8 = self.peek_byte()?;
         self.position += 1;
         Ok(byte)
     }
 
-    fn consume_byte(&mut self, expected: u8) -> Result<(), Error> {
+    fn consume_byte(&mut self, expected: u8) -> Result<()> {
         let found: u8 = self.next_byte()?;
         if found != expected {
             return Err(Error::UnexpectedByte { expected, found });
@@ -46,7 +72,7 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn parse_int(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse_int(&mut self) -> Result<Bencode<'a>> {
         self.consume_byte(b'i')?;
 
         let start: usize = self.position;
@@ -73,11 +99,11 @@ impl<'a> Decoder<'a> {
         Ok(Bencode::Int(value))
     }
 
-    fn parse_bytes(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse_bytes(&mut self) -> Result<Bencode<'a>> {
         Ok(Bencode::Bytes(self.parse_byte_string()?))
     }
 
-    fn parse_byte_string(&mut self) -> Result<&'a [u8], Error> {
+    fn parse_byte_string(&mut self) -> Result<&'a [u8]> {
         let len: usize = self.parse_len()?;
         if len > self.remaining() {
             return Err(Error::UnexpectedEof);
@@ -88,7 +114,7 @@ impl<'a> Decoder<'a> {
         Ok(&self.input[start..end])
     }
 
-    fn parse_len(&mut self) -> Result<usize, Error> {
+    fn parse_len(&mut self) -> Result<usize> {
         let start: usize = self.position;
         while self.peek_byte()? != b':' {
             match self.peek_byte()? {
@@ -105,7 +131,7 @@ impl<'a> Decoder<'a> {
         Ok(len)
     }
 
-    fn parse_list(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse_list(&mut self) -> Result<Bencode<'a>> {
         self.consume_byte(b'l')?;
         let mut elements = Vec::new();
         while self.peek_byte()? != b'e' {
@@ -115,7 +141,7 @@ impl<'a> Decoder<'a> {
         Ok(Bencode::List(elements))
     }
 
-    fn parse_dict(&mut self) -> Result<Bencode<'a>, Error> {
+    fn parse_dict(&mut self) -> Result<Bencode<'a>> {
         self.consume_byte(b'd')?;
         let mut dict = Vec::new();
         while self.peek_byte()? != b'e' {

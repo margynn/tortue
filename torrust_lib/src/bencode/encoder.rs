@@ -1,52 +1,45 @@
-use crate::bencode::{Bencode, Error};
+use std::collections::BTreeMap;
 
-pub(super) fn encode(bencode: &Bencode) -> Result<Vec<u8>, Error> {
-    let buffer = match bencode {
-        Bencode::Int(n) => encode_int(*n),
-        Bencode::Bytes(bytes) => encode_bytes(bytes),
-        Bencode::List(items) => encode_list(items),
-        Bencode::Dict(entries) => encode_dict(entries),
-    }?;
-    Ok(buffer)
+use crate::bencode::Bencode;
+
+pub(super) fn encode_into(buf: &mut Vec<u8>, value: &Bencode) {
+    match value {
+        Bencode::Int(n) => encode_int(buf, *n),
+        Bencode::Bytes(bytes) => encode_bytes(buf, bytes),
+        Bencode::List(items) => encode_list(buf, items),
+        Bencode::Dict(entries) => encode_dict(buf, entries),
+    }
 }
 
-fn encode_int(n: i64) -> Result<Vec<u8>, Error> {
+fn encode_int(buf: &mut Vec<u8>, n: i64) {
     let s = n.to_string();
-    let mut buffer = Vec::new();
-    buffer.push(b'i');
-    buffer.extend_from_slice(s.as_bytes());
-    buffer.push(b'e');
-    Ok(buffer)
+    buf.push(b'i');
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(b'e');
 }
 
-fn encode_bytes(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+fn encode_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
     let len_str = bytes.len().to_string();
-    let mut buffer = Vec::new();
-    buffer.extend_from_slice(len_str.as_bytes());
-    buffer.push(b':');
-    buffer.extend_from_slice(bytes);
-    Ok(buffer)
+    buf.extend_from_slice(len_str.as_bytes());
+    buf.push(b':');
+    buf.extend_from_slice(bytes);
 }
 
-fn encode_list(items: &Vec<Bencode>) -> Result<Vec<u8>, Error> {
-    let mut buffer = Vec::new();
-    buffer.push(b'l');
+fn encode_list(buf: &mut Vec<u8>, items: &Vec<Bencode>) {
+    buf.push(b'l');
     for item in items {
-        buffer.extend(encode(item)?);
+        encode_into(buf, item);
     }
-    buffer.push(b'e');
-    Ok(buffer)
+    buf.push(b'e');
 }
 
-fn encode_dict(entries: &Vec<(&[u8], Bencode)>) -> Result<Vec<u8>, Error> {
-    let mut buffer = Vec::new();
-    buffer.push(b'd');
+fn encode_dict(buf: &mut Vec<u8>, entries: &BTreeMap<&[u8], Bencode>) {
+    buf.push(b'd');
     for (key, value) in entries {
-        buffer.extend(encode_bytes(key)?);
-        buffer.extend(encode(value)?);
+        encode_bytes(buf, key);
+        encode_into(buf, value);
     }
-    buffer.push(b'e');
-    Ok(buffer)
+    buf.push(b'e');
 }
 
 #[cfg(test)]
@@ -55,103 +48,80 @@ mod tests {
 
     #[test]
     fn test_encode_int() {
-        let result = encode_int(42);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"i42e");
+        let mut buf = Vec::new();
+        encode_int(&mut buf, 42);
+        assert_eq!(buf, b"i42e");
     }
 
     #[test]
     fn test_encode_negative_int() {
-        let result = encode_int(-10);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"i-10e");
+        let mut buf = Vec::new();
+        encode_int(&mut buf, -10);
+        assert_eq!(buf, b"i-10e");
     }
 
     #[test]
     fn test_encode_bytes() {
-        let bytes = b"hello";
-        let result = encode_bytes(bytes);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"5:hello");
+        let mut buf = Vec::new();
+        encode_bytes(&mut buf, b"hello");
+        assert_eq!(buf, b"5:hello");
     }
 
     #[test]
     fn test_encode_empty_bytes() {
-        let bytes: &[u8] = &[];
-        let result = encode_bytes(bytes);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"0:");
+        let mut buf = Vec::new();
+        encode_bytes(&mut buf, b"");
+        assert_eq!(buf, b"0:");
     }
 
     #[test]
     fn test_encode_list() {
+        let mut buf = Vec::new();
         let items = vec![
             Bencode::Int(1),
             Bencode::Bytes(b"test"),
             Bencode::List(vec![]),
         ];
-        let result = encode_list(&items);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"li1e4:testlee");
+        encode_list(&mut buf, &items);
+        assert_eq!(buf, b"li1e4:testlee");
     }
 
     #[test]
     fn test_encode_dict() {
-        let entries = vec![
-            (b"name".as_slice(), Bencode::Bytes(b"John")),
-            (b"age".as_slice(), Bencode::Int(30)),
-        ];
-        let result = encode_dict(&entries);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"d4:name4:John3:agei30ee");
-    }
-
-    #[test]
-    fn test_encode() {
-        let bencode = Bencode::Int(123);
-        let result = encode(&bencode);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"i123e");
+        let mut buf = Vec::new();
+        let mut entries = BTreeMap::new();
+        entries.insert(b"name".as_slice(), Bencode::Bytes(b"John"));
+        entries.insert(b"age".as_slice(), Bencode::Int(30));
+        encode_dict(&mut buf, &entries);
+        assert_eq!(buf, b"d4:name4:John3:agei30ee");
     }
 
     #[test]
     fn test_encode_bytes_with_special_chars() {
-        let bytes = b"hello world!";
-        let result = encode_bytes(bytes);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"12:hello world!");
+        let mut buf = Vec::new();
+        encode_bytes(&mut buf, b"hello world!");
+        assert_eq!(buf, b"12:hello world!");
     }
 
     #[test]
     fn test_encode_list_with_mixed_types() {
+        let mut buf = Vec::new();
         let items = vec![
             Bencode::Int(0),
             Bencode::Bytes(b"empty"),
             Bencode::List(vec![Bencode::Int(1)]),
         ];
-        let result = encode_list(&items);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"li0e5:emptyli1eee");
+        encode_list(&mut buf, &items);
+        assert_eq!(buf, b"li0e5:emptyli1eee");
     }
 
     #[test]
     fn test_encode_dict_with_empty_values() {
-        let entries = vec![
-            (b"a".as_slice(), Bencode::Int(0)),
-            (b"b".as_slice(), Bencode::Bytes(b"")),
-        ];
-        let result = encode_dict(&entries);
-        assert!(result.is_ok());
-        let encoded = result.unwrap();
-        assert_eq!(encoded, b"d1:ai0e1:b0:e");
+        let mut buf = Vec::new();
+        let mut entries = BTreeMap::new();
+        entries.insert(b"a".as_slice(), Bencode::Int(0));
+        entries.insert(b"b".as_slice(), Bencode::Bytes(b""));
+        encode_dict(&mut buf, &entries);
+        assert_eq!(buf, b"d1:ai0e1:b0:e");
     }
 }
