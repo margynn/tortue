@@ -4,33 +4,54 @@ use super::{Error, *};
 use crate::bencode::Bencode;
 
 pub(super) fn decode(root: Bencode<'_>) -> Result<Metainfo, Error> {
-    // let root: Bencode<'_> = crate::bencode::decode(data)?;
-
-    let announce = get_utf8(&root, b"announce")?;
+    let announce = root.get_utf8(b"announce")?;
     let announce_list = root
         .get_list(b"announce-list")
         .map(parse_announce_list)
         .unwrap_or_default();
+    let mut announces = HashSet::new();
+    announces.insert(announce);
+    announces.extend(announce_list.into_iter().flatten());
 
     let info = root.get(b"info").ok_or(Error::InvalidDictKey)?;
     let hash = info_hash(info)?;
     let (name, piece_length, pieces, mode) = parse_info(info)?;
+    let comment = root.get_utf8(b"comment").ok();
+    let created_by = root.get_utf8(b"created by").ok();
+    let created_at = root.get_int(b"creation date").ok();
+    let url_list = {
+        let list = root.get_list(b"url-list")?;
+        let v: Vec<String> = list
+            .iter()
+            .filter_map(|item| match item {
+                Bencode::Bytes(bytes) => {
+                    std::str::from_utf8(bytes).ok().map(str::to_owned)
+                },
+                _ => None,
+            })
+            .collect();
+
+        (!v.is_empty()).then_some(v)
+    };
 
     Ok(Metainfo {
-        announce,
-        announce_list,
+        announce: announces.into_iter().collect(),
         name,
         hash,
         piece_length,
         pieces,
         mode,
+        comment,
+        created_by,
+        created_at,
+        url_list,
     })
 }
 
 fn parse_info(
     info: &Bencode,
 ) -> Result<(String, u64, Vec<[u8; SHA_LENGTH]>, Mode), Error> {
-    let name = get_utf8(info, b"name")?;
+    let name = info.get_utf8(b"name")?;
     let piece_length = to_u64(info.get_int(b"piece length")?)?;
     let pieces = parse_pieces(info.get_bytes(b"pieces")?)?;
 
@@ -53,12 +74,6 @@ fn info_hash(info: &Bencode) -> Result<[u8; 20], Error> {
     let mut hash = [0u8; 20];
     hash.copy_from_slice(&digest);
     Ok(hash)
-}
-
-fn get_utf8(bencode: &Bencode, key: &[u8]) -> Result<String, Error> {
-    let bytes = bencode.get_bytes(key)?;
-    let s = std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8String)?;
-    Ok(s.to_owned())
 }
 
 fn parse_announce_list(tiers: &[Bencode]) -> Vec<Vec<String>> {

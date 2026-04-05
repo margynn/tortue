@@ -140,10 +140,10 @@ impl Swarm {
                             block.len()
                         );
 
-                        let _ = self
-                            .piece_manager
-                            .write_block(index, begin, block.as_ref())
-                            .await;
+                        // let _ = self
+                        //     .piece_manager
+                        //     .write_block(index, begin, block.as_ref())
+                        //     .await;
                     },
 
                     // Unchoke

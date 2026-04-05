@@ -1,3 +1,5 @@
+use core::fmt;
+
 mod decoder;
 mod encoder;
 
@@ -17,6 +19,9 @@ pub enum Error {
 
     #[error("invalid string length")]
     InvalidStringLength,
+
+    #[error("invalid string")]
+    InvalidString,
 
     #[error("invalid dictionary key")]
     InvalidDictKey,
@@ -51,7 +56,12 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    /// Get bytes from a dictionary key.
+    pub fn get_utf8(&self, key: &[u8]) -> Result<String, Error> {
+        let bytes = self.get_bytes(key)?;
+        let s = std::str::from_utf8(bytes).map_err(|_| Error::InvalidString)?;
+        Ok(s.to_owned())
+    }
+
     pub fn get_bytes(&self, key: &[u8]) -> Result<&'a [u8], Error> {
         match self.get(key) {
             Some(Bencode::Bytes(bytes)) => Ok(bytes),
@@ -59,7 +69,6 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    /// Get integer from a dictionary key.
     pub fn get_int(&self, key: &[u8]) -> Result<i64, Error> {
         match self.get(key) {
             Some(Bencode::Int(n)) => Ok(*n),
@@ -67,12 +76,62 @@ impl<'a> Bencode<'a> {
         }
     }
 
-    /// Get list from a dictionary key.
     pub fn get_list(&self, key: &[u8]) -> Result<&[Bencode<'a>], Error> {
         match self.get(key) {
             Some(Bencode::List(list)) => Ok(list.as_slice()),
             _ => Err(Error::InvalidDictKey),
         }
+    }
+
+    fn fmt_with_indent(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        indent: usize,
+    ) -> fmt::Result {
+        let pad = |f: &mut fmt::Formatter<'_>, n: usize| {
+            for _ in 0..n {
+                write!(f, " ")?;
+            }
+            Ok(())
+        };
+
+        match self {
+            Bencode::Int(i) => write!(f, "{i}"),
+            Bencode::Bytes(bytes) => match std::str::from_utf8(bytes) {
+                Ok(s) => write!(f, "\"{}\"", s),
+                Err(_) => write!(f, "[bytes:{}]", bytes.len()),
+            },
+            Bencode::List(list) => {
+                writeln!(f, "[")?;
+                for item in list {
+                    pad(f, indent + 2)?;
+                    item.fmt_with_indent(f, indent + 2)?;
+                    writeln!(f, ",")?;
+                }
+                pad(f, indent)?;
+                write!(f, "]")
+            },
+            Bencode::Dict(dict) => {
+                writeln!(f, "{{")?;
+                for (k, v) in dict {
+                    pad(f, indent + 2)?;
+                    match std::str::from_utf8(k) {
+                        Ok(s) => write!(f, "\"{s}\": ")?,
+                        Err(_) => write!(f, "0x{}: ", hex::encode(k))?,
+                    }
+                    v.fmt_with_indent(f, indent + 2)?;
+                    writeln!(f, ",")?;
+                }
+                pad(f, indent)?;
+                write!(f, "}}")
+            },
+        }
+    }
+}
+
+impl<'a> fmt::Display for Bencode<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_with_indent(f, 0)
     }
 }
 
