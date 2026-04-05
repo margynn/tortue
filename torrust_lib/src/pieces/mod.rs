@@ -49,6 +49,7 @@ impl Piece {
     }
 }
 
+#[derive(Debug)]
 pub enum WriteResult {
     BlockStored,
     PieceCompleted(u32),
@@ -253,6 +254,9 @@ impl PieceManager {
         }
 
         let _ = self.bitfield.set_bit(piece as usize);
+
+        let ratio = self.bitfield.completion_ratio() * 100.0;
+        println!("{ratio} %");
 
         Ok(WriteResult::PieceCompleted(piece))
     }

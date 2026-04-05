@@ -44,7 +44,7 @@ pub enum PeerCommand {
     Send(Message),
 }
 
-const MAX_IN_FLIGHT_PER_PEER: usize = 8;
+const MAX_IN_FLIGHT_PER_PEER: usize = 30;
 
 impl Swarm {
     const PEER_CMD_CHAN_SIZE: usize = 32;
@@ -77,7 +77,7 @@ impl Swarm {
     }
 
     async fn run_swarm(&mut self) {
-        let mut tick = interval(Duration::from_millis(50));
+        let mut tick = interval(Duration::from_millis(5));
 
         loop {
             tokio::select! {
@@ -102,7 +102,7 @@ impl Swarm {
     async fn handle_event(&mut self, evt: PeerEvent) {
         match evt {
             PeerEvent::Connected(p) => {
-                println!("connected {p:#?}");
+                // println!("connected {p:#?}");
 
                 self.peers.insert(
                     p,
@@ -159,6 +159,7 @@ impl Swarm {
                             .piece_manager
                             .write_block(index, begin, block.as_ref())
                             .await;
+                        // println!("{r:#?}");
 
                         peer.in_flight = peer.in_flight.saturating_sub(1);
                     },
@@ -185,6 +186,8 @@ impl Swarm {
     }
 
     fn request_block(&mut self) {
+        let mut dispatched = 0;
+
         for (piece_index, peers) in &self.piece_to_peers {
             if self.piece_manager.has_piece(*piece_index) {
                 continue;
@@ -234,8 +237,12 @@ impl Swarm {
                     }
                 }
 
-                // one block per tick → keeps fairness across pieces/peers
-                return;
+                if sent {
+                    dispatched += 1;
+                    if dispatched >= 50 {
+                        return;
+                    }
+                }
             }
         }
     }

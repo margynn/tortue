@@ -48,6 +48,16 @@ impl Bitfield {
         }
         Ok(())
     }
+
+    pub fn completion_ratio(&self) -> f32 {
+        let mut set_bits = 0usize;
+        for byte in &self.data {
+            set_bits += byte.count_ones() as usize;
+        }
+        // Important: last byte may contain extra unused bits
+        let valid_bits = self.pieces;
+        (set_bits.min(valid_bits) as f32) / (valid_bits as f32)
+    }
 }
 
 impl TryFrom<&[u8]> for Bitfield {
