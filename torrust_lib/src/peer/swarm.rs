@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
+use rand::seq::IteratorRandom;
 use tokio::sync::mpsc;
+use tokio::time::interval;
 
 use super::client::PeerClient;
 use crate::metainfo::Metainfo;
@@ -15,12 +18,17 @@ pub struct Swarm {
     metainfo: Metainfo,
     node: Node, // todo rename
     piece_manager: PieceManager,
+    peers: HashMap<PeerAddr, PeerRuntime>,
     piece_to_peers: HashMap<u32, HashSet<PeerAddr>>,
-    peers_state: HashMap<PeerAddr, PeerState>,
     peers_rx: mpsc::Receiver<Vec<PeerAddr>>,
     peers_cmd: HashMap<PeerAddr, mpsc::Sender<PeerCommand>>,
     peer_events_rx: mpsc::Receiver<PeerEvent>,
     peer_events_tx: mpsc::Sender<PeerEvent>,
+}
+
+struct PeerRuntime {
+    state: PeerState,
+    in_flight: usize,
 }
 
 #[derive(Debug)]
@@ -35,6 +43,8 @@ pub enum PeerCommand {
     Shutdown,
     Send(Message),
 }
+
+const MAX_IN_FLIGHT_PER_PEER: usize = 8;
 
 impl Swarm {
     const PEER_CMD_CHAN_SIZE: usize = 32;
@@ -51,8 +61,8 @@ impl Swarm {
             metainfo,
             node,
             piece_manager,
+            peers: HashMap::new(),
             piece_to_peers: HashMap::new(),
-            peers_state: HashMap::new(),
             peers_rx,
             peers_cmd: HashMap::new(),
             peer_events_rx: rx,
@@ -67,8 +77,14 @@ impl Swarm {
     }
 
     async fn run_swarm(&mut self) {
+        let mut tick = interval(Duration::from_millis(50));
+
         loop {
             tokio::select! {
+                _ = tick.tick() => {
+                    self.request_block();
+                }
+
                 Some(peers) = self.peers_rx.recv() => {
                     for peer_addr in peers {
                         self.spawn_peer(peer_addr);
@@ -88,14 +104,17 @@ impl Swarm {
             PeerEvent::Connected(p) => {
                 println!("connected {p:#?}");
 
-                self.peers_state.insert(
+                self.peers.insert(
                     p,
-                    PeerState {
-                        am_choking: true,
-                        am_interested: false,
-                        peer_choking: true,
-                        peer_interested: false,
-                        bitfield: Bitfield::new(0),
+                    PeerRuntime {
+                        state: PeerState {
+                            am_choking: true,
+                            am_interested: false,
+                            peer_choking: true,
+                            peer_interested: false,
+                            bitfield: Bitfield::new(0),
+                        },
+                        in_flight: 0,
                     },
                 );
 
@@ -106,13 +125,14 @@ impl Swarm {
                 }
             },
             PeerEvent::Disconnected(p) => {
-                self.peers_state.remove(&p);
+                self.peers.remove(&p);
             },
             PeerEvent::Message(p, msg) => {
-                let state = match self.peers_state.get_mut(&p) {
+                let peer = match self.peers.get_mut(&p) {
                     Some(s) => s,
                     None => return,
                 };
+                let state = &mut peer.state;
 
                 state.apply(&msg);
 
@@ -135,50 +155,21 @@ impl Swarm {
 
                     // Store the data
                     Message::Piece { index, begin, block } => {
-                        println!(
-                            "got piece: {index} [{begin}:] {:#?}",
-                            block.len()
-                        );
+                        let _ = self
+                            .piece_manager
+                            .write_block(index, begin, block.as_ref())
+                            .await;
 
-                        // let _ = self
-                        //     .piece_manager
-                        //     .write_block(index, begin, block.as_ref())
-                        //     .await;
+                        peer.in_flight = peer.in_flight.saturating_sub(1);
                     },
 
-                    // Unchoke
                     Message::Unchoke => {
-                        // pick a missing piece that the peer has
-                        for (piece_index, peers) in &self.piece_to_peers {
-                            if !self.piece_manager.has_piece(*piece_index)
-                                && peers.contains(&p)
-                            {
-                                // request first missing block
-                                for block in self
-                                    .piece_manager
-                                    .missing_blocks(*piece_index)
-                                {
-                                    let _ = self.peers_cmd.get(&p).map(|tx| {
-                                        let _ = tx.try_send(PeerCommand::Send(
-                                            Message::Request {
-                                                index: *piece_index,
-                                                begin: block.begin,
-                                                length: block.length,
-                                            },
-                                        ));
-                                    });
-                                    break;
-                                }
-                                break;
-                            }
-                        }
+                        // todo: should request blocks
                     },
 
                     // peer stops allowing requests
                     Message::Choke => {
-                        // if let Some(cmd) = self.peers_cmd.get(&p) {
-                        // let _ = cmd.try_send(PeerCommand::Se);
-                        // }
+                        // todo: should cancel requests
                     },
 
                     _ => {},
@@ -190,6 +181,62 @@ impl Swarm {
                 // NotInterrested -> send chocke
                 // Request -> send the piece
             },
+        }
+    }
+
+    fn request_block(&mut self) {
+        for (piece_index, peers) in &self.piece_to_peers {
+            if self.piece_manager.has_piece(*piece_index) {
+                continue;
+            }
+
+            let blocks: Vec<_> =
+                self.piece_manager.missing_blocks(*piece_index).collect();
+
+            for block in blocks {
+                let mut rng = rand::rng();
+
+                let peer = peers
+                    .iter()
+                    .filter(|p| {
+                        if let Some(runtime) = self.peers.get(*p) {
+                            !runtime.state.peer_choking
+                                && runtime.in_flight < MAX_IN_FLIGHT_PER_PEER
+                        } else {
+                            false
+                        }
+                    })
+                    .choose(&mut rng);
+
+                let peer = match peer {
+                    Some(p) => *p,
+                    None => continue,
+                };
+
+                let sent = if let Some(tx) = self.peers_cmd.get(&peer) {
+                    tx.try_send(PeerCommand::Send(Message::Request {
+                        index: *piece_index,
+                        begin: block.begin,
+                        length: block.length,
+                    }))
+                    .is_ok()
+                } else {
+                    false
+                };
+
+                if sent {
+                    // mark as requested BEFORE incrementing (important for dedup)
+                    self.piece_manager
+                        .mark_block_requested(*piece_index, block.begin);
+
+                    if let Some(runtime) = self.peers.get_mut(&peer) {
+                        runtime.in_flight += 1;
+                    }
+                }
+
+                // one block per tick → keeps fairness across pieces/peers
+                return;
+            }
         }
     }
 

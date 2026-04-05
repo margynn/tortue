@@ -108,32 +108,37 @@ impl PieceManager {
         let mut files = Vec::new();
         let mut offset = 0u64;
 
-        let path = root.join(&metainfo.name);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
+        let base = root.join(&metainfo.name);
 
-        // Create files
         match &metainfo.mode {
             Mode::Single { length } => {
+                if let Some(parent) = base.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
                 let file = OpenOptions::new()
                     .create(true)
                     .read(true)
                     .write(true)
-                    .open(&path)
+                    .open(&base)
                     .await?;
                 file.set_len(*length).await?;
                 files.push(OutputFile { file, length: *length, offset });
             },
 
             Mode::Multiple { files: meta_files } => {
+                // create root directory of torrent
+                tokio::fs::create_dir_all(&base).await?;
+
                 for f in meta_files {
-                    let path = path.join(PathBuf::from_iter(&f.path));
+                    let file_path = base.join(PathBuf::from_iter(&f.path));
+                    if let Some(parent) = file_path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
                     let file = OpenOptions::new()
                         .create(true)
                         .read(true)
                         .write(true)
-                        .open(&path)
+                        .open(&file_path)
                         .await?;
                     file.set_len(f.length).await?;
                     files.push(OutputFile { file, length: f.length, offset });
@@ -168,6 +173,28 @@ impl PieceManager {
                 begin: i as u32 * BLOCK_SIZE,
                 length: BLOCK_SIZE,
             })
+    }
+
+    pub fn mark_block_requested(&mut self, piece: u32, begin: u32) {
+        let piece = &mut self.pieces[piece as usize];
+        let index = (begin / BLOCK_SIZE) as usize;
+
+        if let Some(block) = piece.blocks.get_mut(index) {
+            match block {
+                BlockState::Missing => {
+                    *block = BlockState::Requested { at: Instant::now() };
+                },
+                BlockState::Requested { at } => {
+                    // allow retry if expired (same logic as missing_blocks)
+                    if at.elapsed() >= Duration::from_secs(60) {
+                        *block = BlockState::Requested { at: Instant::now() };
+                    }
+                },
+                BlockState::Received { .. } => {
+                    // do nothing (already completed)
+                },
+            }
+        }
     }
 
     pub async fn write_block(
