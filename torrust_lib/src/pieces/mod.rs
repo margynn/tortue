@@ -1,31 +1,54 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sha1::{Digest, Sha1};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::metainfo::{Metainfo, Mode};
-use crate::peer::PeerId;
 use crate::peer::bitfield::Bitfield;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 const BLOCK_SIZE: u32 = 16 * 1024; // 16kb
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 enum BlockState {
     Missing,
-    Reserved { peer: PeerId, at: Instant },
-    Received,
+    Requested { at: Instant },
+    Received { buffer: Vec<u8> },
 }
 
-#[derive(Debug)]
 struct Piece {
     blocks: Vec<BlockState>,
-    buffer: Vec<u8>,
     received: usize,
 }
 
-#[derive(Debug)]
+impl Piece {
+    fn buffer(&self) -> Vec<u8> {
+        self.blocks.iter().fold(
+            Vec::with_capacity(self.blocks.len() * BLOCK_SIZE as usize),
+            |mut acc, b| {
+                if let BlockState::Received { buffer } = b {
+                    acc.extend(buffer)
+                }
+                acc
+            },
+        )
+    }
+
+    fn reset(&mut self) {
+        for b in &mut self.blocks {
+            *b = BlockState::Missing;
+        }
+        self.received = 0;
+    }
+}
+
 pub enum WriteResult {
     BlockStored,
     PieceCompleted(u32),
@@ -36,7 +59,7 @@ pub struct PieceManager {
     metainfo: Metainfo,
     bitfield: Bitfield,
     pieces: Vec<Piece>,
-    files: Vec<OutputFile>, // instead of single file
+    files: Vec<OutputFile>,
 }
 
 struct OutputFile {
@@ -45,20 +68,54 @@ struct OutputFile {
     offset: u64, // global start offset in torrent
 }
 
+pub struct BlockRange {
+    pub begin: u32,
+    pub length: u32,
+}
+
 impl PieceManager {
-    pub async fn new(
-        metainfo: Metainfo,
+    pub async fn new(metainfo: Metainfo, root: PathBuf) -> Result<Self, Error> {
+        let files = Self::create_files(&metainfo, root).await?;
+        let mut pieces = Vec::with_capacity(metainfo.pieces.len());
+
+        for (i, _) in metainfo.pieces.iter().enumerate() {
+            // last piece is cropped
+            let is_last = i == metainfo.pieces.len() - 1;
+            let piece_length = if is_last {
+                metainfo.size() - (metainfo.piece_length * i as u64)
+            } else {
+                metainfo.piece_length
+            };
+            let blocks = (piece_length as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            pieces.push(Piece {
+                blocks: vec![BlockState::Missing; blocks as usize],
+                received: 0,
+            });
+        }
+
+        Ok(Self {
+            bitfield: Bitfield::new(metainfo.pieces.len()),
+            metainfo,
+            pieces,
+            files,
+        })
+    }
+
+    async fn create_files(
+        metainfo: &Metainfo,
         root: PathBuf,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Vec<OutputFile>, Error> {
         let mut files = Vec::new();
         let mut offset = 0u64;
 
+        let path = root.join(&metainfo.name);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // Create files
         match &metainfo.mode {
             Mode::Single { length } => {
-                let path = root.join(&metainfo.name);
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
                 let file = OpenOptions::new()
                     .create(true)
                     .read(true)
@@ -70,12 +127,8 @@ impl PieceManager {
             },
 
             Mode::Multiple { files: meta_files } => {
-                let base = root.join(&metainfo.name);
                 for f in meta_files {
-                    let path = base.join(PathBuf::from_iter(&f.path));
-                    if let Some(parent) = path.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
+                    let path = path.join(PathBuf::from_iter(&f.path));
                     let file = OpenOptions::new()
                         .create(true)
                         .read(true)
@@ -89,104 +142,98 @@ impl PieceManager {
             },
         }
 
-        // pieces init unchanged
-        let mut pieces = Vec::with_capacity(metainfo.pieces.len());
-
-        for (i, _) in metainfo.pieces.iter().enumerate() {
-            let piece_len = Self::piece_length(&metainfo, i);
-            let blocks = (piece_len as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-            pieces.push(Piece {
-                blocks: vec![BlockState::Missing; blocks as usize],
-                buffer: vec![0; piece_len as usize],
-                received: 0,
-            });
-        }
-
-        Ok(Self {
-            bitfield: Bitfield::new(metainfo.pieces.len()),
-            metainfo,
-            pieces,
-            files,
-        })
-    }
-
-    fn piece_length(meta: &Metainfo, index: usize) -> u64 {
-        let last = meta.pieces.len() - 1;
-        if index == last {
-            meta.size() - (meta.piece_length * index as u64)
-        } else {
-            meta.piece_length
-        }
-    }
-
-    fn block_index(offset: u32) -> usize {
-        (offset / BLOCK_SIZE) as usize
+        Ok(files)
     }
 
     pub fn has_piece(&self, piece: u32) -> bool {
         self.bitfield.has_bit(piece as usize).unwrap()
     }
 
-    pub fn missing_blocks(&self, piece: u32) -> impl Iterator<Item = u32> + '_ {
+    pub fn missing_blocks(
+        &self,
+        piece: u32,
+    ) -> impl Iterator<Item = BlockRange> + '_ {
         self.pieces[piece as usize]
             .blocks
             .iter()
             .enumerate()
-            .filter(|(_, b)| matches!(b, BlockState::Missing))
-            .map(|(i, _)| i as u32)
+            .filter(|(_, b)| match b {
+                BlockState::Missing => true,
+                BlockState::Requested { at } => {
+                    at.elapsed() >= Duration::from_secs(60)
+                },
+                BlockState::Received { .. } => false,
+            })
+            .map(|(i, _)| BlockRange {
+                begin: i as u32 * BLOCK_SIZE,
+                length: BLOCK_SIZE,
+            })
     }
 
-    // pub async fn write_block(
-    //     &mut self,
-    //     piece: u32,
-    //     offset: u32,
-    //     data: &[u8],
-    // ) -> std::io::Result<WriteResult> {
-    //     return Ok();
-    // let p = &mut self.pieces[piece as usize];
-    // let idx = Self::block_index(offset);
+    pub async fn write_block(
+        &mut self,
+        piece: u32,
+        offset: u32,
+        data: &[u8],
+    ) -> Result<WriteResult, Error> {
+        let p = &mut self.pieces[piece as usize];
+        let idx = (offset / BLOCK_SIZE) as usize;
 
-    // // Ignore duplicates safely
-    // if matches!(p.blocks[idx], BlockState::Received) {
-    //     return Ok(WriteResult::BlockStored);
-    // }
+        // Ignore duplicates safely
+        if matches!(p.blocks[idx], BlockState::Received { buffer: _ }) {
+            return Ok(WriteResult::BlockStored);
+        }
 
-    // // Copy into piece buffer
-    // let start = offset as usize;
-    // let end = start + data.len();
-    // p.buffer[start..end].copy_from_slice(data);
+        p.blocks[idx] = BlockState::Received { buffer: data.to_vec() };
+        p.received += 1;
 
-    // p.blocks[idx] = BlockState::Received;
-    // p.received += 1;
+        if p.received != p.blocks.len() {
+            return Ok(WriteResult::BlockStored);
+        }
 
-    // if p.received != p.blocks.len() {
-    //     return Ok(WriteResult::BlockStored);
-    // }
+        let buffer = p.buffer();
+        let expected = self.metainfo.pieces[piece as usize];
+        let verified = Self::verify_piece_hash(expected, &buffer);
+        if !verified {
+            p.reset();
+            return Ok(WriteResult::PieceInvalid(piece));
+        }
 
-    // // Piece complete → verify hash
-    // let expected = self.metainfo.pieces[piece as usize];
-    // let digest = Sha1::digest(p.buffer.clone());
-    // let mut actual = [0u8; 20];
-    // actual.copy_from_slice(&digest);
+        // Write buffer to disk
+        let piece_offset = piece as u64 * self.metainfo.piece_length;
+        let piece_end = piece_offset + buffer.len() as u64;
 
-    // if actual != expected {
-    //     // reset
-    //     for b in &mut p.blocks {
-    //         *b = BlockState::Missing;
-    //     }
-    //     p.received = 0;
-    //     return Ok(WriteResult::PieceInvalid(piece));
-    // }
+        for file in &mut self.files {
+            let file_start = file.offset;
+            let file_end = file.offset + file.length;
 
-    // // Write to disk
-    // let global_offset = piece as u64 * self.metainfo.piece_length;
+            if piece_offset >= file_end || piece_end <= file_start {
+                continue;
+            }
 
-    // self.file.seek(std::io::SeekFrom::Start(global_offset)).await?;
-    // self.file.write_all(&p.buffer).await?;
+            let write_start = piece_offset.max(file_start);
+            let write_end = piece_end.min(file_end);
 
-    // let _ = self.bitfield.set_bit(piece as usize);
+            let buffer_start = (write_start - piece_offset) as usize;
+            let len = (write_end - write_start) as usize;
 
-    // Ok(WriteResult::PieceCompleted(piece))
-    // }
+            file.file
+                .seek(std::io::SeekFrom::Start(write_start - file_start))
+                .await?;
+            file.file
+                .write_all(&buffer[buffer_start..buffer_start + len])
+                .await?;
+        }
+
+        let _ = self.bitfield.set_bit(piece as usize);
+
+        Ok(WriteResult::PieceCompleted(piece))
+    }
+
+    fn verify_piece_hash(expected: [u8; 20], buffer: &Vec<u8>) -> bool {
+        let digest = Sha1::digest(&buffer);
+        let mut actual = [0u8; 20];
+        actual.copy_from_slice(&digest);
+        actual == expected
+    }
 }

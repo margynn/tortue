@@ -22,12 +22,10 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let node = Node { id: local_peer_id, port: 1234 };
     let mut sessions = Vec::new();
 
-    return Ok(());
-
     let (tx, rx) = mpsc::channel::<Vec<PeerAddr>>(1024);
 
     // Start all trackers sessions concurrently
-    for endpoint in metainfo.announce {
+    for endpoint in &metainfo.announce {
         let session = match TrackerSession::new(
             &endpoint,
             torrent_info_hash,

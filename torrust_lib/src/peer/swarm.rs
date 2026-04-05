@@ -162,8 +162,8 @@ impl Swarm {
                                         let _ = tx.try_send(PeerCommand::Send(
                                             Message::Request {
                                                 index: *piece_index,
-                                                begin: block * 16 * 1024,
-                                                length: 16 * 1024,
+                                                begin: block.begin,
+                                                length: block.length,
                                             },
                                         ));
                                     });
