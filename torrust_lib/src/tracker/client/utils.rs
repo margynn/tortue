@@ -5,7 +5,7 @@ use crate::tracker::{Error, PeerAddr};
 pub(super) fn parse_compact_ipv4_peers(
     bytes: &[u8],
 ) -> Result<Vec<PeerAddr>, Error> {
-    if bytes.len() % 6 != 0 {
+    if !bytes.len().is_multiple_of(6) {
         return Err(Error::InvalidTrackerResponse(
             "compact ipv4 peers length must be multiple of 6".to_owned(),
         ));

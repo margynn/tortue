@@ -1,6 +1,7 @@
+use std::fs;
+
 use anyhow::Result;
 use clap::Parser;
-use std::fs;
 use torrust_lib::download;
 
 #[derive(Parser, Debug)]
@@ -12,6 +13,6 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let data = fs::read(&cli.path)?;
-    download(&data.as_ref()).await?;
+    download(data.as_ref()).await?;
     Ok(())
 }

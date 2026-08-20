@@ -76,7 +76,7 @@ impl<'a> IntoIterator for &'a Bitfield {
 
     fn into_iter(self) -> Self::IntoIter {
         BitfieldIter {
-            bitfield: &self.data.as_ref(),
+            bitfield: self.data.as_ref(),
             byte_idx: 0,
             bit_idx: 0,
         }

@@ -38,6 +38,7 @@ pub enum Error {
     #[error("tracker failure: {0}")]
     TrackerFailure(String),
 
+    #[allow(dead_code)]
     #[error("invalid peer id")]
     InvalidPeerId,
 

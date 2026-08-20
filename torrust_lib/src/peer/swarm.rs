@@ -40,6 +40,7 @@ pub enum PeerEvent {
 
 #[derive(Debug)]
 pub enum PeerCommand {
+    #[allow(dead_code)]
     Shutdown,
     Send(Message),
 }
@@ -145,10 +146,7 @@ impl Swarm {
                         }
                         // re-add
                         for i in &state.bitfield {
-                            let set = self
-                                .piece_to_peers
-                                .entry(i)
-                                .or_insert(HashSet::new());
+                            let set = self.piece_to_peers.entry(i).or_default();
                             set.insert(p);
                         }
                     },

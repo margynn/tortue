@@ -7,6 +7,7 @@ use tokio::time::sleep_until;
 use super::{Error, PeerAddr, PeerId, TrackerClient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AnnounceEvent {
     Started,
     Completed,
@@ -120,16 +121,19 @@ impl TrackerSession {
         });
     }
 
+    #[allow(dead_code)]
     pub fn peers(&self) -> Vec<PeerAddr> {
         self.state.read().unwrap().peers.clone()
     }
 
+    #[allow(dead_code)]
     pub fn add_downloaded(&self, n: u64) {
         let mut s = self.state.write().unwrap();
         s.downloaded += n;
         s.left = s.left.saturating_sub(n);
     }
 
+    #[allow(dead_code)]
     pub fn add_uploaded(&self, n: u64) {
         let mut s = self.state.write().unwrap();
         s.uploaded += n;

@@ -2,6 +2,7 @@ use crate::peer::bitfield;
 use crate::peer::client::Message;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PeerState {
     pub am_choking: bool,
     pub am_interested: bool,
@@ -11,6 +12,7 @@ pub struct PeerState {
 }
 
 impl PeerState {
+    #[allow(dead_code)]
     pub fn new(pieces: usize) -> Self {
         Self {
             am_choking: true,
@@ -21,6 +23,7 @@ impl PeerState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn reset(&mut self, pieces: usize) {
         *self = Self::new(pieces);
     }

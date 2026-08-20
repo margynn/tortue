@@ -1,10 +1,10 @@
+mod addr;
 pub mod bitfield;
 mod client;
-mod peer;
 mod state;
 mod swarm;
 
-pub use peer::{PeerAddr, PeerId};
+pub use addr::{PeerAddr, PeerId};
 pub use swarm::Swarm;
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +34,7 @@ pub enum Error {
     InvalidMessage,
 }
 
+#[allow(dead_code)]
 pub enum PeerMessage {
     // move to wire
     KeepAlive,

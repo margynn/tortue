@@ -50,6 +50,7 @@ impl Piece {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum WriteResult {
     BlockStored,
     PieceCompleted(u32),
@@ -87,7 +88,7 @@ impl PieceManager {
             } else {
                 metainfo.piece_length
             };
-            let blocks = (piece_length as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let blocks = (piece_length as u32).div_ceil(BLOCK_SIZE);
             pieces.push(Piece {
                 blocks: vec![BlockState::Missing; blocks as usize],
                 received: 0,
@@ -118,6 +119,7 @@ impl PieceManager {
                 }
                 let file = OpenOptions::new()
                     .create(true)
+                    .truncate(true)
                     .read(true)
                     .write(true)
                     .open(&base)
@@ -137,6 +139,7 @@ impl PieceManager {
                     }
                     let file = OpenOptions::new()
                         .create(true)
+                        .truncate(true)
                         .read(true)
                         .write(true)
                         .open(&file_path)
@@ -262,7 +265,7 @@ impl PieceManager {
     }
 
     fn verify_piece_hash(expected: [u8; 20], buffer: &Vec<u8>) -> bool {
-        let digest = Sha1::digest(&buffer);
+        let digest = Sha1::digest(buffer);
         let mut actual = [0u8; 20];
         actual.copy_from_slice(&digest);
         actual == expected

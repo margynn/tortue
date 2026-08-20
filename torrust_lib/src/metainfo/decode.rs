@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use sha1::{Digest, Sha1};
 
-use super::{Error, *};
+use super::{Error, File, Metainfo, Mode, SHA_LENGTH};
 use crate::bencode::Bencode;
 
 pub(super) fn decode(root: Bencode<'_>) -> Result<Metainfo, Error> {
@@ -13,14 +15,13 @@ pub(super) fn decode(root: Bencode<'_>) -> Result<Metainfo, Error> {
     announces.insert(announce);
     announces.extend(announce_list.into_iter().flatten());
 
-    let info = root.get(b"info").ok_or(Error::InvalidDictKey)?;
+    let info = root.get(b"info").map_err(|_| Error::InvalidDictKey)?;
     let hash = info_hash(info)?;
     let (name, piece_length, pieces, mode) = parse_info(info)?;
     let comment = root.get_utf8(b"comment").ok();
     let created_by = root.get_utf8(b"created by").ok();
     let created_at = root.get_int(b"creation date").ok();
-    let url_list = {
-        let list = root.get_list(b"url-list")?;
+    let url_list = root.get_list(b"url-list").ok().and_then(|list| {
         let v: Vec<String> = list
             .iter()
             .filter_map(|item| match item {
@@ -30,9 +31,8 @@ pub(super) fn decode(root: Bencode<'_>) -> Result<Metainfo, Error> {
                 _ => None,
             })
             .collect();
-
         (!v.is_empty()).then_some(v)
-    };
+    });
 
     Ok(Metainfo {
         announce: announces.into_iter().collect(),
@@ -48,6 +48,7 @@ pub(super) fn decode(root: Bencode<'_>) -> Result<Metainfo, Error> {
     })
 }
 
+#[allow(clippy::type_complexity)]
 fn parse_info(
     info: &Bencode,
 ) -> Result<(String, u64, Vec<[u8; SHA_LENGTH]>, Mode), Error> {
@@ -56,19 +57,19 @@ fn parse_info(
     let pieces = parse_pieces(info.get_bytes(b"pieces")?)?;
 
     let mode = match info.get(b"length") {
-        Some(Bencode::Int(length)) => {
+        Ok(Bencode::Int(length)) => {
             let length = to_u64(*length)?;
             Mode::Single { length }
         },
-        Some(_) => return Err(Error::InvalidDictKey),
-        None => parse_multi_file(info)?,
+        Ok(_) => return Err(Error::InvalidDictKey),
+        Err(_) => parse_multi_file(info)?,
     };
 
     Ok((name, piece_length, pieces, mode))
 }
 
 fn info_hash(info: &Bencode) -> Result<[u8; 20], Error> {
-    let encoded = info.encode()?;
+    let encoded = info.encode();
     let digest = Sha1::digest(encoded);
 
     let mut hash = [0u8; 20];
@@ -99,7 +100,7 @@ fn parse_announce_list(tiers: &[Bencode]) -> Vec<Vec<String>> {
 }
 
 fn parse_pieces(data: &[u8]) -> Result<Vec<[u8; SHA_LENGTH]>, Error> {
-    if data.len() % SHA_LENGTH != 0 {
+    if !data.len().is_multiple_of(SHA_LENGTH) {
         return Err(Error::InvalidDictKey);
     }
 

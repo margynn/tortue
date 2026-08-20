@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::bencode::Bencode;
+use super::Bencode;
 
 pub(super) fn encode_into(buf: &mut Vec<u8>, value: &Bencode) {
     match value {
@@ -25,7 +25,7 @@ fn encode_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(bytes);
 }
 
-fn encode_list(buf: &mut Vec<u8>, items: &Vec<Bencode>) {
+fn encode_list(buf: &mut Vec<u8>, items: &[Bencode]) {
     buf.push(b'l');
     for item in items {
         encode_into(buf, item);
@@ -93,7 +93,7 @@ mod tests {
         entries.insert(b"name".as_slice(), Bencode::Bytes(b"John"));
         entries.insert(b"age".as_slice(), Bencode::Int(30));
         encode_dict(&mut buf, &entries);
-        assert_eq!(buf, b"d4:name4:John3:agei30ee");
+        assert_eq!(buf, b"d3:agei30e4:name4:Johne");
     }
 
     #[test]

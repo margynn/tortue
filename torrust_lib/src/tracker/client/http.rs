@@ -4,10 +4,10 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use reqwest::Client;
 use url::Url;
 
-use crate::bencode::{Bencode, decode};
+use crate::bencode::Bencode;
 use crate::tracker::{AnnounceRequest, Error, PeerAddr, TrackerResponse};
 
-const TRACKER_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC;
+const TRACKER_ENCODE_SET: &AsciiSet = NON_ALPHANUMERIC;
 
 pub(super) async fn announce(
     client: &Client,
@@ -24,7 +24,7 @@ pub(super) async fn announce(
         .bytes()
         .await
         .map_err(|e| Error::HttpRequest(e.to_string()))?;
-    let decoded = decode(&bytes)?;
+    let decoded = Bencode::decode(&bytes)?;
 
     if let Ok(reason) = decoded.get_bytes(b"failure reason") {
         return Err(Error::TrackerFailure(

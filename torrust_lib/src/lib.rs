@@ -15,7 +15,7 @@ use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
-    let metainfo = metainfo::decode(&torrent_file)?;
+    let metainfo = metainfo::decode(torrent_file)?;
     let torrent_info_hash = metainfo.hash;
     let content_size = metainfo.size();
     let local_peer_id = PeerId::generate("TR", "0.1.0");
@@ -27,7 +27,7 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     // Start all trackers sessions concurrently
     for endpoint in &metainfo.announce {
         let session = match TrackerSession::new(
-            &endpoint,
+            endpoint,
             torrent_info_hash,
             node,
             content_size,

@@ -1,7 +1,5 @@
 mod decode;
 
-use std::collections::HashSet;
-
 const SHA_LENGTH: usize = 20;
 
 #[derive(Debug, thiserror::Error)]
@@ -17,12 +15,12 @@ pub enum Error {
 }
 
 pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
-    let root = crate::bencode::decode(data)?;
-    println!("{}", root);
+    let root = crate::bencode::Bencode::decode(data)?;
     decode::decode(root)
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Metainfo {
     pub announce: Vec<String>,
     pub comment: Option<String>,

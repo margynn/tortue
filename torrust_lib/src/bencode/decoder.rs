@@ -1,34 +1,10 @@
+use std::collections::BTreeMap;
+
 use super::{Bencode, Error, Result};
 
 pub(super) fn decode(data: &[u8]) -> Result<Bencode<'_>> {
     Decoder::new(data).parse()
 }
-
-struct Cursor<'a> {
-    input: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn peek(&self) -> Result<u8> {
-        todo!()
-    }
-    fn next(&mut self) -> Result<u8> {
-        todo!()
-    }
-    fn expect(&mut self, byte: u8) -> Result<()> {
-        todo!()
-    }
-    fn take_while<F>(&mut self, f: F) -> &'a [u8] {
-        todo!()
-    }
-}
-
-// fn parse_int(cursor: &mut Cursor) -> Result<i64>;
-// fn parse_bytes(cursor: &mut Cursor) -> Result<&[u8]>;
-// fn parse_list(cursor: &mut Cursor) -> Result<Vec<Bencode>>;
-// fn parse_dict(cursor: &mut Cursor) -> Result<...>;
-// fn parse(cursor: &mut Cursor) -> Result<Bencode>
 
 struct Decoder<'a> {
     input: &'a [u8],
@@ -116,8 +92,9 @@ impl<'a> Decoder<'a> {
 
     fn parse_len(&mut self) -> Result<usize> {
         let start: usize = self.position;
-        while self.peek_byte()? != b':' {
+        loop {
             match self.peek_byte()? {
+                b':' => break,
                 b'0'..=b'9' => self.position += 1,
                 _ => return Err(Error::InvalidStringLength),
             }
@@ -143,12 +120,12 @@ impl<'a> Decoder<'a> {
 
     fn parse_dict(&mut self) -> Result<Bencode<'a>> {
         self.consume_byte(b'd')?;
-        let mut dict = Vec::new();
+        let mut dict = BTreeMap::new();
         while self.peek_byte()? != b'e' {
             let key =
                 self.parse_byte_string().map_err(|_| Error::InvalidDictKey)?;
             let value = self.parse()?;
-            dict.push((key, value));
+            dict.insert(key, value);
         }
         self.consume_byte(b'e')?;
         Ok(Bencode::Dict(dict))
@@ -157,6 +134,8 @@ impl<'a> Decoder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -373,7 +352,7 @@ mod tests {
         let data = b"de";
         let mut decoder = Decoder::new(data);
         let v = decoder.parse().unwrap();
-        assert_eq!(v, Bencode::Dict(vec![]));
+        assert_eq!(v, Bencode::Dict(BTreeMap::new()));
     }
 
     #[test]
@@ -383,7 +362,10 @@ mod tests {
         let v = decoder.parse().unwrap();
         assert_eq!(
             v,
-            Bencode::Dict(vec![(b"cow".as_slice(), Bencode::Bytes(b"moo")),])
+            Bencode::Dict(BTreeMap::from([(
+                b"cow".as_slice(),
+                Bencode::Bytes(b"moo")
+            )]))
         );
     }
 
@@ -394,10 +376,10 @@ mod tests {
         let v = decoder.parse().unwrap();
         assert_eq!(
             v,
-            Bencode::Dict(vec![
+            Bencode::Dict(BTreeMap::from([
                 (b"cow".as_slice(), Bencode::Bytes(b"moo")),
                 (b"spam".as_slice(), Bencode::Bytes(b"eggs")),
-            ])
+            ]))
         );
     }
 
@@ -408,10 +390,10 @@ mod tests {
         let v = decoder.parse().unwrap();
         assert_eq!(
             v,
-            Bencode::Dict(vec![
+            Bencode::Dict(BTreeMap::from([
                 (b"foo".as_slice(), Bencode::Int(42)),
                 (b"bar".as_slice(), Bencode::Int(-7)),
-            ])
+            ]))
         );
     }
 
@@ -422,14 +404,14 @@ mod tests {
         let v = decoder.parse().unwrap();
         assert_eq!(
             v,
-            Bencode::Dict(vec![(
+            Bencode::Dict(BTreeMap::from([(
                 b"list".as_slice(),
                 Bencode::List(vec![
                     Bencode::Int(1),
                     Bencode::Int(2),
                     Bencode::Int(3),
                 ]),
-            ),])
+            )]))
         );
     }
 
@@ -440,10 +422,13 @@ mod tests {
         let v = decoder.parse().unwrap();
         assert_eq!(
             v,
-            Bencode::Dict(vec![(
+            Bencode::Dict(BTreeMap::from([(
                 b"foo".as_slice(),
-                Bencode::Dict(vec![(b"bar".as_slice(), Bencode::Int(1)),]),
-            ),])
+                Bencode::Dict(BTreeMap::from([(
+                    b"bar".as_slice(),
+                    Bencode::Int(1)
+                )])),
+            )]))
         );
     }
 
@@ -454,13 +439,19 @@ mod tests {
         let first = decoder.parse().unwrap();
         assert_eq!(
             first,
-            Bencode::Dict(vec![(b"foo".as_slice(), Bencode::Bytes(b"bar")),])
+            Bencode::Dict(BTreeMap::from([(
+                b"foo".as_slice(),
+                Bencode::Bytes(b"bar")
+            )]))
         );
 
         let second = decoder.parse().unwrap();
         assert_eq!(
             second,
-            Bencode::Dict(vec![(b"baz".as_slice(), Bencode::Int(1)),])
+            Bencode::Dict(BTreeMap::from([(
+                b"baz".as_slice(),
+                Bencode::Int(1)
+            )]))
         );
     }
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::bencode::encoder::encode_into;
-use crate::bencode::{Error, Result, decoder};
+use super::encoder::encode_into;
+use super::{Error, Result, decoder};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bencode<'a> {
@@ -38,22 +38,22 @@ impl<'a> Bencode<'a> {
     }
 
     pub fn get_bytes(&self, key: &[u8]) -> Result<&'a [u8]> {
-        match self.get(key) {
-            Ok(Bencode::Bytes(bytes)) => Ok(bytes),
+        match self.get(key)? {
+            Bencode::Bytes(bytes) => Ok(bytes),
             _ => Err(Error::TypeMismatch),
         }
     }
 
     pub fn get_int(&self, key: &[u8]) -> Result<i64> {
-        match self.get(key) {
-            Ok(Bencode::Int(n)) => Ok(*n),
+        match self.get(key)? {
+            Bencode::Int(n) => Ok(*n),
             _ => Err(Error::TypeMismatch),
         }
     }
 
     pub fn get_list(&self, key: &[u8]) -> Result<&[Bencode<'a>]> {
-        match self.get(key) {
-            Ok(Bencode::List(list)) => Ok(list.as_slice()),
+        match self.get(key)? {
+            Bencode::List(list) => Ok(list.as_slice()),
             _ => Err(Error::TypeMismatch),
         }
     }
@@ -61,39 +61,41 @@ impl<'a> Bencode<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Bencode;
+    use std::collections::BTreeMap;
+
+    use super::{Bencode, Error};
 
     #[test]
     fn test_get_existing_key() {
-        let dict = Bencode::Dict(vec![
+        let dict = Bencode::Dict(BTreeMap::from([
             (b"foo".as_ref(), Bencode::Int(42)),
             (b"bar".as_ref(), Bencode::Bytes(b"hello")),
-        ]);
-        assert_eq!(dict.get(b"foo"), Some(&Bencode::Int(42)));
-        assert_eq!(dict.get(b"bar"), Some(&Bencode::Bytes(b"hello")));
+        ]));
+        assert_eq!(dict.get(b"foo"), Ok(&Bencode::Int(42)));
+        assert_eq!(dict.get(b"bar"), Ok(&Bencode::Bytes(b"hello")));
     }
 
     #[test]
     fn test_get_nonexistent_key() {
-        let dict = Bencode::Dict(vec![
+        let dict = Bencode::Dict(BTreeMap::from([
             (b"foo".as_ref(), Bencode::Int(42)),
             (b"bar".as_ref(), Bencode::Bytes(b"hello")),
-        ]);
-        assert_eq!(dict.get(b"baz"), None);
+        ]));
+        assert_eq!(dict.get(b"baz"), Err(Error::KeyNotFound));
     }
 
     #[test]
     fn test_get_on_non_dict() {
         let integer = Bencode::Int(42);
         let list = Bencode::List(vec![Bencode::Int(1)]);
-        assert_eq!(integer.get(b"foo"), None);
-        assert_eq!(list.get(b"foo"), None);
+        assert_eq!(integer.get(b"foo"), Err(Error::TypeMismatch));
+        assert_eq!(list.get(b"foo"), Err(Error::TypeMismatch));
     }
 
     #[test]
     fn test_get_empty_dict() {
-        let empty_dict = Bencode::Dict(vec![]);
-        assert_eq!(empty_dict.get(b"foo"), None);
+        let empty_dict = Bencode::Dict(BTreeMap::new());
+        assert_eq!(empty_dict.get(b"foo"), Err(Error::KeyNotFound));
     }
 
     #[test]
@@ -107,14 +109,14 @@ mod tests {
     fn test_get_bytes_missing_key() {
         let bencode = super::Bencode::decode(b"d4:test5:valueee").unwrap();
         let err = bencode.get_bytes(b"missing").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+        assert!(matches!(err, super::Error::KeyNotFound));
     }
 
     #[test]
     fn test_get_bytes_wrong_type() {
         let bencode = super::Bencode::decode(b"d4:testi42eee").unwrap();
         let err = bencode.get_bytes(b"test").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+        assert!(matches!(err, super::Error::TypeMismatch));
     }
 
     #[test]
@@ -128,14 +130,14 @@ mod tests {
     fn test_get_int_missing_key() {
         let bencode = super::Bencode::decode(b"d4:testi42eee").unwrap();
         let err = bencode.get_int(b"missing").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+        assert!(matches!(err, super::Error::KeyNotFound));
     }
 
     #[test]
     fn test_get_int_wrong_type() {
         let bencode = super::Bencode::decode(b"d4:test5:valueee").unwrap();
         let err = bencode.get_int(b"test").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+        assert!(matches!(err, super::Error::TypeMismatch));
     }
 
     #[test]
@@ -149,13 +151,13 @@ mod tests {
     fn test_get_list_missing_key() {
         let bencode = super::Bencode::decode(b"d4:testl5:valueee").unwrap();
         let err = bencode.get_list(b"missing").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+        assert!(matches!(err, super::Error::KeyNotFound));
     }
 
     #[test]
     fn test_get_list_wrong_type() {
         let bencode = super::Bencode::decode(b"d4:test5:valueee").unwrap();
         let err = bencode.get_list(b"test").unwrap_err();
-        assert!(matches!(err, super::Error::InvalidDictKey));
+        assert!(matches!(err, super::Error::TypeMismatch));
     }
 }
