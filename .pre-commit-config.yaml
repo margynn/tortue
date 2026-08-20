@@ -5,6 +5,8 @@
 # Run manually:
 #   pre-commit run --all-files
 
+default_stages: [pre-commit]
+
 repos:
   - repo: local
     hooks:
@@ -17,6 +19,7 @@ repos:
         types: [rust]
         args: ["--all"]
         pass_filenames: false
+        stages: [pre-commit]
 
       - id: clippy
         name: cargo clippy
@@ -29,6 +32,7 @@ repos:
           - "-D"
           - "warnings"
         pass_filenames: false
+        stages: [pre-commit]
 
       # ── pre-push ────────────────────────────────────────
 
