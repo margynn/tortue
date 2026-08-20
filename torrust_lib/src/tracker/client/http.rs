@@ -77,7 +77,7 @@ fn build_announce_url(base_url: &Url, req: &AnnounceRequest) -> String {
     out.push_str(sep);
     out.push_str("info_hash=");
     out.push_str(
-        &percent_encode(&req.info_hash, TRACKER_ENCODE_SET).to_string(),
+        &percent_encode(req.info_hash.as_ref(), TRACKER_ENCODE_SET).to_string(),
     );
     out.push_str("&peer_id=");
     out.push_str(

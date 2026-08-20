@@ -1,7 +1,7 @@
 mod bencode;
-mod metainfo;
 mod peer;
 mod pieces;
+mod torrent;
 mod tracker;
 
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
-    let metainfo = metainfo::decode(torrent_file)?;
+    let metainfo = torrent::decode(torrent_file)?;
     let torrent_info_hash = metainfo.hash;
     let content_size = metainfo.size();
     let local_peer_id = PeerId::generate("TR", "0.1.0");

@@ -5,8 +5,8 @@ use sha1::{Digest, Sha1};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-use crate::metainfo::{Metainfo, Mode};
 use crate::peer::bitfield::Bitfield;
+use crate::torrent::{Metainfo, Mode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -1,6 +1,23 @@
-mod decode;
+mod parse;
 
-const SHA_LENGTH: usize = 20;
+const PIECE_HASH_LEN: usize = 20;
+
+pub type PieceHash = [u8; PIECE_HASH_LEN];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InfoHash([u8; PIECE_HASH_LEN]);
+
+impl From<[u8; PIECE_HASH_LEN]> for InfoHash {
+    fn from(bytes: [u8; PIECE_HASH_LEN]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for InfoHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -8,19 +25,24 @@ pub enum Error {
     Bencode(#[from] crate::bencode::Error),
 
     #[error("invalid UTF-8 string")]
-    InvalidUtf8String,
+    InvalidUtf8,
 
-    #[error("invalid dictionary key")]
-    InvalidDictKey,
+    #[error("unexpected bencode type")]
+    UnexpectedType,
+
+    #[error("length value is negative")]
+    NegativeLength,
+
+    #[error("pieces data length is not a multiple of {PIECE_HASH_LEN}")]
+    InvalidPiecesLength,
 }
 
 pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
     let root = crate::bencode::Bencode::decode(data)?;
-    decode::decode(root)
+    parse::parse(root)
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Metainfo {
     pub announce: Vec<String>,
     pub comment: Option<String>,
@@ -28,9 +50,9 @@ pub struct Metainfo {
     pub created_at: Option<i64>,
     pub url_list: Option<Vec<String>>,
     pub name: String,
-    pub hash: [u8; SHA_LENGTH],
+    pub hash: InfoHash,
     pub piece_length: u64,
-    pub pieces: Vec<[u8; SHA_LENGTH]>,
+    pub pieces: Vec<PieceHash>,
     pub mode: Mode,
 }
 

@@ -6,12 +6,12 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 
 use super::client::PeerClient;
-use crate::metainfo::Metainfo;
 use crate::peer::PeerAddr;
 use crate::peer::bitfield::Bitfield;
 use crate::peer::client::Message;
 use crate::peer::state::PeerState;
 use crate::pieces::PieceManager;
+use crate::torrent::Metainfo;
 use crate::tracker::session::Node;
 
 pub struct Swarm {

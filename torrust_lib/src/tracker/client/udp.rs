@@ -95,7 +95,7 @@ fn build_announce_request(
     buf[0..8].copy_from_slice(&connection_id.to_be_bytes());
     buf[8..12].copy_from_slice(&ACTION_ANNOUNCE.to_be_bytes());
     buf[12..16].copy_from_slice(&tx_id.to_be_bytes());
-    buf[16..36].copy_from_slice(&req.info_hash);
+    buf[16..36].copy_from_slice(req.info_hash.as_ref());
     buf[36..56].copy_from_slice(req.peer_id.as_ref());
     buf[56..64].copy_from_slice(&req.stats.downloaded.to_be_bytes());
     buf[64..72].copy_from_slice(&req.stats.left.to_be_bytes());

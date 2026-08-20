@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
 use super::{Error, PeerAddr, PeerId};
-use crate::metainfo::Metainfo;
 use crate::peer::swarm::{PeerCommand, PeerEvent};
+use crate::torrent::{InfoHash, Metainfo};
 
 #[derive(Debug)]
 pub struct PeerClient {
@@ -393,7 +393,7 @@ impl PeerClient {
 }
 
 struct Handshake {
-    info_hash: [u8; 20],
+    info_hash: InfoHash,
     peer_id: PeerId,
 }
 
@@ -402,7 +402,7 @@ impl Handshake {
     const HANDSHAKE_LEN: usize = 68;
     const RESERVED_LEN: usize = 8;
 
-    fn new(info_hash: [u8; 20], peer_id: PeerId) -> Self {
+    fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
         Self { info_hash, peer_id }
     }
 
@@ -411,7 +411,7 @@ impl Handshake {
         out[0] = Self::PSTR.len() as u8;
         out[1..20].copy_from_slice(Self::PSTR);
         out[20..28].copy_from_slice(&[0; Self::RESERVED_LEN]);
-        out[28..48].copy_from_slice(&self.info_hash);
+        out[28..48].copy_from_slice(self.info_hash.as_ref());
         out[48..68].copy_from_slice(self.peer_id.as_ref());
         out
     }
@@ -431,14 +431,14 @@ impl Handshake {
             return Err(Error::InvalidHandshake("invalid protocol string"));
         }
 
-        let mut info_hash = [0u8; 20];
-        info_hash.copy_from_slice(&buf[28..48]);
+        let mut hash_bytes = [0u8; 20];
+        hash_bytes.copy_from_slice(&buf[28..48]);
 
         let mut peer_id_bytes = [0u8; 20];
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
         Ok(Self {
-            info_hash,
+            info_hash: InfoHash::from(hash_bytes),
             peer_id: PeerId::new(peer_id_bytes),
         })
     }

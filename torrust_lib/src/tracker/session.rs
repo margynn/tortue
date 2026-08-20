@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
 use super::{Error, PeerAddr, PeerId, TrackerClient};
+use crate::torrent::InfoHash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -44,7 +45,7 @@ pub struct SessionStats {
 
 #[derive(Debug, Clone)]
 pub struct AnnounceRequest {
-    pub info_hash: [u8; 20],
+    pub info_hash: InfoHash,
     pub peer_id: PeerId,
     pub port: u16,
     pub stats: SessionStats,
@@ -70,7 +71,7 @@ pub struct TrackerSession {
     client: TrackerClient,
     peers_tx: mpsc::Sender<Vec<PeerAddr>>,
     node: Node,
-    torrent_info_hash: [u8; 20],
+    torrent_info_hash: InfoHash,
     state: Arc<RwLock<State>>,
 }
 
@@ -88,7 +89,7 @@ struct State {
 impl TrackerSession {
     pub fn new(
         endpoint: &str,
-        torrent_info_hash: [u8; 20],
+        torrent_info_hash: InfoHash,
         node: Node,
         content_size: u64,
         peers_tx: mpsc::Sender<Vec<PeerAddr>>,
