@@ -2,8 +2,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use sha1::{Digest, Sha1};
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::errors::Result;
 use super::piece::{BLOCK_SIZE, BlockState, Piece};

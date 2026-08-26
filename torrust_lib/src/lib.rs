@@ -1,7 +1,5 @@
-mod bencode;
+mod domain;
 mod peer;
-mod pieces;
-mod torrent;
 mod tracker;
 
 use std::path::PathBuf;
@@ -9,13 +7,13 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::domain::pieces::PieceManager;
 use crate::peer::PeerAddr;
-use crate::pieces::PieceManager;
 use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
-    let metainfo = torrent::decode(torrent_file)?;
+    let metainfo = domain::torrent::decode(torrent_file)?;
     let torrent_info_hash = metainfo.hash;
     let content_size = metainfo.size();
     let local_peer_id = PeerId::generate("TR", "0.1.0");
