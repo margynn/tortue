@@ -1,14 +1,13 @@
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
 use sha1::{Digest, Sha1};
 
+use super::super::torrent::Metainfo;
+use super::StorageCommand;
 use super::errors::Result;
-use super::piece::{BLOCK_SIZE, BlockState, Piece};
+use super::piece::{BLOCK_SIZE, Piece};
 use crate::peer::bitfield::Bitfield;
-use crate::torrent::{Metainfo, Mode};
 
 #[derive(Debug)]
+
 pub enum PieceEvent {
     BlockReceived,
     PieceCompleted { piece: u32, command: StorageCommand },
@@ -32,13 +31,11 @@ impl PieceManager {
 
         for (i, _) in metainfo.pieces.iter().enumerate() {
             let is_last = i == metainfo.pieces.len() - 1;
-
             let piece_length = if is_last {
                 metainfo.size() - metainfo.piece_length * i as u64
             } else {
                 metainfo.piece_length
             };
-
             pieces.push(Piece::new(piece_length as usize));
         }
 

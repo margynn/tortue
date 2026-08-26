@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use sha1::{Digest, Sha1};
 
+use super::super::bencode::Bencode;
 use super::{Error, File, InfoHash, Metainfo, Mode, PIECE_HASH_LEN, PieceHash};
-use crate::bencode::Bencode;
 
 pub(super) fn parse(root: Bencode<'_>) -> Result<Metainfo, Error> {
     let announce = parse_announces(&root)?;

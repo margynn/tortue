@@ -1,6 +1,7 @@
-mod parse;
+use super::Error;
+use crate::domain::bencode::Bencode;
 
-const PIECE_HASH_LEN: usize = 20;
+pub const PIECE_HASH_LEN: usize = 20;
 
 pub type PieceHash = [u8; PIECE_HASH_LEN];
 
@@ -19,27 +20,9 @@ impl AsRef<[u8]> for InfoHash {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("bencode parsing failed: {0}")]
-    Bencode(#[from] crate::bencode::Error),
-
-    #[error("invalid UTF-8 string")]
-    InvalidUtf8,
-
-    #[error("unexpected bencode type")]
-    UnexpectedType,
-
-    #[error("length value is negative")]
-    NegativeLength,
-
-    #[error("pieces data length is not a multiple of {PIECE_HASH_LEN}")]
-    InvalidPiecesLength,
-}
-
 pub fn decode(data: &[u8]) -> Result<Metainfo, Error> {
-    let root = crate::bencode::Bencode::decode(data)?;
-    parse::parse(root)
+    let root = Bencode::decode(data)?;
+    super::parse::parse(root)
 }
 
 #[derive(Debug, Clone)]
