@@ -67,7 +67,7 @@ pub enum State {
 }
 
 #[derive(Debug)]
-pub(crate) enum Input {
+pub enum Input {
     Shutdown,
     Send(Message),
     Connected { peer_id: PeerId, num_pieces: usize },
@@ -76,8 +76,8 @@ pub(crate) enum Input {
     Disconnected,
 }
 
-#[derive(Debug)]
-pub(crate) enum Output {
+#[derive(Debug, Clone)]
+pub enum Output {
     SendToPeer(Message),
     EmitConnected,
     EmitDisconnected,
@@ -86,7 +86,7 @@ pub(crate) enum Output {
     Stop,
 }
 
-pub(crate) struct PeerSession {
+pub struct PeerSession {
     address: SocketAddr,
     state: State,
 }
@@ -95,19 +95,18 @@ impl PeerSession {
     const RECONNECT_DELAY: Duration = Duration::from_secs(2);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
-    pub(crate) fn new(address: SocketAddr) -> (Self, Vec<Output>) {
-        let session = Self {
+    pub fn new(address: SocketAddr) -> Self {
+        Self {
             address,
             state: State::Disconnected { backoff: Self::RECONNECT_DELAY },
-        };
-        (session, vec![Output::ScheduleRetry(Duration::ZERO)])
+        }
     }
 
     pub fn state(&self) -> &State {
         &self.state
     }
 
-    pub(crate) fn step(&mut self, input: Input) -> Vec<Output> {
+    pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::Connected { num_pieces, .. } => {
                 self.on_connected(num_pieces)

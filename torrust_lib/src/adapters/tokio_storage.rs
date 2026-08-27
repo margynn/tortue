@@ -1,3 +1,13 @@
+use std::path::PathBuf;
+
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+use crate::domain::pieces::{Storage, StorageCommand};
+
+type Result<T> = std::io::Result<T>;
+use crate::domain::torrent::{Metainfo, Mode};
+
 struct OutputFile {
     file: File,
     length: u64,
@@ -107,10 +117,7 @@ impl TokioStorage {
 impl Storage for TokioStorage {
     type Error = std::io::Error;
 
-    async fn execute(
-        &mut self,
-        command: StorageCommand,
-    ) -> Result<(), Self::Error> {
+    async fn execute(&mut self, command: StorageCommand) -> Result<()> {
         match command {
             StorageCommand::Write { offset, data } => {
                 self.write(offset, &data).await

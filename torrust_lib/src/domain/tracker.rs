@@ -1,10 +1,10 @@
 mod client;
 mod session;
 
+use std::net::SocketAddr;
+
 pub(crate) use client::TrackerAnnouncer;
 pub(crate) use session::{Input, Output, TrackerSession};
-
-use std::net::SocketAddr;
 
 use super::peer::PeerId;
 use super::torrent::InfoHash;
@@ -19,7 +19,7 @@ pub struct AnnounceRequest {
     pub compact: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum AnnounceEvent {
     Started,
     Completed,

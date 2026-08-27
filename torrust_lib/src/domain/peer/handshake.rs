@@ -3,24 +3,24 @@ use rand::TryRng;
 use super::super::torrent::InfoHash;
 use super::{Error, Result};
 
-pub(crate) struct Handshake {
-    info_hash: InfoHash,
-    peer_id: PeerId,
+pub struct Handshake {
+    pub info_hash: InfoHash,
+    pub peer_id: PeerId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);
 
 impl Handshake {
+    pub const HANDSHAKE_LEN: usize = 68;
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
-    pub(crate) const HANDSHAKE_LEN: usize = 68;
     const RESERVED_LEN: usize = 8;
 
-    pub(crate) fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
+    pub fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
         Self { info_hash, peer_id }
     }
 
-    pub(crate) fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
+    pub fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
         let mut out = [0u8; Self::HANDSHAKE_LEN];
         out[0] = Self::PSTR.len() as u8;
         out[1..20].copy_from_slice(Self::PSTR);
