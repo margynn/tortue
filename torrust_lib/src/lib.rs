@@ -1,5 +1,4 @@
 mod domain;
-mod peer;
 mod tracker;
 
 use std::path::PathBuf;
@@ -8,7 +7,6 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::domain::pieces::PieceManager;
-use crate::peer::PeerAddr;
 use crate::tracker::session::Node;
 use crate::tracker::{PeerId, TrackerSession};
 
@@ -39,15 +37,15 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
         println!("tracker: {endpoint}");
     }
 
-    // Create piece manager
-    let path = PathBuf::from("./out");
-    let piece_manager = PieceManager::new(metainfo.clone(), path).await?;
+    // // Create piece manager
+    // let path = PathBuf::from("./out");
+    // let piece_manager = PieceManager::new(metainfo.clone(), path).await?;
 
-    // Send the sessions to the swarm
-    let swarm = peer::Swarm::new(metainfo.clone(), piece_manager, node, rx);
-    swarm.start();
-    println!("swarm started");
-    shutdown_signal().await;
+    // // Send the sessions to the swarm
+    // let swarm = peer::Swarm::new(metainfo.clone(), piece_manager, node, rx);
+    // swarm.start();
+    // println!("swarm started");
+    // shutdown_signal().await;
     Ok(())
 }
 

@@ -1,10 +1,8 @@
-mod address;
 mod handshake;
 mod message;
 mod session;
-mod state;
 
-pub use address::{PeerAddr, PeerId};
+pub use handshake::PeerId;
 pub use message::Message;
 
 pub type Result<T> = std::result::Result<T, Error>;

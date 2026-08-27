@@ -1,10 +1,15 @@
+use rand::TryRng;
+
 use super::super::torrent::InfoHash;
-use super::{Error, PeerId, Result};
+use super::{Error, Result};
 
 pub(crate) struct Handshake {
     info_hash: InfoHash,
     peer_id: PeerId,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerId([u8; 20]);
 
 impl Handshake {
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
@@ -50,5 +55,32 @@ impl Handshake {
             info_hash: InfoHash::from(hash_bytes),
             peer_id: PeerId::new(peer_id_bytes),
         })
+    }
+}
+
+impl PeerId {
+    pub fn new(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn generate(client: &str, version: &str) -> Self {
+        let mut id = [0u8; 20];
+
+        let prefix = format!("-{}{}-", client, version);
+        let prefix_bytes = prefix.as_bytes();
+
+        let n = prefix_bytes.len().min(20);
+        id[..n].copy_from_slice(&prefix_bytes[..n]);
+
+        let mut rng = rand::rng();
+        rng.try_fill_bytes(&mut id[n..]);
+
+        Self(id)
+    }
+}
+
+impl AsRef<[u8]> for PeerId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }

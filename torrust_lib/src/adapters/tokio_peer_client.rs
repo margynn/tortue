@@ -29,7 +29,7 @@ impl TokioPeerClient {
         mut cmd_rx: mpsc::Receiver<PeerCommand>,
         event_tx: mpsc::Sender<PeerEvent>,
     ) {
-        let (mut session, initial) = PeerSession::new(self.peer_addr);
+        let (mut session, initial) = PeerSession::new(self.peer_addr, self.metainfo.pieces.len());
         let mut conn: Option<TcpStream> = None;
         let mut retry_at = Instant::now();
 
