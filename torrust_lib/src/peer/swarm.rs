@@ -5,13 +5,12 @@ use rand::seq::IteratorRandom;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use super::client::PeerClient;
-use crate::peer::PeerAddr;
-use crate::peer::bitfield::Bitfield;
-use crate::peer::client::Message;
-use crate::peer::state::PeerState;
-use crate::pieces::PieceManager;
-use crate::torrent::Metainfo;
+use crate::adapters::tokio_peer_client::TokioPeerClient;
+use crate::domain::bitfield::Bitfield;
+use crate::domain::peer::{Message, PeerAddr, PeerCommand, PeerEvent, PeerId};
+use crate::domain::peer::state::PeerState;
+use crate::domain::pieces::PieceManager;
+use crate::domain::torrent::Metainfo;
 use crate::tracker::session::Node;
 
 pub struct Swarm {
@@ -29,20 +28,6 @@ pub struct Swarm {
 struct PeerRuntime {
     state: PeerState,
     in_flight: usize,
-}
-
-#[derive(Debug)]
-pub enum PeerEvent {
-    Connected(PeerAddr),
-    Disconnected(PeerAddr),
-    Message(PeerAddr, Message),
-}
-
-#[derive(Debug)]
-pub enum PeerCommand {
-    #[allow(dead_code)]
-    Shutdown,
-    Send(Message),
 }
 
 const MAX_IN_FLIGHT_PER_PEER: usize = 30;
@@ -257,7 +242,7 @@ impl Swarm {
         self.peers_cmd.insert(peer_addr, cmd_tx);
 
         tokio::spawn(async move {
-            PeerClient::new(peer_addr, client_id, metainfo)
+            TokioPeerClient::new(peer_addr, client_id, metainfo)
                 .run(cmd_rx, event_tx)
                 .await;
         });
