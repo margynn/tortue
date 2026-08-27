@@ -1,9 +1,9 @@
 use sha1::{Digest, Sha1};
 
+use super::super::bitfield::Bitfield;
 use super::super::torrent::Metainfo;
 use super::piece::{BLOCK_SIZE, Piece};
 use super::{Result, StorageCommand};
-use crate::peer::bitfield::Bitfield;
 
 #[derive(Debug)]
 pub enum PieceEvent {

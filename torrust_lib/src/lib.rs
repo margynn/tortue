@@ -1,5 +1,5 @@
+mod adapters;
 mod domain;
-mod tracker;
 
 use std::path::PathBuf;
 
@@ -7,8 +7,8 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::domain::pieces::PieceManager;
-use crate::tracker::session::Node;
-use crate::tracker::{PeerId, TrackerSession};
+// use crate::tracker::session::Node;
+// use crate::tracker::{PeerId, TrackerSession};
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let metainfo = domain::torrent::decode(torrent_file)?;

@@ -7,83 +7,12 @@ use tokio::time::sleep_until;
 use super::{Error, PeerAddr, PeerId, TrackerClient};
 use crate::torrent::InfoHash;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum AnnounceEvent {
-    Started,
-    Completed,
-    Stopped,
-    None,
-}
-
-impl AnnounceEvent {
-    pub fn as_http_str(self) -> Option<&'static str> {
-        match self {
-            Self::Started => Some("started"),
-            Self::Completed => Some("completed"),
-            Self::Stopped => Some("stopped"),
-            Self::None => None,
-        }
-    }
-
-    pub fn as_udp_code(self) -> u32 {
-        match self {
-            Self::None => 0,
-            Self::Completed => 1,
-            Self::Started => 2,
-            Self::Stopped => 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SessionStats {
-    pub uploaded: u64,
-    pub downloaded: u64,
-    pub left: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AnnounceRequest {
-    pub info_hash: InfoHash,
-    pub peer_id: PeerId,
-    pub port: u16,
-    pub stats: SessionStats,
-    pub event: AnnounceEvent,
-    pub compact: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct TrackerResponse {
-    pub interval: u32,
-    pub peers: Vec<PeerAddr>,
-    pub seeders: Option<u32>,
-    pub leechers: Option<u32>,
-}
-
-#[derive(Clone, Copy)]
-pub struct Node {
-    pub id: PeerId,
-    pub port: u16,
-}
-
 pub struct TrackerSession {
     client: TrackerClient,
     peers_tx: mpsc::Sender<Vec<PeerAddr>>,
     node: Node,
     torrent_info_hash: InfoHash,
     state: Arc<RwLock<State>>,
-}
-
-struct State {
-    peers: Vec<PeerAddr>,
-    next_announce: Instant,
-    stopped: bool,
-    seeders: u32,
-    leechers: u32,
-    uploaded: u64,
-    downloaded: u64,
-    left: u64,
 }
 
 impl TrackerSession {
