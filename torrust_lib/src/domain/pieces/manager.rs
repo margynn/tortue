@@ -1,13 +1,11 @@
 use sha1::{Digest, Sha1};
 
 use super::super::torrent::Metainfo;
-use super::StorageCommand;
-use super::errors::Result;
 use super::piece::{BLOCK_SIZE, Piece};
+use super::{Result, StorageCommand};
 use crate::peer::bitfield::Bitfield;
 
 #[derive(Debug)]
-
 pub enum PieceEvent {
     BlockReceived,
     PieceCompleted { piece: u32, command: StorageCommand },

@@ -1,4 +1,4 @@
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("piece index out of range")]
     PieceOutOfRange,
