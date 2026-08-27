@@ -1,5 +1,5 @@
-use crate::peer::bitfield;
-use crate::peer::client::Message;
+use super::super::bitfield;
+use super::message::Message;
 
 #[derive(Debug)]
 #[allow(dead_code)]

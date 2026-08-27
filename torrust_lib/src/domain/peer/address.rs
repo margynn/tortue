@@ -22,7 +22,6 @@ impl PeerId {
         let n = prefix_bytes.len().min(20);
         id[..n].copy_from_slice(&prefix_bytes[..n]);
 
-        // new API in rand 0.9
         let mut rng = rand::rng();
         rng.try_fill_bytes(&mut id[n..]);
 

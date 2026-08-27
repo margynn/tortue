@@ -1,4 +1,10 @@
-use super::Error;
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum Error {
+    #[error("piece index out of range")]
+    PieceOutOfRange,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 const BITS_PER_BYTE: usize = 8;
 
@@ -15,7 +21,7 @@ impl Bitfield {
         Self { data, pieces }
     }
 
-    pub fn set_bit(&mut self, bit: usize) -> Result<(), Error> {
+    pub fn set_bit(&mut self, bit: usize) -> Result<()> {
         self.check_bit(bit)?;
         let index = bit / BITS_PER_BYTE;
         let offset = bit % BITS_PER_BYTE;
@@ -24,7 +30,7 @@ impl Bitfield {
         Ok(())
     }
 
-    pub fn extend_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
+    pub fn extend_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         if bytes.len() != self.data.len() {
             return Err(Error::PieceOutOfRange);
         }
@@ -34,7 +40,7 @@ impl Bitfield {
         Ok(())
     }
 
-    pub fn has_bit(&self, bit: usize) -> Result<bool, Error> {
+    pub fn has_bit(&self, bit: usize) -> Result<bool> {
         self.check_bit(bit)?;
         let index = bit / BITS_PER_BYTE;
         let offset = bit % BITS_PER_BYTE;
@@ -42,7 +48,7 @@ impl Bitfield {
         Ok((self.data[index] & mask) != 0)
     }
 
-    fn check_bit(&self, bit: usize) -> Result<(), Error> {
+    fn check_bit(&self, bit: usize) -> Result<()> {
         if bit >= self.pieces {
             return Err(Error::PieceOutOfRange);
         }
@@ -61,11 +67,11 @@ impl Bitfield {
 }
 
 impl TryFrom<&[u8]> for Bitfield {
-    type Error = &'static str;
+    type Error = Error;
 
-    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+    fn try_from(bytes: &[u8]) -> Result<Self> {
         let mut bf = Self::new(bytes.len() * BITS_PER_BYTE);
-        bf.extend_bytes(bytes).map_err(|_| "failed to extend bytes")?;
+        bf.extend_bytes(bytes)?;
         Ok(bf)
     }
 }
