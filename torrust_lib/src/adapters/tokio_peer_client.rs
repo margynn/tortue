@@ -6,8 +6,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
 use crate::domain::peer::{
-    Handshake, Input, Message, Output, PeerAddr, PeerCommand, PeerEvent,
-    PeerId, PeerSession,
+    Handshake, Input, Message, Output, PeerAddr, PeerCommand, PeerEvent, PeerId, PeerSession,
 };
 use crate::domain::torrent::Metainfo;
 
@@ -21,11 +20,7 @@ pub struct TokioPeerClient {
 }
 
 impl TokioPeerClient {
-    pub fn new(
-        peer_addr: PeerAddr,
-        client_id: PeerId,
-        metainfo: Metainfo,
-    ) -> Self {
+    pub fn new(peer_addr: PeerAddr, client_id: PeerId, metainfo: Metainfo) -> Self {
         Self { client_id, peer_addr, metainfo }
     }
 
@@ -48,7 +43,7 @@ impl TokioPeerClient {
             let (input, drop_conn) = if conn.is_some() {
                 tokio::select! {
                     cmd = cmd_rx.recv() => {
-                        (Input::CommandReceived(cmd.unwrap_or(PeerCommand::Shutdown)), false)
+                        (cmd.map_or(Input::Shutdown, peer_command_to_input), false)
                     }
                     res = read_message(conn.as_mut().unwrap()) => match res {
                         Ok(msg) => (Input::MessageReceived(msg), false),
@@ -58,7 +53,7 @@ impl TokioPeerClient {
             } else {
                 tokio::select! {
                     cmd = cmd_rx.recv() => {
-                        (Input::CommandReceived(cmd.unwrap_or(PeerCommand::Shutdown)), false)
+                        (cmd.map_or(Input::Shutdown, peer_command_to_input), false)
                     }
                     _ = tokio::time::sleep_until(retry_at) => {
                         match self.connect().await {
@@ -79,13 +74,19 @@ impl TokioPeerClient {
             let mut should_stop = false;
             for out in session.step(input) {
                 match out {
-                    Output::Send(msg) => {
+                    Output::SendToPeer(msg) => {
                         if let Some(ref mut stream) = conn {
                             let _ = send(stream, msg).await;
                         }
                     },
-                    Output::EmitEvent(evt) => {
-                        let _ = event_tx.send(evt).await;
+                    Output::EmitConnected => {
+                        let _ = event_tx.send(PeerEvent::Connected(self.peer_addr)).await;
+                    },
+                    Output::EmitDisconnected => {
+                        let _ = event_tx.send(PeerEvent::Disconnected(self.peer_addr)).await;
+                    },
+                    Output::EmitMessage(msg) => {
+                        let _ = event_tx.send(PeerEvent::Message(self.peer_addr, msg)).await;
                     },
                     Output::ScheduleRetry(d) => {
                         retry_at = Instant::now() + d;
@@ -101,8 +102,7 @@ impl TokioPeerClient {
     }
 
     async fn connect(&self) -> Result<(TcpStream, PeerId), ()> {
-        let addr =
-            std::net::SocketAddr::new(self.peer_addr.0, self.peer_addr.1);
+        let addr = std::net::SocketAddr::new(self.peer_addr.0, self.peer_addr.1);
 
         let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
@@ -128,6 +128,13 @@ impl TokioPeerClient {
         }
 
         Ok((stream, inbound.peer_id))
+    }
+}
+
+fn peer_command_to_input(cmd: PeerCommand) -> Input {
+    match cmd {
+        PeerCommand::Shutdown => Input::Shutdown,
+        PeerCommand::Send(msg) => Input::Send(msg),
     }
 }
 

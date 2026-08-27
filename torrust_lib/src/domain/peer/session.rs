@@ -3,12 +3,6 @@ use std::time::Duration;
 use super::{Message, PeerAddr, PeerId};
 
 #[derive(Debug)]
-pub enum PeerCommand {
-    Shutdown,
-    Send(Message),
-}
-
-#[derive(Debug)]
 pub enum PeerEvent {
     Connected(PeerAddr),
     Disconnected(PeerAddr),
@@ -17,7 +11,8 @@ pub enum PeerEvent {
 
 #[derive(Debug)]
 pub(crate) enum Input {
-    CommandReceived(PeerCommand),
+    Shutdown,
+    Send(Message),
     Connected { peer_id: PeerId },
     ConnectionFailed,
     MessageReceived(Message),
@@ -26,8 +21,10 @@ pub(crate) enum Input {
 
 #[derive(Debug)]
 pub(crate) enum Output {
-    Send(Message),
-    EmitEvent(PeerEvent),
+    SendToPeer(Message),
+    EmitConnected,
+    EmitDisconnected,
+    EmitMessage(Message),
     ScheduleRetry(Duration),
     Stop,
 }
@@ -51,7 +48,6 @@ impl PeerSession {
             peer_addr,
             state: State::Disconnected { backoff: Self::RECONNECT_DELAY },
         };
-        // Connect immediately on start
         (session, vec![Output::ScheduleRetry(Duration::ZERO)])
     }
 
@@ -64,7 +60,7 @@ impl PeerSession {
         match (state, input) {
             (State::Disconnected { .. }, Input::Connected { .. }) => {
                 self.state = State::Connected;
-                vec![Output::EmitEvent(PeerEvent::Connected(self.peer_addr))]
+                vec![Output::EmitConnected]
             },
 
             (State::Disconnected { backoff }, Input::ConnectionFailed) => {
@@ -75,34 +71,27 @@ impl PeerSession {
 
             (State::Connected, Input::MessageReceived(msg)) => {
                 self.state = State::Connected;
-                vec![Output::EmitEvent(PeerEvent::Message(self.peer_addr, msg))]
+                vec![Output::EmitMessage(msg)]
             },
 
-            (
-                State::Connected,
-                Input::CommandReceived(PeerCommand::Send(msg)),
-            ) => {
+            (State::Connected, Input::Send(msg)) => {
                 self.state = State::Connected;
-                vec![Output::Send(msg)]
+                vec![Output::SendToPeer(msg)]
             },
 
-            (_, Input::CommandReceived(PeerCommand::Shutdown)) => {
-                vec![
-                    Output::EmitEvent(PeerEvent::Disconnected(self.peer_addr)),
-                    Output::Stop,
-                ]
+            (_, Input::Shutdown) => {
+                vec![Output::EmitDisconnected, Output::Stop]
             },
 
             (_, Input::Disconnected) => {
                 self.state =
                     State::Disconnected { backoff: Self::RECONNECT_DELAY };
                 vec![
-                    Output::EmitEvent(PeerEvent::Disconnected(self.peer_addr)),
+                    Output::EmitDisconnected,
                     Output::ScheduleRetry(Self::RECONNECT_DELAY),
                 ]
             },
 
-            // Invalid transitions — restore state, ignore input
             (state, _) => {
                 self.state = state;
                 vec![]

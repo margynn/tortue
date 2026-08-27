@@ -1,5 +1,4 @@
 mod address;
-mod connection;
 mod handshake;
 mod message;
 mod session;
