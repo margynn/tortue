@@ -6,6 +6,9 @@ mod domain;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::domain::peer::PeerId;
+use crate::domain::tracker::Node;
+
 // use crate::domain::pieces::PieceManager;
 // use crate::tracker::session::Node;
 // use crate::tracker::{PeerId, TrackerSession};
@@ -16,26 +19,28 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let content_size = metainfo.size();
     let local_peer_id = PeerId::generate("TR", "0.1.0");
     let node = Node { id: local_peer_id, port: 1234 };
-    let mut sessions = Vec::new();
+    // let mut sessions = Vec::new();
 
-    let (tx, rx) = mpsc::channel::<Vec<PeerAddr>>(1024);
+    println!("metainfo: {:#?}", metainfo);
 
-    // Start all trackers sessions concurrently
-    for endpoint in &metainfo.announce {
-        let session = match TrackerSession::new(
-            endpoint,
-            torrent_info_hash,
-            node,
-            content_size,
-            tx.clone(),
-        ) {
-            Ok(t) => t,
-            _ => continue,
-        };
-        session.clone().start();
-        sessions.push(session);
-        println!("tracker: {endpoint}");
-    }
+    // let (tx, rx) = mpsc::channel::<Vec<PeerAddr>>(1024);
+
+    // // Start all trackers sessions concurrently
+    // for endpoint in &metainfo.announce {
+    //     let session = match TrackerSession::new(
+    //         endpoint,
+    //         torrent_info_hash,
+    //         node,
+    //         content_size,
+    //         tx.clone(),
+    //     ) {
+    //         Ok(t) => t,
+    //         _ => continue,
+    //     };
+    //     session.clone().start();
+    //     sessions.push(session);
+    //     println!("tracker: {endpoint}");
+    // }
 
     // // Create piece manager
     // let path = PathBuf::from("./out");

@@ -3,7 +3,7 @@ mod message;
 mod session;
 
 pub use handshake::{Handshake, PeerId};
-pub use message::Message;
+pub use message::{AsyncByteReader, Message};
 pub use session::{Input, Output, PeerSession};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -15,4 +15,10 @@ pub enum Error {
 
     #[error("invalid handshake: {0}")]
     InvalidHandshake(&'static str),
+
+    #[error("message too large")]
+    MessageTooLarge,
+
+    #[error("io error")]
+    Io,
 }

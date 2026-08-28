@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -7,12 +8,11 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 
 use crate::domain::peer::{
-    Handshake, Input, Message, Output, PeerId, PeerSession,
+    AsyncByteReader, Handshake, Input, Message, Output, PeerId, PeerSession,
 };
 use crate::domain::torrent::Metainfo;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_MESSAGE_SIZE: u32 = 1 << 20;
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -25,11 +25,17 @@ enum Error {
     #[error("info hash mismatch")]
     InfoHashMismatch,
 
-    #[error("message too large")]
-    MessageTooLarge,
-
     #[error("protocol error: {0}")]
     Protocol(#[from] crate::domain::peer::Error),
+}
+
+impl AsyncByteReader for TcpStream {
+    fn read_exact<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl Future<Output = std::io::Result<()>> + Send + 'a {
+        async move { AsyncReadExt::read_exact(self, buf).await.map(|_| ()) }
+    }
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -79,7 +85,7 @@ impl PeerIO {
         tokio::select! {
             cmd = cmd_rx.recv() => cmd.unwrap_or(Input::Shutdown),
 
-            res = read_message(self.conn.as_mut().unwrap()), if self.conn.is_some() => match res {
+            res = Message::read_from(self.conn.as_mut().unwrap()), if self.conn.is_some() => match res {
                 Ok(msg) => Input::MessageReceived(msg),
                 Err(_)  => { self.conn = None; Input::Disconnected }
             },
@@ -106,7 +112,9 @@ impl PeerIO {
             match out {
                 Output::SendToPeer(msg) => {
                     if let Some(ref mut stream) = self.conn {
-                        let _ = send(stream, msg).await;
+                        if let Ok(buf) = msg.encode() {
+                            let _ = stream.write_all(&buf).await;
+                        };
                     }
                 },
                 Output::ScheduleRetry(d) => self.retry_at = Instant::now() + d,
@@ -137,9 +145,12 @@ impl PeerIO {
             .map_err(|_| Error::Timeout)??;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
-        timeout(CONNECT_TIMEOUT, stream.read_exact(&mut buf))
-            .await
-            .map_err(|_| Error::Timeout)??;
+        timeout(
+            CONNECT_TIMEOUT,
+            AsyncReadExt::read_exact(&mut stream, &mut buf),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
 
         let inbound = Handshake::decode(&buf)?;
 
@@ -149,28 +160,4 @@ impl PeerIO {
 
         Ok((stream, inbound.peer_id))
     }
-}
-
-async fn read_message(stream: &mut TcpStream) -> Result<Message> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let length = u32::from_be_bytes(len_buf);
-
-    if length == 0 {
-        return Ok(Message::KeepAlive);
-    }
-    if length > MAX_MESSAGE_SIZE {
-        return Err(Error::MessageTooLarge);
-    }
-
-    let mut payload = vec![0u8; length as usize];
-    stream.read_exact(&mut payload).await?;
-
-    Ok(Message::decode(&payload)?)
-}
-
-async fn send(stream: &mut TcpStream, msg: Message) -> Result<()> {
-    let buf = msg.encode()?;
-    stream.write_all(&buf).await?;
-    Ok(())
 }

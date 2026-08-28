@@ -1,4 +1,16 @@
+use std::future::Future;
+use std::io;
+
 use super::{Error, Result};
+
+const MAX_MESSAGE_SIZE: usize = 1 << 20;
+
+pub trait AsyncByteReader {
+    fn read_exact<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl Future<Output = io::Result<()>> + Send + 'a;
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -15,6 +27,25 @@ pub enum Message {
 }
 
 impl Message {
+    pub async fn read_from<R: AsyncByteReader>(reader: &mut R) -> Result<Self> {
+        let mut header = [0u8; 4];
+        reader.read_exact(&mut header).await.map_err(|_| Error::Io)?;
+        let len = Self::parse_frame_len(header)?;
+
+        let mut payload = vec![0u8; len];
+        reader.read_exact(&mut payload).await.map_err(|_| Error::Io)?;
+
+        Self::decode_framed(&payload)
+    }
+
+    fn parse_frame_len(header: [u8; 4]) -> Result<usize> {
+        let len = u32::from_be_bytes(header) as usize;
+        if len > MAX_MESSAGE_SIZE {
+            return Err(Error::MessageTooLarge);
+        }
+        Ok(len)
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
 
@@ -70,7 +101,7 @@ impl Message {
         Ok(buf)
     }
 
-    pub fn decode(data: &[u8]) -> Result<Message> {
+    pub fn decode_framed(data: &[u8]) -> Result<Message> {
         if data.is_empty() {
             return Ok(Message::KeepAlive);
         }
