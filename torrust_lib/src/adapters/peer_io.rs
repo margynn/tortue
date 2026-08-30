@@ -39,19 +39,19 @@ impl AsyncByteReader for TcpStream {
 }
 type Result<T> = std::result::Result<T, Error>;
 
-struct PeerIO {
+pub struct PeerIO<'a> {
     client_id: PeerId,
     peer_addr: SocketAddr,
-    metainfo: Metainfo,
+    metainfo: &'a Metainfo,
     conn: Option<TcpStream>,
     retry_at: Instant,
 }
 
-impl PeerIO {
+impl<'a> PeerIO<'a> {
     pub fn new(
         peer_addr: SocketAddr,
         client_id: PeerId,
-        metainfo: Metainfo,
+        metainfo: &'a Metainfo,
     ) -> Self {
         Self {
             client_id,

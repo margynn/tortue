@@ -3,11 +3,12 @@ mod domain;
 
 // use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use tokio::sync::mpsc;
 
+use crate::adapters::TokioTrackerClient;
 use crate::domain::peer::PeerId;
-use crate::domain::tracker::Node;
+use crate::domain::tracker::{Node, TrackerAnnouncer};
 
 // use crate::domain::pieces::PieceManager;
 // use crate::tracker::session::Node;
@@ -19,11 +20,17 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let content_size = metainfo.size();
     let local_peer_id = PeerId::generate("TR", "0.1.0");
     let node = Node { id: local_peer_id, port: 1234 };
+
     // let mut sessions = Vec::new();
-
-    println!("metainfo: {:#?}", metainfo);
-
+    // println!("metainfo: {:#?}", metainfo);
     // let (tx, rx) = mpsc::channel::<Vec<PeerAddr>>(1024);
+
+    for endpoint in &metainfo.announce {
+        let tracker_client = match TokioTrackerClient::new(endpoint) {
+            Some(t) => t,
+            _ => continue,
+        };
+    }
 
     // // Start all trackers sessions concurrently
     // for endpoint in &metainfo.announce {

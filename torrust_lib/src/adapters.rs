@@ -1,3 +1,5 @@
 mod peer_io;
 mod tokio_storage;
-mod tokio_tracker_client;
+mod tracker_io;
+
+pub use tracker_io::TrackerIO;

@@ -6,21 +6,21 @@ use super::{
 };
 use crate::domain::torrent::InfoHash;
 
-pub(crate) enum Input {
+pub enum Input {
     TimerFired,
     AnnounceSucceeded(TrackerResponse),
     AnnounceFailed,
     Stop,
 }
 
-pub(crate) enum Output {
+pub enum Output {
     Announce(AnnounceRequest),
     ScheduleAnnounce(Duration),
     EmitPeers(Vec<SocketAddr>),
     Stop,
 }
 
-pub(crate) struct TrackerSession {
+pub struct TrackerSession {
     info_hash: InfoHash,
     node: Node,
     next_event: Option<AnnounceEvent>,
@@ -32,7 +32,7 @@ impl TrackerSession {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub(crate) fn new(
+    pub fn new(
         info_hash: InfoHash,
         node: Node,
         content_size: u64,
@@ -51,7 +51,7 @@ impl TrackerSession {
         (session, vec![Output::ScheduleAnnounce(Duration::ZERO)])
     }
 
-    pub(crate) fn step(&mut self, input: Input) -> Vec<Output> {
+    pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::TimerFired => self.on_timer_fired(),
             Input::AnnounceSucceeded(r) => self.on_announce_succeeded(r),

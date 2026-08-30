@@ -1,1 +1,12 @@
 /target
+
+# rust-analyzer
+/.rust-analyzer/
+
+# IDE
+.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
