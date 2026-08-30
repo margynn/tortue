@@ -3,7 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use url::Url;
 
-use super::{AnnounceRequest, Error, TrackerResponse};
+use super::super::{AnnounceRequest, TrackerResponse};
+use super::{Error, Result};
 use crate::domain::bencode::Bencode;
 
 const ENCODE_SET: &AsciiSet = NON_ALPHANUMERIC;
@@ -33,7 +34,7 @@ pub fn build_announce_url(base_url: &Url, req: &AnnounceRequest) -> String {
     out
 }
 
-pub fn parse_response(bytes: &[u8]) -> Result<TrackerResponse, Error> {
+pub fn parse_response(bytes: &[u8]) -> Result<TrackerResponse> {
     let decoded = Bencode::decode(bytes)?;
 
     if let Ok(reason) = decoded.get_bytes(b"failure reason") {
@@ -66,9 +67,7 @@ pub fn parse_response(bytes: &[u8]) -> Result<TrackerResponse, Error> {
     })
 }
 
-fn parse_peers_list(
-    peer_list: &[Bencode<'_>],
-) -> Result<Vec<SocketAddr>, Error> {
+fn parse_peers_list(peer_list: &[Bencode<'_>]) -> Result<Vec<SocketAddr>> {
     let mut peers = Vec::new();
     for peer in peer_list {
         let ip_raw = peer.get_bytes(b"ip")?;

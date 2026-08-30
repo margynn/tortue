@@ -1,4 +1,5 @@
-use super::{AnnounceRequest, Error, TrackerResponse};
+use super::super::{AnnounceRequest, TrackerResponse};
+use super::{Error, Result};
 
 const PROTOCOL_ID: u64 = 0x41727101980;
 const ACTION_CONNECT: u32 = 0;
@@ -15,7 +16,7 @@ pub fn build_connect_request(tx_id: u32) -> [u8; 16] {
 pub fn parse_connect_response(
     bytes: &[u8],
     expected_tx_id: u32,
-) -> Result<u64, Error> {
+) -> Result<u64> {
     if bytes.len() < 16 {
         return Err(Error::InvalidResponse(
             "udp connect response too short".to_owned(),
@@ -63,7 +64,7 @@ pub fn build_announce_request(
 pub fn parse_announce_response(
     bytes: &[u8],
     expected_tx_id: u32,
-) -> Result<TrackerResponse, Error> {
+) -> Result<TrackerResponse> {
     if bytes.len() < 20 {
         return Err(Error::InvalidResponse(
             "udp announce response too short".to_owned(),
