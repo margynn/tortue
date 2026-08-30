@@ -21,12 +21,33 @@ impl Bitfield {
         Self { data, pieces }
     }
 
+    pub fn set_all(&mut self) {
+        for i in 0..self.pieces {
+            let _ = self.set_bit(i);
+        }
+    }
+
+    pub fn unset_all(&mut self) {
+        for i in 0..self.pieces {
+            let _ = self.unset_bit(i);
+        }
+    }
+
     pub fn set_bit(&mut self, bit: usize) -> Result<()> {
         self.check_bit(bit)?;
         let index = bit / BITS_PER_BYTE;
         let offset = bit % BITS_PER_BYTE;
         let mask = 1u8 << (7 - offset);
         self.data[index] |= mask;
+        Ok(())
+    }
+
+    pub fn unset_bit(&mut self, bit: usize) -> Result<()> {
+        self.check_bit(bit)?;
+        let index = bit / BITS_PER_BYTE;
+        let offset = bit % BITS_PER_BYTE;
+        let mask = 1u8 << (7 - offset);
+        self.data[index] &= !mask;
         Ok(())
     }
 
@@ -167,6 +188,79 @@ mod tests {
         bf.set_bit(7).unwrap();
         assert_eq!(bf.data, vec![0b1100_0001]);
         assert!(bf.has_bit(7).unwrap());
+    }
+
+    #[test]
+    fn iterator_yields_set_bit_indices() {
+        let mut bf = Bitfield::new(8);
+        bf.set_bit(0).unwrap();
+        bf.set_bit(3).unwrap();
+        bf.set_bit(7).unwrap();
+
+        let indices: Vec<u32> = bf.into_iter().collect();
+        assert_eq!(indices, vec![0, 3, 7]);
+    }
+
+    #[test]
+    fn iterator_empty_on_zero_bitfield() {
+        let bf = Bitfield::new(8);
+        assert_eq!(bf.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn iterator_crosses_byte_boundary() {
+        let mut bf = Bitfield::new(16);
+        bf.set_bit(7).unwrap();
+        bf.set_bit(8).unwrap();
+
+        let indices: Vec<u32> = bf.into_iter().collect();
+        assert_eq!(indices, vec![7, 8]);
+    }
+
+    #[test]
+    fn iterator_all_bits_set() {
+        let mut bf = Bitfield::new(8);
+        bf.set_all().unwrap();
+
+        let indices: Vec<u32> = bf.into_iter().collect();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn unset_bit_clears_set_bit() {
+        let mut bf = Bitfield::new(8);
+        bf.set_bit(3).unwrap();
+        assert!(bf.has_bit(3).unwrap());
+
+        bf.unset_bit(3).unwrap();
+        assert!(!bf.has_bit(3).unwrap());
+    }
+
+    #[test]
+    fn unset_bit_is_idempotent() {
+        let mut bf = Bitfield::new(8);
+        bf.unset_bit(3).unwrap();
+        bf.unset_bit(3).unwrap();
+        assert!(!bf.has_bit(3).unwrap());
+    }
+
+    #[test]
+    fn unset_bit_does_not_affect_neighbours() {
+        let mut bf = Bitfield::new(8);
+        bf.set_all().unwrap();
+
+        bf.unset_bit(3).unwrap();
+
+        assert!(bf.has_bit(2).unwrap());
+        assert!(!bf.has_bit(3).unwrap());
+        assert!(bf.has_bit(4).unwrap());
+    }
+
+    #[test]
+    fn unset_bit_out_of_range_returns_error() {
+        let mut bf = Bitfield::new(8);
+        assert!(matches!(bf.unset_bit(8), Err(Error::PieceOutOfRange)));
+        assert!(matches!(bf.unset_bit(999), Err(Error::PieceOutOfRange)));
     }
 
     #[test]

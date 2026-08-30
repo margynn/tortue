@@ -9,7 +9,7 @@ pub trait AsyncByteReader {
     fn read_exact<'a>(
         &'a mut self,
         buf: &'a mut [u8],
-    ) -> impl Future<Output = io::Result<()>> + Send + 'a;
+    ) -> impl Future<Output = io::Result<()>> + 'a;
 }
 
 #[derive(Debug, Clone)]

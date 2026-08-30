@@ -102,10 +102,6 @@ impl PeerSession {
         }
     }
 
-    pub fn state(&self) -> &State {
-        &self.state
-    }
-
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::Connected { num_pieces, .. } => {

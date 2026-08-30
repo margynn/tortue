@@ -33,7 +33,7 @@ impl AsyncByteReader for TcpStream {
     fn read_exact<'a>(
         &'a mut self,
         buf: &'a mut [u8],
-    ) -> impl Future<Output = std::io::Result<()>> + Send + 'a {
+    ) -> impl Future<Output = std::io::Result<()>> + 'a {
         async move { AsyncReadExt::read_exact(self, buf).await.map(|_| ()) }
     }
 }
