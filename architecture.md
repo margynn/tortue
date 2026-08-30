@@ -15,15 +15,15 @@ Les adapters se parlent exclusivement via des **channels `mpsc`**. Aucun adapter
 
 ### Entités principales
 
-| Module | Rôle |
-|---|---|
-| `domain::torrent` | `Metainfo` — contenu statique d'un fichier .torrent |
-| `domain::tracker` | `TrackerSession` — state machine d'announce (backoff, intervalles) |
-| `domain::tracker::http` | Encoding/parsing HTTP announce (pur) |
-| `domain::tracker::udp` | Encoding/parsing UDP tracker protocol (pur) |
-| `domain::peer` | `PeerSession` — state machine d'une connexion peer (handshake, messages) |
-| `domain::peer_pool` | `PeerPool` — gère un ensemble dynamique de peers pour un torrent |
-| `domain::pieces` | `PieceManager` — suivi des pièces téléchargées, sélection (rarest-first) |
+| Module                  | Rôle                                                                     |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `domain::torrent`       | `Metainfo` — contenu statique d'un fichier .torrent                      |
+| `domain::tracker`       | `TrackerSession` — state machine d'announce (backoff, intervalles)       |
+| `domain::tracker::http` | Encoding/parsing HTTP announce (pur)                                     |
+| `domain::tracker::udp`  | Encoding/parsing UDP tracker protocol (pur)                              |
+| `domain::peer`          | `PeerSession` — state machine d'une connexion peer (handshake, messages) |
+| `domain::peer_pool`     | `PeerPool` — gère un ensemble dynamique de peers pour un torrent         |
+| `domain::pieces`        | `PieceManager` — suivi des pièces téléchargées, sélection (rarest-first) |
 
 ### `PeerPool`
 
@@ -52,12 +52,12 @@ Output:
 
 ### Acteurs (tâches tokio)
 
-| Adapter | Pilote | Canal principal |
-|---|---|---|
-| `tracker_task` | `TrackerSession` | → `peers_tx: Sender<Vec<SocketAddr>>` |
-| `peer_pool_task` | `PeerPool` | ← peers, → commandes peers |
-| `peer_io` | `PeerSession` | ← commandes, → pièces reçues |
-| `storage_task` | `TokioStorage` | ← pièces à écrire |
+| Adapter          | Pilote           | Canal principal                       |
+| ---------------- | ---------------- | ------------------------------------- |
+| `tracker_task`   | `TrackerSession` | → `peers_tx: Sender<Vec<SocketAddr>>` |
+| `peer_pool_task` | `PeerPool`       | ← peers, → commandes peers            |
+| `peer_io`        | `PeerSession`    | ← commandes, → pièces reçues          |
+| `storage_task`   | `TokioStorage`   | ← pièces à écrire                     |
 
 ### `TorrentRunner` — l'orchestrateur
 
