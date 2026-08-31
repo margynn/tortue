@@ -48,11 +48,7 @@ pub struct PeerIO<'a> {
 }
 
 impl<'a> PeerIO<'a> {
-    pub fn new(
-        peer_addr: SocketAddr,
-        client_id: PeerId,
-        metainfo: &'a Metainfo,
-    ) -> Self {
+    pub fn new(peer_addr: SocketAddr, client_id: PeerId, metainfo: &'a Metainfo) -> Self {
         Self {
             client_id,
             peer_addr,
@@ -62,11 +58,7 @@ impl<'a> PeerIO<'a> {
         }
     }
 
-    pub async fn run(
-        &mut self,
-        mut cmd_rx: mpsc::Receiver<Input>,
-        event_tx: mpsc::Sender<Output>,
-    ) {
+    pub async fn run(&mut self, mut cmd_rx: mpsc::Receiver<Input>, event_tx: mpsc::Sender<Output>) {
         let mut session = PeerSession::new(self.peer_addr);
 
         loop {
@@ -78,10 +70,7 @@ impl<'a> PeerIO<'a> {
         }
     }
 
-    async fn next_input(
-        &mut self,
-        cmd_rx: &mut mpsc::Receiver<Input>,
-    ) -> Input {
+    async fn next_input(&mut self, cmd_rx: &mut mpsc::Receiver<Input>) -> Input {
         tokio::select! {
             cmd = cmd_rx.recv() => cmd.unwrap_or(Input::Shutdown),
 
@@ -118,7 +107,6 @@ impl<'a> PeerIO<'a> {
                     }
                 },
                 Output::ScheduleRetry(d) => self.retry_at = Instant::now() + d,
-                Output::Stop => should_stop = true,
                 Output::EmitConnected => {
                     let _ = event_tx.send(Output::EmitConnected).await;
                 },
@@ -128,16 +116,16 @@ impl<'a> PeerIO<'a> {
                 Output::EmitMessage(msg) => {
                     let _ = event_tx.send(Output::EmitMessage(msg)).await;
                 },
+                Output::Stop => should_stop = true,
             }
         }
         should_stop
     }
 
     async fn connect(&self) -> Result<(TcpStream, PeerId)> {
-        let mut stream =
-            timeout(CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
-                .await
-                .map_err(|_| Error::Timeout)??;
+        let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
+            .await
+            .map_err(|_| Error::Timeout)??;
 
         let outbound = Handshake::new(self.metainfo.hash, self.client_id);
         timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
@@ -145,12 +133,9 @@ impl<'a> PeerIO<'a> {
             .map_err(|_| Error::Timeout)??;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
-        timeout(
-            CONNECT_TIMEOUT,
-            AsyncReadExt::read_exact(&mut stream, &mut buf),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+        timeout(CONNECT_TIMEOUT, AsyncReadExt::read_exact(&mut stream, &mut buf))
+            .await
+            .map_err(|_| Error::Timeout)??;
 
         let inbound = Handshake::decode(&buf)?;
 

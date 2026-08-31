@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use super::{
-    AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse,
-};
+use super::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse};
 use crate::domain::torrent::InfoHash;
 
 pub enum Input {
@@ -32,12 +30,8 @@ impl TrackerSession {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub fn new(
-        info_hash: InfoHash,
-        node: Node,
-        content_size: u64,
-    ) -> (Self, Vec<Output>) {
-        let session = Self {
+    pub fn new(info_hash: InfoHash, node: Node, content_size: u64) -> Self {
+        Self {
             info_hash,
             node,
             next_event: Some(AnnounceEvent::Started),
@@ -47,8 +41,7 @@ impl TrackerSession {
                 downloaded: 0,
                 left: content_size,
             },
-        };
-        (session, vec![Output::ScheduleAnnounce(Duration::ZERO)])
+        }
     }
 
     pub fn step(&mut self, input: Input) -> Vec<Output> {

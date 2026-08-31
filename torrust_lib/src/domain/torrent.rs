@@ -70,6 +70,7 @@ pub struct File {
 }
 
 impl Metainfo {
+    /// content size in bytes of the torrent content
     pub fn size(&self) -> u64 {
         match &self.mode {
             Mode::Single { length } => *length,
@@ -109,10 +110,7 @@ fn parse(root: Bencode<'_>) -> Result<Metainfo> {
 
 fn parse_announces(root: &Bencode) -> Result<Vec<String>> {
     let main_announce = root.get_utf8(b"announce")?;
-    let tiers = root
-        .get_list(b"announce-list")
-        .map(parse_announce_list)
-        .unwrap_or_default();
+    let tiers = root.get_list(b"announce-list").map(parse_announce_list).unwrap_or_default();
 
     let mut seen = HashSet::new();
     let mut announces = Vec::new();
@@ -136,9 +134,7 @@ fn parse_url_list(root: &Bencode) -> Option<Vec<String>> {
     let v: Vec<String> = list
         .iter()
         .filter_map(|item| match item {
-            Bencode::Bytes(bytes) => {
-                std::str::from_utf8(bytes).ok().map(str::to_owned)
-            },
+            Bencode::Bytes(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
             _ => None,
         })
         .collect();
@@ -177,9 +173,7 @@ fn parse_announce_list(tiers: &[Bencode]) -> Vec<Vec<String>> {
                 let urls = urls
                     .iter()
                     .filter_map(|url| match url {
-                        Bencode::Bytes(bytes) => {
-                            std::str::from_utf8(bytes).ok().map(str::to_owned)
-                        },
+                        Bencode::Bytes(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -207,11 +201,7 @@ fn parse_pieces(data: &[u8]) -> Result<Vec<PieceHash>> {
 }
 
 fn parse_multi_file(info: &Bencode) -> Result<Mode> {
-    let files = info
-        .get_list(b"files")?
-        .iter()
-        .map(parse_file)
-        .collect::<Result<Vec<_>>>()?;
+    let files = info.get_list(b"files")?.iter().map(parse_file).collect::<Result<Vec<_>>>()?;
 
     Ok(Mode::Multiple { files })
 }
@@ -222,9 +212,9 @@ fn parse_file(file: &Bencode) -> Result<File> {
         .get_list(b"path")?
         .iter()
         .map(|component| match component {
-            Bencode::Bytes(bytes) => std::str::from_utf8(bytes)
-                .map(str::to_owned)
-                .map_err(|_| Error::InvalidUtf8),
+            Bencode::Bytes(bytes) => {
+                std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| Error::InvalidUtf8)
+            },
             _ => Err(Error::UnexpectedType),
         })
         .collect::<Result<Vec<_>>>()?;

@@ -42,13 +42,12 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-// #[derive(Debug)]
-pub enum TrackerIO {
+pub enum TrackerClient {
     Http(HttpTransport),
     Udp(UdpTransport),
 }
 
-impl TrackerIO {
+impl TrackerClient {
     pub fn new(s: &str) -> Result<Self> {
         let url = Url::parse(s).map_err(|_| Error::InvalidTrackerUrl)?;
         match url.scheme() {
@@ -66,8 +65,7 @@ impl TrackerIO {
             },
 
             "udp" => {
-                let host =
-                    url.host_str().ok_or(Error::MissingUdpHost)?.to_owned();
+                let host = url.host_str().ok_or(Error::MissingUdpHost)?.to_owned();
                 let port = url.port().ok_or(Error::MissingUdpPort)?;
                 let transport = UdpTransport { host, port };
                 Ok(Self::Udp(transport))
@@ -77,13 +75,10 @@ impl TrackerIO {
         }
     }
 
-    pub async fn announce(
-        &self,
-        req: &AnnounceRequest,
-    ) -> Result<TrackerResponse> {
+    pub async fn announce(&self, req: AnnounceRequest) -> Result<TrackerResponse> {
         match self {
-            Self::Http(t) => t.announce(req).await,
-            Self::Udp(t) => t.announce(req).await,
+            Self::Http(t) => t.announce(&req).await,
+            Self::Udp(t) => t.announce(&req).await,
         }
     }
 }
@@ -106,10 +101,7 @@ impl HttpTransport {
             .send()
             .await
             .map_err(|e| Error::HttpRequest(e.to_string()))?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| Error::HttpRequest(e.to_string()))?;
+        let bytes = response.bytes().await.map_err(|e| Error::HttpRequest(e.to_string()))?;
         Ok(tracker::transport::http::parse_response(&bytes)?)
     }
 }
@@ -121,25 +113,20 @@ impl UdpTransport {
             .map_err(|e| Error::UdpRequest(e.to_string()))?
             .next()
             .ok_or_else(|| {
-                Error::UdpRequest(
-                    "tracker hostname resolved to no address".to_owned(),
-                )
+                Error::UdpRequest("tracker hostname resolved to no address".to_owned())
             })?;
 
         let socket = UdpSocket::bind("[::]:0").await?;
         socket.connect(tracker_addr).await?;
 
         let tx_id = rand::random::<u32>();
-        socket
-            .send(&tracker::transport::udp::build_connect_request(tx_id))
-            .await?;
+        socket.send(&tracker::transport::udp::build_connect_request(tx_id)).await?;
 
         let mut buf = [0u8; 4096];
         let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
             .await
             .map_err(|_| Error::Timeout)??;
-        let connection_id =
-            tracker::transport::udp::parse_connect_response(&buf[..n], tx_id)?;
+        let connection_id = tracker::transport::udp::parse_connect_response(&buf[..n], tx_id)?;
 
         let announce_tx = rand::random::<u32>();
         let key = rand::random::<u32>();
@@ -155,9 +142,6 @@ impl UdpTransport {
         let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
             .await
             .map_err(|_| Error::Timeout)??;
-        Ok(tracker::transport::udp::parse_announce_response(
-            &buf[..n],
-            announce_tx,
-        )?)
+        Ok(tracker::transport::udp::parse_announce_response(&buf[..n], announce_tx)?)
     }
 }

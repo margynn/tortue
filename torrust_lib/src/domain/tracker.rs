@@ -1,4 +1,4 @@
-mod session;
+pub mod session;
 pub mod transport;
 
 use std::net::SocketAddr;
