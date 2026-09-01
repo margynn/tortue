@@ -1,21 +1,5 @@
-use std::net::SocketAddr;
-use std::time::Duration;
-
 use super::super::bitfield::Bitfield;
 use super::{Message, PeerId};
-
-// #[derive(Debug)]
-// pub enum PeerCommand {
-//     Shutdown,
-//     Send(Message),
-// }
-
-// #[derive(Debug)]
-// pub enum PeerEvent {
-//     Connected(SocketAddr),
-//     Disconnected(SocketAddr),
-//     Message(SocketAddr, Message),
-// }
 
 #[derive(Debug)]
 pub struct ConnectedPeer {
@@ -62,16 +46,14 @@ impl ConnectedPeer {
 
 #[derive(Debug)]
 pub enum State {
-    Disconnected { backoff: Duration },
+    Disconnected,
     Connected(ConnectedPeer),
 }
 
 #[derive(Debug)]
 pub enum Input {
-    Shutdown,
     Send(Message),
     Connected { peer_id: PeerId, num_pieces: usize },
-    ConnectionFailed,
     MessageReceived(Message),
     Disconnected,
 }
@@ -79,57 +61,35 @@ pub enum Input {
 #[derive(Debug, Clone)]
 pub enum Output {
     SendToPeer(Message),
-    EmitConnected,
+    EmitConnected(PeerId),
     EmitDisconnected,
     EmitMessage(Message),
-    ScheduleRetry(Duration),
-    Stop,
 }
 
 pub struct PeerSession {
-    address: SocketAddr,
     state: State,
 }
 
 impl PeerSession {
-    const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-    const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
-
-    pub fn new(address: SocketAddr) -> Self {
-        Self {
-            address,
-            state: State::Disconnected { backoff: Self::RECONNECT_DELAY },
-        }
+    pub fn new() -> Self {
+        Self { state: State::Disconnected }
     }
 
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
-            Input::Connected { num_pieces, .. } => {
-                self.on_connected(num_pieces)
-            },
-            Input::ConnectionFailed => self.on_connection_failed(),
+            Input::Connected { peer_id, num_pieces } => self.on_connected(peer_id, num_pieces),
             Input::MessageReceived(msg) => self.on_message(msg),
             Input::Send(msg) => self.on_send(msg),
-            Input::Shutdown => self.on_shutdown(),
             Input::Disconnected => self.on_disconnected(),
         }
     }
 
-    fn on_connected(&mut self, num_pieces: usize) -> Vec<Output> {
-        if !matches!(self.state, State::Disconnected { .. }) {
+    fn on_connected(&mut self, peer_id: PeerId, num_pieces: usize) -> Vec<Output> {
+        if !matches!(self.state, State::Disconnected) {
             return vec![];
         }
         self.state = State::Connected(ConnectedPeer::new(num_pieces));
-        vec![Output::EmitConnected]
-    }
-
-    fn on_connection_failed(&mut self) -> Vec<Output> {
-        let State::Disconnected { backoff } = self.state else {
-            return vec![];
-        };
-        let next_backoff = (backoff * 2).min(Self::MAX_RECONNECT_DELAY);
-        self.state = State::Disconnected { backoff: next_backoff };
-        vec![Output::ScheduleRetry(backoff)]
+        vec![Output::EmitConnected(peer_id)]
     }
 
     fn on_message(&mut self, msg: Message) -> Vec<Output> {
@@ -147,15 +107,8 @@ impl PeerSession {
         vec![Output::SendToPeer(msg)]
     }
 
-    fn on_shutdown(&mut self) -> Vec<Output> {
-        vec![Output::EmitDisconnected, Output::Stop]
-    }
-
     fn on_disconnected(&mut self) -> Vec<Output> {
-        self.state = State::Disconnected { backoff: Self::RECONNECT_DELAY };
-        vec![
-            Output::EmitDisconnected,
-            Output::ScheduleRetry(Self::RECONNECT_DELAY),
-        ]
+        self.state = State::Disconnected;
+        vec![Output::EmitDisconnected]
     }
 }

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,9 +14,11 @@ use crate::domain::peer::{
 use crate::domain::torrent::Metainfo;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -43,47 +46,71 @@ impl AsyncByteReader for TcpStream {
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn extract_retry(outputs: Vec<Output>) -> Duration {
-    outputs
-        .into_iter()
-        .find_map(|o| match o {
-            Output::ScheduleRetry(d) => Some(d),
-            _ => None,
-        })
-        .unwrap_or(Duration::from_secs(2))
-}
-
-pub struct PeerRunner<'a> {
+pub struct PeerRunner {
     client_id: PeerId,
     peer_addr: SocketAddr,
-    metainfo: &'a Metainfo,
+    metainfo: Arc<Metainfo>,
+    cmd_rx: mpsc::Receiver<Input>,
+    tx: mpsc::Sender<Output>,
 }
 
-impl<'a> PeerRunner<'a> {
-    pub fn new(peer_addr: SocketAddr, client_id: PeerId, metainfo: &'a Metainfo) -> Self {
-        Self { client_id, peer_addr, metainfo }
+impl PeerRunner {
+    pub fn new(
+        peer_addr: SocketAddr,
+        client_id: PeerId,
+        metainfo: Arc<Metainfo>,
+        cmd_rx: mpsc::Receiver<Input>,
+        tx: mpsc::Sender<Output>,
+    ) -> Self {
+        Self {
+            client_id,
+            peer_addr,
+            metainfo,
+            cmd_rx,
+            tx,
+        }
     }
 
-    pub async fn run(&mut self, mut cmd_rx: mpsc::Receiver<Input>, tx: mpsc::Sender<Output>) -> Result<()> {
-        let mut session = PeerSession::new(self.peer_addr);
-        let mut delay = Duration::ZERO;
+    pub async fn run(&mut self) -> Result<()> {
+        let mut session = PeerSession::new();
+        let mut reconnect_delay = Duration::ZERO;
 
         'run: loop {
-            let (mut tcp, _peer_id) = self.connect_with_retry(&mut session, delay).await;
+            let (mut tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
 
-            delay = 'session: loop {
-                let input = next_input(&mut tcp, &mut cmd_rx).await;
+            // Notify the session (and pool) that we are now connected.
+            for out in session.step(Input::Connected {
+                peer_id,
+                num_pieces: self.metainfo.pieces.len(),
+            }) {
+                self.tx.send(out).await.map_err(|_| Error::PeerPoolGone)?;
+            }
+
+            reconnect_delay = 'session: loop {
+                let input = tokio::select! {
+                    res = Message::read_from(&mut tcp) => match res {
+                        Ok(msg) => Input::MessageReceived(msg),
+                        Err(_)  => Input::Disconnected,
+                    },
+                    // Shutdown when the command channel is dropped.
+                    cmd = self.cmd_rx.recv() => match cmd {
+                        None => break 'run,
+                        Some(cmd) => cmd,
+                    },
+                };
 
                 for out in session.step(input) {
                     match out {
                         Output::SendToPeer(msg) => {
                             if tcp.write_all(&msg.encode()).await.is_err() {
-                                break 'session Duration::ZERO;
+                                break 'session RECONNECT_DELAY;
                             }
-                        }
-                        Output::ScheduleRetry(d) => break 'session d,
-                        Output::Stop             => break 'run,
-                        _                        => tx.send(out).await.map_err(|_| Error::PeerPoolGone)?,
+                        },
+                        Output::EmitDisconnected => {
+                            self.tx.send(out).await.map_err(|_| Error::PeerPoolGone)?;
+                            break 'session RECONNECT_DELAY;
+                        },
+                        _ => self.tx.send(out).await.map_err(|_| Error::PeerPoolGone)?,
                     }
                 }
             };
@@ -92,13 +119,12 @@ impl<'a> PeerRunner<'a> {
         Ok(())
     }
 
-    async fn connect_with_retry(&self, session: &mut PeerSession, initial_delay: Duration) -> (TcpStream, PeerId) {
-        let mut delay = initial_delay;
+    async fn connect_with_retry(&self, mut delay: Duration) -> (TcpStream, PeerId) {
         loop {
             tokio::time::sleep(delay).await;
             match self.connect().await {
                 Ok(result) => return result,
-                Err(_)     => delay = extract_retry(session.step(Input::ConnectionFailed)),
+                Err(_) => delay = (delay * 2).clamp(RECONNECT_DELAY, MAX_RECONNECT_DELAY),
             }
         }
     }
@@ -125,15 +151,5 @@ impl<'a> PeerRunner<'a> {
         }
 
         Ok((stream, inbound.peer_id))
-    }
-}
-
-async fn next_input(tcp: &mut TcpStream, cmd_rx: &mut mpsc::Receiver<Input>) -> Input {
-    tokio::select! {
-        res = Message::read_from(tcp) => match res {
-            Ok(msg) => Input::MessageReceived(msg),
-            Err(_)  => Input::Disconnected,
-        },
-        cmd = cmd_rx.recv() => cmd.unwrap_or(Input::Shutdown),
     }
 }
