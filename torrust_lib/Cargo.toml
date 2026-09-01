@@ -16,3 +16,4 @@ getrandom = "0.4.2"
 tokio = { version = "1.50.0", features = ["fs", "signal", "macros", "rt-multi-thread", "net", "io-util", "time"] }
 rand = "0.10.0"
 hex = "0.4.3"
+tracing = "0.1.44"

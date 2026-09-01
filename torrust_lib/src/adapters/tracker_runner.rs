@@ -47,7 +47,11 @@ impl TrackerRunner {
                 info_hash: self.metainfo.hash,
                 peer_id: self.node.id,
                 port: self.node.port,
-                stats: SessionStats { uploaded: 0, downloaded: 0, left: self.metainfo.size() },
+                stats: SessionStats {
+                    uploaded: 0,
+                    downloaded: 0,
+                    left: self.metainfo.size(),
+                },
                 event: next_event.take().unwrap_or(AnnounceEvent::None),
                 compact: true,
             };

@@ -2,6 +2,7 @@ mod adapters;
 mod domain;
 
 use anyhow::{Ok, Result};
+use tracing::info;
 
 use crate::domain::peer::PeerId;
 
@@ -12,6 +13,8 @@ use crate::domain::peer::PeerId;
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let metainfo = domain::torrent::decode(torrent_file)?;
     let local_peer_id = PeerId::generate("TR", "0.1.0");
+
+    info!(name = metainfo.name, "start_download");
 
     // let torrent_info_hash = metainfo.hash;
     // let content_size = metainfo.size();
