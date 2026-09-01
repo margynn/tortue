@@ -25,7 +25,7 @@ pub enum Output {
     Completed, // Should not we specify the completed piece ?
 }
 
-pub struct PeerPool {
+pub struct Pool {
     num_pieces: usize,
     needed: Bitfield,
     peers: HashMap<SocketAddr, PeerState>,
@@ -41,7 +41,7 @@ enum PeerState {
 const MAX_IN_FLIGHT_PER_PEER: usize = 30;
 const MAX_CONNECTED: usize = 256;
 
-impl PeerPool {
+impl Pool {
     pub fn new(num_pieces: usize) -> Self {
         let mut needed = Bitfield::new(num_pieces);
         let _ = needed.set_all();

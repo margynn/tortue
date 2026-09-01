@@ -4,60 +4,18 @@ mod domain;
 use anyhow::{Ok, Result};
 use tracing::info;
 
+use crate::adapters::runner;
 use crate::domain::peer::PeerId;
-
-// use crate::domain::pieces::PieceManager;
-// use crate::tracker::session::Node;
-// use crate::tracker::{PeerId, TrackerSession};
+use crate::domain::tracker::Node;
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
     let metainfo = domain::torrent::decode(torrent_file)?;
-    let local_peer_id = PeerId::generate("TR", "0.1.0");
-
+    let node = Node {
+        id: PeerId::generate("TR", "0.1.0"),
+        port: 1234,
+    };
     info!(name = metainfo.name, "start_download");
-
-    // let torrent_info_hash = metainfo.hash;
-    // let content_size = metainfo.size();
-    // let node = Node { id: local_peer_id, port: 1234 };
-
-    // let mut sessions = Vec::new();
-    // println!("metainfo: {:#?}", metainfo);
-    // let (tx, rx) = mpsc::channel::<Vec<PeerAddr>>(1024);
-
-    for endpoint in &metainfo.announce {
-        println!("endpoint: {:#?}", endpoint);
-        // let tracker_client = match TokioTrackerClient::new(endpoint) {
-        //     Some(t) => t,
-        //     _ => continue,
-        // };
-    }
-
-    // // Start all trackers sessions concurrently
-    // for endpoint in &metainfo.announce {
-    //     let session = match TrackerSession::new(
-    //         endpoint,
-    //         torrent_info_hash,
-    //         node,
-    //         content_size,
-    //         tx.clone(),
-    //     ) {
-    //         Ok(t) => t,
-    //         _ => continue,
-    //     };
-    //     session.clone().start();
-    //     sessions.push(session);
-    //     println!("tracker: {endpoint}");
-    // }
-
-    // // Create piece manager
-    // let path = PathBuf::from("./out");
-    // let piece_manager = PieceManager::new(metainfo.clone(), path).await?;
-
-    // // Send the sessions to the swarm
-    // let swarm = peer::Swarm::new(metainfo.clone(), piece_manager, node, rx);
-    // swarm.start();
-    // println!("swarm started");
-
+    runner::run(metainfo, node).await; // TODO: return error + pass a storage implementation
     shutdown_signal().await;
     Ok(())
 }
