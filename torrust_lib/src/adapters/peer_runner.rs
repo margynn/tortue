@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tracing::debug;
 
 use crate::domain::peer::{
     AsyncByteReader, Handshake, Input, Message, Output, PeerId, PeerSession,
@@ -72,6 +73,8 @@ impl PeerRunner {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        debug!("start_peer");
+
         let mut session = PeerSession::new();
         let mut reconnect_delay = Duration::ZERO;
 

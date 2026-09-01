@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use crate::adapters::tracker_client::TrackerClient;
 use crate::domain::torrent::Metainfo;
@@ -36,6 +37,8 @@ impl TrackerRunner {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        debug!("start_tracker"); // TODO: add tracker URL
+
         let mut interval = Duration::ZERO;
         let mut backoff = INITIAL_BACKOFF;
         let mut next_event = Some(AnnounceEvent::Started);
@@ -48,8 +51,9 @@ impl TrackerRunner {
                 peer_id: self.node.id,
                 port: self.node.port,
                 stats: SessionStats {
-                    uploaded: 0,
-                    downloaded: 0,
+                    // TODO: use an Arc<SessionStats> to share ?
+                    uploaded: 0,   // TODO: should update
+                    downloaded: 0, // TODO: should update
                     left: self.metainfo.size(),
                 },
                 event: next_event.take().unwrap_or(AnnounceEvent::None),
