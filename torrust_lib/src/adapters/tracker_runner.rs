@@ -1,19 +1,28 @@
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use crate::adapters::tracker_client::TrackerClient;
 use crate::domain::torrent::Metainfo;
-use crate::domain::tracker::Node;
-use crate::domain::tracker::session::{Input, Output, TrackerSession};
+use crate::domain::tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats};
+
+const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
+const MAX_BACKOFF: Duration = Duration::from_secs(3600);
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("peers channel closed")]
+    PeersChannelClosed,
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 pub struct TrackerRunner {
     client: TrackerClient,
     metainfo: Metainfo,
     node: Node,
     peers_tx: mpsc::Sender<Vec<SocketAddr>>,
-    next_announce_at: Instant,
 }
 
 impl TrackerRunner {
@@ -23,48 +32,37 @@ impl TrackerRunner {
         node: Node,
         peers_tx: mpsc::Sender<Vec<SocketAddr>>,
     ) -> Self {
-        Self {
-            client,
-            metainfo,
-            node,
-            peers_tx,
-            next_announce_at: Instant::now(),
-        }
+        Self { client, metainfo, node, peers_tx }
     }
 
-    pub async fn run(&mut self) {
-        let mut session = TrackerSession::new(self.metainfo.hash, self.node, self.metainfo.size());
+    pub async fn run(&mut self) -> Result<()> {
+        let mut interval = Duration::ZERO;
+        let mut backoff = INITIAL_BACKOFF;
+        let mut next_event = Some(AnnounceEvent::Started);
+
         loop {
-            let input = self.next_input().await;
-            let outputs = session.step(input);
-            if self.handle_outputs(outputs).await {
-                break;
+            tokio::time::sleep(interval).await;
+
+            let req = AnnounceRequest {
+                info_hash: self.metainfo.hash,
+                peer_id: self.node.id,
+                port: self.node.port,
+                stats: SessionStats { uploaded: 0, downloaded: 0, left: self.metainfo.size() },
+                event: next_event.take().unwrap_or(AnnounceEvent::None),
+                compact: true,
+            };
+
+            match self.client.announce(req).await {
+                Ok(resp) => {
+                    backoff = INITIAL_BACKOFF;
+                    interval = Duration::from_secs(resp.interval.max(60) as u64);
+                    self.peers_tx.send(resp.peers).await.map_err(|_| Error::PeersChannelClosed)?;
+                },
+                Err(_) => {
+                    interval = backoff;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                },
             }
         }
-    }
-
-    // Attend le timer et retourne le prochain Input
-    async fn next_input(&self) -> Input {
-        todo!()
-    }
-
-    // Retourne true si le task doit s'arrêter
-    async fn handle_outputs(&mut self, outputs: Vec<Output>) -> bool {
-        let mut should_stop = false;
-        for out in outputs {
-            match out {
-                Output::Announce(announce_request) => {
-                    let Ok(resp) = self.client.announce(announce_request).await else { continue };
-                },
-                Output::ScheduleAnnounce(duration) => {
-                    self.next_announce_at = Instant::now() + duration;
-                },
-                Output::EmitPeers(socket_addrs) => {
-                    let _ = self.peers_tx.send(socket_addrs).await;
-                },
-                Output::Stop => should_stop = true,
-            }
-        }
-        should_stop
     }
 }
