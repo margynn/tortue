@@ -46,13 +46,10 @@ impl Message {
         Ok(len)
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Message Framing:
-        //      <length prefix><message>
-        //      Length prefix: 4-byte big-endian
-
+        // Message Framing: <length prefix><message>, length prefix is 4-byte big-endian
         match self {
             Message::KeepAlive => buf.extend_from_slice(&0u32.to_be_bytes()),
             Message::Choke => buf.extend_from_slice(&[0, 0, 0, 1, 0]),
@@ -65,10 +62,7 @@ impl Message {
                 buf.extend_from_slice(&piece.to_be_bytes());
             },
             Message::Bitfield(bits) => {
-                let len = 1u32
-                    .checked_add(bits.len() as u32)
-                    .ok_or(Error::InvalidMessage)?;
-                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&(1 + bits.len() as u32).to_be_bytes());
                 buf.push(5);
                 buf.extend_from_slice(bits);
             },
@@ -80,10 +74,7 @@ impl Message {
                 buf.extend_from_slice(&length.to_be_bytes());
             },
             Message::Piece { index, begin, block } => {
-                let len = 9u32
-                    .checked_add(block.len() as u32)
-                    .ok_or(Error::InvalidMessage)?;
-                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&(9 + block.len() as u32).to_be_bytes());
                 buf.push(7);
                 buf.extend_from_slice(&index.to_be_bytes());
                 buf.extend_from_slice(&begin.to_be_bytes());
@@ -98,7 +89,7 @@ impl Message {
             },
         }
 
-        Ok(buf)
+        buf
     }
 
     pub fn decode_framed(data: &[u8]) -> Result<Message> {

@@ -1,4 +1,4 @@
-mod peer_io;
+mod peer_runner;
 mod tokio_storage;
 mod tracker_client;
 mod tracker_runner;

@@ -37,7 +37,7 @@ impl TrackerRunner {
         loop {
             let input = self.next_input().await;
             let outputs = session.step(input);
-            if self.handle_outputs(&mut session, outputs).await {
+            if self.handle_outputs(outputs).await {
                 break;
             }
         }
@@ -49,7 +49,7 @@ impl TrackerRunner {
     }
 
     // Retourne true si le task doit s'arrêter
-    async fn handle_outputs(&mut self, session: &mut TrackerSession, outputs: Vec<Output>) -> bool {
+    async fn handle_outputs(&mut self, outputs: Vec<Output>) -> bool {
         let mut should_stop = false;
         for out in outputs {
             match out {
@@ -57,7 +57,7 @@ impl TrackerRunner {
                     let Ok(resp) = self.client.announce(announce_request).await else { continue };
                 },
                 Output::ScheduleAnnounce(duration) => {
-                    todo!()
+                    self.next_announce_at = Instant::now() + duration;
                 },
                 Output::EmitPeers(socket_addrs) => {
                     let _ = self.peers_tx.send(socket_addrs).await;
