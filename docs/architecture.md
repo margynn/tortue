@@ -3,6 +3,7 @@
 ## Principe : Sans-IO
 
 Les composants domaine sont de pures fonctions / state machines sans IO :
+
 - `step(input) -> Vec<Output>` : aucun effet de bord, testable sans réseau
 - Les runners portent tout l'IO (TCP, UDP, channels, timers)
 
@@ -27,6 +28,7 @@ TrackerRunner ──peers──► PoolRunner ──cmds──► PeerRunner ─
 ### Responsabilités
 
 `Pool` est la state machine centrale. Elle gère :
+
 - La découverte et connexion des peers
 - L'état de chaque peer (`PeerSession` embarquée)
 - Le scheduling des pièces (rarest-first, in-flight, capacité par peer)
@@ -83,6 +85,7 @@ PieceVerified        → needed.unset(piece)                     → Completed s
 ### schedule_requests
 
 Lit directement l'état des `PeerSession` embarquées :
+
 - `session.peer_choking` pour filtrer les peers unchoked
 - `availability` (index) pour le rarest-first
 
@@ -112,6 +115,7 @@ outputs.extend(self.schedule_requests());
 ## PeerRunner (purement IO)
 
 `PeerRunner` ne contient plus de `PeerSession`. Il fait uniquement :
+
 - TCP connect + handshake (encode/decode via les fonctions domaine `Handshake`)
 - Lire des `Message` depuis TCP → les envoyer au pool
 - Recevoir des `Message` depuis le pool → les écrire sur TCP
@@ -126,6 +130,7 @@ pub enum PeerEvent {
 ```
 
 `PeerRunner.run` :
+
 ```rust
 'run: loop {
     let (mut tcp, peer_id) = self.connect_with_retry(delay).await;
@@ -230,34 +235,3 @@ loop {
 ```
 
 ---
-
-## UDP Tracker : trait pour abstraire l'IO réseau
-
-Même principe qu'`AsyncByteReader` : un trait injecté permet d'orchestrer
-le protocole BEP15 dans le domaine sans IO réel.
-
-```rust
-// domaine
-pub trait UdpSocket {
-    async fn send(&self, buf: &[u8]) -> io::Result<()>;
-    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-}
-
-pub async fn announce<S: UdpSocket>(socket: &mut S, req: &AnnounceRequest) -> Result<TrackerResponse> {
-    // connect handshake puis announce — séquencement BEP15 dans le domaine
-}
-
-// adapter
-impl UdpSocket for tokio::net::UdpSocket { ... }
-```
-
----
-
-## Invariants
-
-| Invariant | Garanti par |
-|-----------|-------------|
-| `peer_cmds` et `Pool.peers` en sync | Tous les changements passent par `pool.step` → `handle_output` |
-| Pas de state dupliqué peer | `PeerSession` est la seule source de vérité per-peer |
-| Pas d'IO dans le domaine | `Pool`, `PeerSession` : aucun appel système |
-| `availability` dérivé de `PeerSession.bitfield` | Mis à jour à chaque `MessageReceived(Bitfield/Have)` |
