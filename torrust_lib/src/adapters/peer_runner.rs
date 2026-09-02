@@ -7,16 +7,20 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::debug;
 
-use crate::domain::peer::{
-    AsyncByteReader, Handshake, Input, Message, Output, PeerId, PeerSession,
-};
+use crate::domain::peer::{AsyncByteReader, Handshake, Message, PeerId};
 use crate::domain::torrent::Metainfo;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+pub enum PeerEvent {
+    Connected(PeerId),
+    Disconnected,
+    MessageReceived(Message),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -51,8 +55,8 @@ pub struct PeerRunner {
     client_id: PeerId,
     peer_addr: SocketAddr,
     metainfo: Arc<Metainfo>,
-    cmd_rx: mpsc::Receiver<Input>,
-    tx: mpsc::Sender<Output>,
+    cmd_rx: mpsc::Receiver<Message>,
+    tx: mpsc::Sender<PeerEvent>,
 }
 
 impl PeerRunner {
@@ -60,8 +64,8 @@ impl PeerRunner {
         peer_addr: SocketAddr,
         client_id: PeerId,
         metainfo: Arc<Metainfo>,
-        cmd_rx: mpsc::Receiver<Input>,
-        tx: mpsc::Sender<Output>,
+        cmd_rx: mpsc::Receiver<Message>,
+        tx: mpsc::Sender<PeerEvent>,
     ) -> Self {
         Self {
             client_id,
@@ -73,48 +77,40 @@ impl PeerRunner {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        debug!("start_peer");
-
-        let mut session = PeerSession::new();
         let mut reconnect_delay = Duration::ZERO;
 
         'run: loop {
             let (mut tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
 
-            // Notify the session (and pool) that we are now connected.
-            for out in session.step(Input::Connected {
-                peer_id,
-                num_pieces: self.metainfo.pieces.len(),
-            }) {
-                self.tx.send(out).await.map_err(|_| Error::PeerPoolGone)?;
-            }
+            self.tx
+                .send(PeerEvent::Connected(peer_id))
+                .await
+                .map_err(|_| Error::PeerPoolGone)?;
 
             reconnect_delay = 'session: loop {
-                let input = tokio::select! {
+                tokio::select! {
                     res = Message::read_from(&mut tcp) => match res {
-                        Ok(msg) => Input::MessageReceived(msg),
-                        Err(_)  => Input::Disconnected,
+                        Ok(msg) => {
+                            self.tx
+                                .send(PeerEvent::MessageReceived(msg))
+                                .await
+                                .map_err(|_| Error::PeerPoolGone)?;
+                        },
+                        Err(_) => {
+                            let _ = self.tx.send(PeerEvent::Disconnected).await;
+                            break 'session RECONNECT_DELAY;
+                        },
                     },
-                    // Shutdown when the command channel is dropped.
-                    cmd = self.cmd_rx.recv() => match cmd {
-                        None => break 'run,
-                        Some(cmd) => cmd,
-                    },
-                };
 
-                for out in session.step(input) {
-                    match out {
-                        Output::SendToPeer(msg) => {
+                    cmd = self.cmd_rx.recv() => match cmd {
+                        None => break 'run, // cmd_rx closed
+                        Some(msg) => {
                             if tcp.write_all(&msg.encode()).await.is_err() {
+                                let _ = self.tx.send(PeerEvent::Disconnected).await;
                                 break 'session RECONNECT_DELAY;
                             }
                         },
-                        Output::EmitDisconnected => {
-                            self.tx.send(out).await.map_err(|_| Error::PeerPoolGone)?;
-                            break 'session RECONNECT_DELAY;
-                        },
-                        _ => self.tx.send(out).await.map_err(|_| Error::PeerPoolGone)?,
-                    }
+                    },
                 }
             };
         }
