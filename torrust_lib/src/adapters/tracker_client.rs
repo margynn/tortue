@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use reqwest::Client;
 use tokio::net::{UdpSocket, lookup_host};
-use tokio::time::timeout;
 use url::Url;
 
 use crate::domain::tracker::{self, AnnounceRequest, TrackerResponse};
@@ -106,6 +105,16 @@ impl HttpTransport {
     }
 }
 
+impl tracker::transport::UdpSocket for UdpSocket {
+    async fn send(&self, buf: &[u8]) -> std::io::Result<()> {
+        UdpSocket::send(self, buf).await.map(|_| ())
+    }
+
+    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        UdpSocket::recv(self, buf).await
+    }
+}
+
 impl UdpTransport {
     async fn announce(&self, req: &AnnounceRequest) -> Result<TrackerResponse> {
         let tracker_addr = lookup_host((self.host.clone(), self.port))
@@ -116,32 +125,8 @@ impl UdpTransport {
                 Error::UdpRequest("tracker hostname resolved to no address".to_owned())
             })?;
 
-        let socket = UdpSocket::bind("[::]:0").await?;
+        let mut socket = UdpSocket::bind("[::]:0").await?;
         socket.connect(tracker_addr).await?;
-
-        let tx_id = rand::random::<u32>();
-        socket.send(&tracker::transport::udp::build_connect_request(tx_id)).await?;
-
-        let mut buf = [0u8; 4096];
-        let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
-            .await
-            .map_err(|_| Error::Timeout)??;
-        let connection_id = tracker::transport::udp::parse_connect_response(&buf[..n], tx_id)?;
-
-        let announce_tx = rand::random::<u32>();
-        let key = rand::random::<u32>();
-        socket
-            .send(&tracker::transport::udp::build_announce_request(
-                connection_id,
-                announce_tx,
-                key,
-                req,
-            ))
-            .await?;
-
-        let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
-            .await
-            .map_err(|_| Error::Timeout)??;
-        Ok(tracker::transport::udp::parse_announce_response(&buf[..n], announce_tx)?)
+        Ok(tracker::transport::udp::announce(&mut socket, req).await?)
     }
 }

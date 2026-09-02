@@ -1,3 +1,4 @@
+use super::super::transport::UdpSocket;
 use super::super::{AnnounceRequest, TrackerResponse};
 use super::{Error, Result};
 
@@ -13,26 +14,17 @@ pub fn build_connect_request(tx_id: u32) -> [u8; 16] {
     buf
 }
 
-pub fn parse_connect_response(
-    bytes: &[u8],
-    expected_tx_id: u32,
-) -> Result<u64> {
+pub fn parse_connect_response(bytes: &[u8], expected_tx_id: u32) -> Result<u64> {
     if bytes.len() < 16 {
-        return Err(Error::InvalidResponse(
-            "udp connect response too short".to_owned(),
-        ));
+        return Err(Error::InvalidResponse("udp connect response too short".to_owned()));
     }
     let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
     let tx_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
     if action != ACTION_CONNECT {
-        return Err(Error::InvalidResponse(format!(
-            "unexpected udp connect action: {action}"
-        )));
+        return Err(Error::InvalidResponse(format!("unexpected udp connect action: {action}")));
     }
     if tx_id != expected_tx_id {
-        return Err(Error::InvalidResponse(
-            "udp connect transaction id mismatch".to_owned(),
-        ));
+        return Err(Error::InvalidResponse("udp connect transaction id mismatch".to_owned()));
     }
     Ok(u64::from_be_bytes(bytes[8..16].try_into().unwrap()))
 }
@@ -61,26 +53,17 @@ pub fn build_announce_request(
     buf
 }
 
-pub fn parse_announce_response(
-    bytes: &[u8],
-    expected_tx_id: u32,
-) -> Result<TrackerResponse> {
+pub fn parse_announce_response(bytes: &[u8], expected_tx_id: u32) -> Result<TrackerResponse> {
     if bytes.len() < 20 {
-        return Err(Error::InvalidResponse(
-            "udp announce response too short".to_owned(),
-        ));
+        return Err(Error::InvalidResponse("udp announce response too short".to_owned()));
     }
     let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
     let tx_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
     if action != ACTION_ANNOUNCE {
-        return Err(Error::InvalidResponse(format!(
-            "unexpected udp announce action: {action}"
-        )));
+        return Err(Error::InvalidResponse(format!("unexpected udp announce action: {action}")));
     }
     if tx_id != expected_tx_id {
-        return Err(Error::InvalidResponse(
-            "udp announce transaction id mismatch".to_owned(),
-        ));
+        return Err(Error::InvalidResponse("udp announce transaction id mismatch".to_owned()));
     }
     let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
     let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
@@ -92,4 +75,24 @@ pub fn parse_announce_response(
         seeders: Some(seeders),
         leechers: Some(leechers),
     })
+}
+
+pub async fn announce<S: UdpSocket>(
+    socket: &mut S,
+    req: &AnnounceRequest,
+) -> Result<TrackerResponse> {
+    let mut buf = [0u8; 4096];
+
+    let connect_tx = rand::random::<u32>();
+    socket.send(&build_connect_request(connect_tx)).await.map_err(Error::Io)?;
+    let n = socket.recv(&mut buf).await.map_err(Error::Io)?;
+    let connection_id = parse_connect_response(&buf[..n], connect_tx)?;
+
+    let announce_tx = rand::random::<u32>();
+    socket
+        .send(&build_announce_request(connection_id, announce_tx, rand::random(), req))
+        .await
+        .map_err(Error::Io)?;
+    let n = socket.recv(&mut buf).await.map_err(Error::Io)?;
+    parse_announce_response(&buf[..n], announce_tx)
 }

@@ -1,19 +1,15 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::time::Instant;
 
 use rand::seq::IteratorRandom;
 
 use super::bitfield::Bitfield;
+use crate::domain::peer;
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
-    PeerConnected { addr: SocketAddr, bitfield: Bitfield },
-    PeerDisconnected(SocketAddr),
-    PeerUnchokedUs(SocketAddr),
-    PeerChokedUs(SocketAddr),
-    PieceAvailable { addr: SocketAddr, index: usize },
+    FromPeer { addr: SocketAddr, event: peer::Output },
     PieceVerified(usize),
     Stop,
 }
@@ -34,7 +30,7 @@ pub struct Pool {
 }
 
 enum PeerState {
-    Connecting { since: Instant },
+    Connecting,
     Connected { unchoked: bool, in_flight: usize },
 }
 
@@ -57,11 +53,29 @@ impl Pool {
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
-            Input::PeerConnected { addr, bitfield } => self.on_connected(addr, bitfield),
-            Input::PeerDisconnected(addr) => self.on_disconnected(addr),
-            Input::PeerUnchokedUs(addr) => self.on_unchoked(addr),
-            Input::PeerChokedUs(addr) => self.on_choked(addr),
-            Input::PieceAvailable { addr, index } => self.on_piece_available(addr, index),
+            Input::FromPeer { addr, event } => match event {
+                peer::Output::EmitConnected(_) => vec![],
+                peer::Output::EmitDisconnected => self.on_disconnected(addr),
+                peer::Output::EmitMessage(msg) => match msg {
+                    peer::Message::Bitfield(bits) => {
+                        let bitfield = Bitfield::try_from(bits.as_ref())
+                            .unwrap_or_else(|_| Bitfield::new(self.num_pieces));
+                        self.on_connected(addr, bitfield)
+                    },
+                    peer::Message::Unchoke => self.on_unchoked(addr),
+                    peer::Message::Choke => self.on_choked(addr),
+                    peer::Message::Have(piece) => self.on_piece_available(addr, piece as usize),
+
+                    // Not yet implemented
+                    peer::Message::KeepAlive => vec![],
+                    peer::Message::Interested => vec![],
+                    peer::Message::NotInterested => vec![],
+                    peer::Message::Request { .. } => vec![],
+                    peer::Message::Piece { .. } => vec![],
+                    peer::Message::Cancel { .. } => vec![],
+                },
+                peer::Output::SendToPeer(_) => unreachable!("consumed by peer_runner"),
+            },
             Input::PieceVerified(piece) => self.on_piece_verified(piece),
             Input::Stop => self.on_stop(),
         }
@@ -71,7 +85,7 @@ impl Pool {
         let mut output = vec![];
         for addr in socket_addrs {
             if let Entry::Vacant(entry) = self.peers.entry(addr) {
-                entry.insert(PeerState::Connecting { since: Instant::now() });
+                entry.insert(PeerState::Connecting);
                 output.push(Output::ConnectPeer(addr));
             }
         }

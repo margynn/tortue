@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::info;
 
 use crate::adapters::tracker_client::TrackerClient;
 use crate::domain::torrent::Metainfo;
@@ -37,7 +37,7 @@ impl TrackerRunner {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        debug!("start_tracker"); // TODO: add tracker URL
+        info!("start_tracker"); // TODO: add tracker URL
 
         let mut interval = Duration::ZERO;
         let mut backoff = INITIAL_BACKOFF;
