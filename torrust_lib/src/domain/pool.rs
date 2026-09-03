@@ -16,13 +16,19 @@ pub enum Input {
     PeerConnected { addr: SocketAddr, peer_id: PeerId },
     PeerDisconnected(SocketAddr),
     MessageReceived { addr: SocketAddr, message: Message },
-    WriteCompleted(usize),
 }
 
 pub enum Output {
     ConnectPeer(SocketAddr),
-    SendToPeer { addr: SocketAddr, message: Message },
-    WritePiece { piece: usize, offset: u64, data: Vec<u8> },
+    SendToPeer {
+        addr: SocketAddr,
+        message: Message,
+    },
+    WritePiece {
+        piece_index: usize,
+        piece_offset: u64,
+        data: Vec<u8>,
+    },
     Completed,
 }
 
@@ -156,7 +162,7 @@ impl<'a> Pool<'a> {
         data: Vec<u8>,
     ) -> Vec<Output> {
         // Free in_flight peer slot
-        if let None = self.remove(&block_ref) {
+        if let None = self.block_assignments.remove(&block_ref) {
             // block not requested - assume malicious or unwanted
             return vec![];
         }
@@ -168,20 +174,25 @@ impl<'a> Pool<'a> {
         match self.pieces.receive_block(block_ref, data) {
             Err(_) => vec![], // malformed block - drop silently
             Ok(piece_event) => match piece_event {
-                PieceEvent::BlockReceived => todo!(),
-                PieceEvent::PieceCompleted { piece_index, command } => todo!(),
-                PieceEvent::PieceInvalid { piece_index } => todo!(),
+                PieceEvent::BlockReceived => self.schedule_requests(),
+                PieceEvent::PieceInvalid { piece_index } => {
+                    self.needed.set_bit(piece_index);
+                    self.schedule_requests()
+                },
+                PieceEvent::PieceCompleted { piece_index, piece_offset, data } => {
+                    let mut outputs = self.schedule_requests();
+                    outputs.push(Output::WritePiece { piece_index, piece_offset, data });
+
+                    // Check if last piece
+                    let _ = self.needed.unset_bit(piece_index);
+                    if self.needed.into_iter().next().is_none() {
+                        outputs.push(Output::Completed);
+                    }
+                    outputs
+                },
             },
         }
     }
-
-    // fn on_piece_verified(&mut self, piece: usize) -> Vec<Output> {
-    //     let _ = self.needed.unset_bit(piece);
-    //     if (&self.needed).into_iter().next().is_none() {
-    //         return vec![Output::Completed];
-    //     }
-    //     self.schedule_requests()
-    // }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
         let mut outputs = vec![];

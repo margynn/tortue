@@ -9,16 +9,12 @@ pub enum PieceEvent {
     BlockReceived,
     PieceCompleted {
         piece_index: usize,
-        command: StorageCommand,
+        piece_offset: u64,
+        data: Vec<u8>,
     },
     PieceInvalid {
         piece_index: usize,
     },
-}
-
-#[derive(Debug)]
-pub enum StorageCommand {
-    Write { offset: u64, data: Vec<u8> },
 }
 
 pub struct PieceManager<'a> {
@@ -103,7 +99,8 @@ impl<'a> PieceManager<'a> {
 
         Ok(PieceEvent::PieceCompleted {
             piece_index,
-            command: StorageCommand::Write { offset: torrent_offset, data: buffer },
+            piece_offset: torrent_offset,
+            data: buffer,
         })
     }
 }
