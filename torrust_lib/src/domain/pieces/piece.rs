@@ -74,7 +74,7 @@ impl Piece {
         Ok(())
     }
 
-    fn block_length(&self, block_index: usize) -> Result<usize> {
+    pub(super) fn block_length(&self, block_index: usize) -> Result<usize> {
         if block_index >= self.blocks.len() {
             return Err(PieceError::InvalidBlockIndex(block_index));
         }

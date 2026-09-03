@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::vec;
 
 use rand::seq::IteratorRandom;
 
@@ -8,6 +9,7 @@ use super::bitfield::Bitfield;
 use super::peer::{Message, PeerId};
 use super::pieces::{PieceEvent, PieceManager};
 use super::torrent::Metainfo;
+use crate::domain::pieces::BlockRef;
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
@@ -24,29 +26,29 @@ pub enum Output {
     Completed,
 }
 
-pub struct Pool {
-    metainfo: Metainfo,
+pub struct Pool<'a> {
+    metainfo: &'a Metainfo,
     needed: Bitfield,
     peers: HashMap<SocketAddr, PeerState>,
-    availability: HashMap<usize, HashSet<SocketAddr>>, // piece -> peers
-    in_flight: HashMap<(usize, u32), SocketAddr>,      // (piece, begin) -> peer
-    pieces: PieceManager,
+    availability: HashMap<usize, HashSet<SocketAddr>>,
+    block_assignments: HashMap<BlockRef, SocketAddr>,
+    pieces: PieceManager<'a>,
 }
 
 const MAX_IN_FLIGHT_PER_PEER: usize = 30;
 const MAX_CONNECTED: usize = 256;
 
-impl Pool {
-    pub fn new(metainfo: Metainfo) -> Self {
+impl<'a> Pool<'a> {
+    pub fn new(metainfo: &'a Metainfo) -> Self {
         let mut needed = Bitfield::new(metainfo.pieces.len());
         let _ = needed.set_all();
-        let pieces = PieceManager::new(metainfo.clone());
+        let pieces = PieceManager::new(metainfo);
         Self {
             metainfo,
             needed,
             peers: HashMap::new(),
             availability: HashMap::new(),
-            in_flight: HashMap::new(),
+            block_assignments: HashMap::new(),
             pieces,
         }
     }
@@ -57,7 +59,7 @@ impl Pool {
             Input::PeerConnected { addr, .. } => self.on_connected(addr),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            Input::PieceVerified(piece) => self.on_piece_verified(piece),
+            // Input::PieceVerified(piece) => self.on_piece_verified(piece),
         }
     }
 
@@ -86,92 +88,100 @@ impl Pool {
             peers.remove(&addr);
             !peers.is_empty()
         });
-        self.in_flight.retain(|_, peer| *peer != addr);
+        self.block_assignments.retain(|_, peer| *peer != addr);
         self.schedule_requests()
     }
 
     fn on_message(&mut self, addr: SocketAddr, message: Message) -> Vec<Output> {
-        if let Some(state) = self.peers.get_mut(&addr) {
-            state.apply(&message);
-        } else {
+        let Some(state) = self.peers.get_mut(&addr) else {
             return vec![];
-        }
-
-        match &message {
-            Message::Bitfield(bits) => {
-                if let Ok(bf) = Bitfield::try_from(bits.as_ref()) {
-                    for piece in &bf {
-                        self.availability.entry(piece as usize).or_default().insert(addr);
-                    }
-                }
-                let mut outputs = vec![Output::SendToPeer { addr, message: Message::Interested }];
-                outputs.extend(self.schedule_requests());
-                outputs
-            },
-            Message::Have(piece) => {
-                self.availability.entry(*piece as usize).or_default().insert(addr);
-                self.schedule_requests()
-            },
+        };
+        state.apply(&message);
+        match message {
+            Message::Bitfield(bits) => self.on_message_bitfield(addr, bits),
+            Message::Have(piece_index) => self.on_message_have(addr, piece_index),
             Message::Unchoke => self.schedule_requests(),
-            Message::Choke => {
-                self.in_flight.retain(|_, peer| *peer != addr);
-                if let Some(state) = self.peers.get_mut(&addr) {
-                    state.in_flight = 0;
-                }
-                self.schedule_requests()
-            },
-            Message::Piece { index, begin, block } => {
-                self.on_block_received(addr, *index as usize, *begin, *block)
+            Message::Choke => self.on_message_choke(addr),
+            Message::Piece { piece_index, piece_offset, data } => {
+                let block_ref = BlockRef { piece_index, piece_offset };
+                self.on_message_piece(addr, block_ref, data)
             },
             _ => vec![],
         }
     }
 
-    fn on_block_received(
-        &mut self,
-        addr: SocketAddr,
-        piece: usize,
-        begin: u32,
-        block: Vec<u8>,
-    ) -> Vec<Output> {
-        // 1. In-flight accounting (peer responsibility)
-        if self.in_flight.remove(&(piece, begin)).is_some() {
-            if let Some(state) = self.peers.get_mut(&addr) {
-                state.in_flight = state.in_flight.saturating_sub(1);
-            }
+    /// Ask the peer to unchoke us (Send Interrested), or send block requests if
+    /// already unchocked
+    fn interested_or_request(&mut self, addr: SocketAddr) -> Vec<Output> {
+        let peer = self.peers.get_mut(&addr).expect("peer must be available");
+        if !peer.am_interested {
+            peer.am_interested = true;
+            // Signal interest unconditionally — peer will unchoke us if they agree.
+            return vec![Output::SendToPeer { addr, message: Message::Interested }];
         }
-
-        // 2. Piece assembly and verification (piece manager responsibility)
-        let mut outputs = vec![];
-        match self.pieces.receive_block(piece as u32, begin as usize, block.clone()) {
-            Ok(PieceEvent::BlockReceived) => {},
-            Ok(PieceEvent::PieceCompleted {
-                piece,
-                command: StorageCommand::Write { offset, data },
-            }) => {
-                outputs.push(Output::WritePiece { piece: piece as usize, offset, data });
-            },
-            Ok(PieceEvent::PieceInvalid { piece }) => {
-                // PieceManager already reset the piece internally.
-                // Re-add to needed so schedule_requests() will retry.
-                let _ = self.needed.set_bit(piece as usize);
-            },
-            Err(_) => {},
+        if peer.peer_choking {
+            return vec![]; // Already interested, waiting for unchoke.
         }
-
-        outputs.extend(self.schedule_requests());
-        outputs
-    }
-
-    fn on_piece_verified(&mut self, piece: usize) -> Vec<Output> {
-        let _ = self.needed.unset_bit(piece);
-
-        if (&self.needed).into_iter().next().is_none() {
-            return vec![Output::Completed];
-        }
-
         self.schedule_requests()
     }
+
+    fn on_message_bitfield(&mut self, addr: SocketAddr, bits: Vec<u8>) -> Vec<Output> {
+        // Record the pieces available at peer
+        if let Ok(bf) = Bitfield::try_from(bits.as_ref()) {
+            for piece in &bf {
+                self.availability.entry(piece).or_default().insert(addr);
+            }
+        }
+        self.interested_or_request(addr)
+    }
+
+    fn on_message_have(&mut self, addr: SocketAddr, piece_index: usize) -> Vec<Output> {
+        // Update the piece availability at peer
+        self.availability.entry(piece_index).or_default().insert(addr);
+        self.interested_or_request(addr)
+    }
+
+    fn on_message_choke(&mut self, addr: SocketAddr) -> Vec<Output> {
+        self.block_assignments.retain(|_, peer| *peer != addr);
+        if let Some(state) = self.peers.get_mut(&addr) {
+            state.in_flight = 0;
+        }
+        vec![]
+    }
+
+    fn on_message_piece(
+        &mut self,
+        addr: SocketAddr,
+        block_ref: BlockRef,
+        data: Vec<u8>,
+    ) -> Vec<Output> {
+        // Free in_flight peer slot
+        if let None = self.remove(&block_ref) {
+            // block not requested - assume malicious or unwanted
+            return vec![];
+        }
+        if let Some(state) = self.peers.get_mut(&addr) {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+
+        // Piece management
+        match self.pieces.receive_block(block_ref, data) {
+            Err(_) => vec![], // malformed block - drop silently
+            Ok(piece_event) => match piece_event {
+                PieceEvent::BlockReceived => todo!(),
+                PieceEvent::PieceCompleted { piece_index, command } => todo!(),
+                PieceEvent::PieceInvalid { piece_index } => todo!(),
+            },
+        }
+    }
+
+    // fn on_piece_verified(&mut self, piece: usize) -> Vec<Output> {
+    //     let _ = self.needed.unset_bit(piece);
+    //     if (&self.needed).into_iter().next().is_none() {
+    //         return vec![Output::Completed];
+    //     }
+    //     self.schedule_requests()
+    // }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
         let mut outputs = vec![];
@@ -277,6 +287,10 @@ impl PeerState {
                 let _ = self.bitfield.set_bit(*piece as usize);
             },
             _ => {},
+            // Message::KeepAlive => todo!(),
+            // Message::Request { piece_index, piece_offset, piece_len } => todo!(),
+            // Message::Piece { piece_index, piece_offset, data } => todo!(),
+            // Message::Cancel { piece_index, piece_offset, piece_len } => todo!(),
         }
     }
 }

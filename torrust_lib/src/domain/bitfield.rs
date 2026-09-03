@@ -98,7 +98,7 @@ impl TryFrom<&[u8]> for Bitfield {
 }
 
 impl<'a> IntoIterator for &'a Bitfield {
-    type Item = u32;
+    type Item = usize;
     type IntoIter = BitfieldIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -117,7 +117,7 @@ pub struct BitfieldIter<'a> {
 }
 
 impl<'a> Iterator for BitfieldIter<'a> {
-    type Item = u32;
+    type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.byte_idx < self.bitfield.len() {
@@ -127,7 +127,7 @@ impl<'a> Iterator for BitfieldIter<'a> {
                 if (byte >> (7 - self.bit_idx)) & 1 == 1 {
                     let idx = self.byte_idx * 8 + self.bit_idx as usize;
                     self.bit_idx += 1;
-                    return Some(idx as u32);
+                    return Some(idx);
                 }
                 self.bit_idx += 1;
             }
@@ -353,10 +353,7 @@ mod tests {
         let mut bf = Bitfield::new(8);
 
         assert!(matches!(bf.extend_bytes(&[]), Err(Error::PieceOutOfRange)));
-        assert!(matches!(
-            bf.extend_bytes(&[0, 0]),
-            Err(Error::PieceOutOfRange)
-        ));
+        assert!(matches!(bf.extend_bytes(&[0, 0]), Err(Error::PieceOutOfRange)));
     }
 
     #[test]

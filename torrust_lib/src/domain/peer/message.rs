@@ -17,7 +17,7 @@ pub enum Message {
     Unchoke,
     Interested,
     NotInterested,
-    Have(u32),
+    Have(usize),
     Bitfield(Vec<u8>),
     Request {
         piece_index: usize,
@@ -154,7 +154,7 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 let piece =
-                    u32::from_be_bytes(payload.try_into().map_err(|_| Error::InvalidMessage)?);
+                    usize::from_be_bytes(payload.try_into().map_err(|_| Error::InvalidMessage)?);
                 Ok(Message::Have(piece))
             },
             5 => Ok(Message::Bitfield(payload.to_vec())),

@@ -32,6 +32,21 @@ pub struct BlockRange {
     pub piece_len: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockRef {
+    pub piece_index: usize,
+    pub piece_offset: usize,
+}
+
+impl From<&BlockRange> for BlockRef {
+    fn from(b: &BlockRange) -> Self {
+        Self {
+            piece_index: b.piece_index,
+            piece_offset: b.piece_offset,
+        }
+    }
+}
+
 impl<'a> PieceManager<'a> {
     pub fn new(metainfo: &'a Metainfo) -> Self {
         let piece_count = metainfo.pieces.len();
@@ -50,25 +65,24 @@ impl<'a> PieceManager<'a> {
     }
 
     pub fn missing_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
-        self.pieces[piece_index].missing_blocks().map(move |block_index| BlockRange {
+        let piece = &self.pieces[piece_index];
+        piece.missing_blocks().map(move |block_index| BlockRange {
             piece_index,
             piece_offset: block_index * BLOCK_SIZE,
-            piece_len: BLOCK_SIZE,
+            piece_len: piece.block_length(block_index).expect("iter on blocks"),
         })
     }
 
-    pub fn request_block(&mut self, piece_index: usize, piece_offset: usize) -> Result<()> {
-        let block_index = piece_offset / BLOCK_SIZE;
-        self.pieces[piece_index].request_block(block_index).map_err(Error::Piece)
+    pub fn request_block(&mut self, block_ref: BlockRef) -> Result<()> {
+        let block_index = block_ref.piece_offset / BLOCK_SIZE;
+        self.pieces[block_ref.piece_index]
+            .request_block(block_index)
+            .map_err(Error::Piece)
     }
 
-    pub fn receive_block(
-        &mut self,
-        piece_index: usize,
-        piece_offset: usize,
-        data: Vec<u8>,
-    ) -> Result<PieceEvent> {
-        let block_index = piece_offset / BLOCK_SIZE;
+    pub fn receive_block(&mut self, block_ref: BlockRef, data: Vec<u8>) -> Result<PieceEvent> {
+        let piece_index = block_ref.piece_index;
+        let block_index = block_ref.piece_offset / BLOCK_SIZE;
         let p = &mut self.pieces[piece_index];
 
         p.receive_block(block_index, data).map_err(Error::Piece)?;
