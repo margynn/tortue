@@ -7,7 +7,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::warn;
 
 use crate::domain::peer::{AsyncByteReader, Handshake, Message, PeerId};
 use crate::domain::torrent::Metainfo;
@@ -52,7 +51,7 @@ impl AsyncByteReader for TcpStream {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PeerRunner {
+pub struct PeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
     metainfo: Arc<Metainfo>,
@@ -60,7 +59,7 @@ pub struct PeerRunner {
     tx: mpsc::Sender<PeerEvent>,
 }
 
-impl PeerRunner {
+impl PeerIO {
     pub fn new(
         peer_addr: SocketAddr,
         client_id: PeerId,

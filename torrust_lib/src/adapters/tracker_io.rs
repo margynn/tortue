@@ -1,10 +1,19 @@
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use reqwest::Client;
 use tokio::net::{UdpSocket, lookup_host};
+use tokio::sync::mpsc;
+use tracing::{info, warn};
 use url::Url;
 
-use crate::domain::tracker::{self, AnnounceRequest, TrackerResponse};
+use crate::domain::torrent::Metainfo;
+use crate::domain::tracker::{
+    self, AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse,
+};
+
+const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
+const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -37,17 +46,83 @@ pub enum Error {
 
     #[error("missing udp port")]
     MissingUdpPort,
+
+    #[error("peers channel closed")]
+    PeersChannelClosed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub enum TrackerClient {
+pub struct TrackerIO {
+    client: TrackerClient,
+    metainfo: Metainfo,
+    node: Node,
+    peers_tx: mpsc::Sender<Vec<SocketAddr>>,
+}
+
+impl TrackerIO {
+    pub fn new(
+        url: &str,
+        metainfo: Metainfo,
+        node: Node,
+        peers_tx: mpsc::Sender<Vec<SocketAddr>>,
+    ) -> Result<Self> {
+        let client = TrackerClient::new(url)?;
+        Ok(Self { client, metainfo, node, peers_tx })
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        info!("start_tracker"); // TODO: add tracker URL
+
+        let mut interval = Duration::ZERO;
+        let mut backoff = INITIAL_BACKOFF;
+        let mut next_event = Some(AnnounceEvent::Started);
+
+        loop {
+            tokio::time::sleep(interval).await;
+
+            let req = AnnounceRequest {
+                info_hash: self.metainfo.hash,
+                peer_id: self.node.id,
+                port: self.node.port,
+                stats: SessionStats {
+                    // TODO: use an Arc<SessionStats> to share ?
+                    uploaded: 0,   // TODO: should update
+                    downloaded: 0, // TODO: should update
+                    left: self.metainfo.size(),
+                },
+                event: next_event.take().unwrap_or(AnnounceEvent::None),
+                compact: true,
+            };
+
+            match self.client.announce(req).await {
+                Ok(resp) => {
+                    info!(
+                        peers = resp.peers.len(),
+                        interval = resp.interval,
+                        "tracker announce succeeded"
+                    );
+                    backoff = INITIAL_BACKOFF;
+                    interval = Duration::from_secs(resp.interval.max(60) as u64);
+                    self.peers_tx.send(resp.peers).await.map_err(|_| Error::PeersChannelClosed)?;
+                },
+                Err(e) => {
+                    warn!(error = %e, backoff_secs = backoff.as_secs(), "tracker announce failed");
+                    interval = backoff;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                },
+            }
+        }
+    }
+}
+
+enum TrackerClient {
     Http(HttpTransport),
     Udp(UdpTransport),
 }
 
 impl TrackerClient {
-    pub fn new(s: &str) -> Result<Self> {
+    fn new(s: &str) -> Result<Self> {
         let url = Url::parse(s).map_err(|_| Error::InvalidTrackerUrl)?;
         match url.scheme() {
             "http" | "https" => {
@@ -74,7 +149,7 @@ impl TrackerClient {
         }
     }
 
-    pub async fn announce(&self, req: AnnounceRequest) -> Result<TrackerResponse> {
+    async fn announce(&self, req: AnnounceRequest) -> Result<TrackerResponse> {
         match self {
             Self::Http(t) => t.announce(&req).await,
             Self::Udp(t) => t.announce(&req).await,

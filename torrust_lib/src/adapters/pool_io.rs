@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::adapters::peer_runner::{PeerEvent, PeerRunner};
+use crate::adapters::peer_io::{PeerEvent, PeerIO};
 use crate::domain::peer::{self, PeerId};
 use crate::domain::pool::{self, Pool};
 use crate::domain::torrent::Metainfo;
@@ -17,7 +17,7 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolRunner {
+pub struct PoolIO {
     metainfo: Metainfo,
     client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
@@ -27,7 +27,7 @@ pub struct PoolRunner {
     verified_pieces: usize,
 }
 
-impl PoolRunner {
+impl PoolIO {
     pub fn new(
         metainfo: Metainfo,
         client_id: PeerId,
@@ -105,8 +105,7 @@ impl PoolRunner {
 
         // Task 1: pure IO — TCP connect/read/write, no domain logic.
         let metainfo = self.metainfo.clone();
-        let mut runner =
-            PeerRunner::new(addr, self.client_id, metainfo.into(), cmd_rx, peer_out_tx);
+        let mut runner = PeerIO::new(addr, self.client_id, metainfo.into(), cmd_rx, peer_out_tx);
         tokio::spawn(async move { runner.run().await });
 
         // Task 2: forward PeerEvents from the peer runner to the pool, with logging.

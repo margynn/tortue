@@ -2,14 +2,19 @@ use sha1::{Digest, Sha1};
 
 use super::super::bitfield::Bitfield;
 use super::super::torrent::Metainfo;
+use super::Result;
 use super::piece::{BLOCK_SIZE, Piece};
-use super::{Result, StorageCommand};
 
 #[derive(Debug)]
 pub enum PieceEvent {
     BlockReceived,
     PieceCompleted { piece: u32, command: StorageCommand },
     PieceInvalid { piece: u32 },
+}
+
+#[derive(Debug)]
+pub enum StorageCommand {
+    Write { offset: u64, data: Vec<u8> },
 }
 
 pub struct PieceManager {
@@ -48,10 +53,7 @@ impl PieceManager {
         self.bitfield.has_bit(piece as usize).unwrap()
     }
 
-    pub fn missing_blocks(
-        &self,
-        piece: u32,
-    ) -> impl Iterator<Item = BlockRange> + '_ {
+    pub fn missing_blocks(&self, piece: u32) -> impl Iterator<Item = BlockRange> + '_ {
         self.pieces[piece as usize].missing_blocks().map(|index| BlockRange {
             begin: index * BLOCK_SIZE,
             length: BLOCK_SIZE,
@@ -94,10 +96,7 @@ impl PieceManager {
 
         Ok(PieceEvent::PieceCompleted {
             piece,
-            command: StorageCommand::Write {
-                offset: piece_offset,
-                data: buffer,
-            },
+            command: StorageCommand::Write { offset: piece_offset, data: buffer },
         })
     }
 
