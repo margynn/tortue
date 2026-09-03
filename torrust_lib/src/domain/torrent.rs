@@ -52,7 +52,7 @@ pub struct Metainfo {
     pub url_list: Option<Vec<String>>,
     pub name: String,
     pub hash: InfoHash,
-    pub piece_length: u64,
+    pub piece_length: usize,
     pub pieces: Vec<PieceHash>,
     pub mode: Mode,
 }
@@ -71,7 +71,7 @@ pub struct File {
 
 impl Metainfo {
     /// content size in bytes of the torrent content
-    pub fn size(&self) -> u64 {
+    pub fn total_size(&self) -> u64 {
         match &self.mode {
             Mode::Single { length } => *length,
             Mode::Multiple { files } => files.iter().map(|f| f.length).sum(),
@@ -142,9 +142,9 @@ fn parse_url_list(root: &Bencode) -> Option<Vec<String>> {
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_info(info: &Bencode) -> Result<(String, u64, Vec<PieceHash>, Mode)> {
+fn parse_info(info: &Bencode) -> Result<(String, usize, Vec<PieceHash>, Mode)> {
     let name = info.get_utf8(b"name")?;
-    let piece_length = to_u64(info.get_int(b"piece length")?)?;
+    let piece_length = to_usize(info.get_int(b"piece length")?)?;
     let pieces = parse_pieces(info.get_bytes(b"pieces")?)?;
 
     let mode = match info.get(b"length") {
@@ -224,4 +224,8 @@ fn parse_file(file: &Bencode) -> Result<File> {
 
 fn to_u64(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::NegativeLength)
+}
+
+fn to_usize(value: i64) -> Result<usize> {
+    usize::try_from(value).map_err(|_| Error::NegativeLength)
 }

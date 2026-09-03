@@ -6,6 +6,7 @@ use rand::seq::IteratorRandom;
 
 use super::bitfield::Bitfield;
 use super::peer::{Message, PeerId};
+use super::pieces::{PieceEvent, PieceManager};
 use super::torrent::Metainfo;
 
 pub enum Input {
@@ -13,12 +14,13 @@ pub enum Input {
     PeerConnected { addr: SocketAddr, peer_id: PeerId },
     PeerDisconnected(SocketAddr),
     MessageReceived { addr: SocketAddr, message: Message },
-    PieceVerified(usize),
+    WriteCompleted(usize),
 }
 
 pub enum Output {
     ConnectPeer(SocketAddr),
     SendToPeer { addr: SocketAddr, message: Message },
+    WritePiece { piece: usize, offset: u64, data: Vec<u8> },
     Completed,
 }
 
@@ -28,22 +30,24 @@ pub struct Pool {
     peers: HashMap<SocketAddr, PeerState>,
     availability: HashMap<usize, HashSet<SocketAddr>>, // piece -> peers
     in_flight: HashMap<(usize, u32), SocketAddr>,      // (piece, begin) -> peer
+    pieces: PieceManager,
 }
 
 const MAX_IN_FLIGHT_PER_PEER: usize = 30;
 const MAX_CONNECTED: usize = 256;
-const BLOCK_SIZE: u32 = 16_384; // 16KB
 
 impl Pool {
     pub fn new(metainfo: Metainfo) -> Self {
         let mut needed = Bitfield::new(metainfo.pieces.len());
         let _ = needed.set_all();
+        let pieces = PieceManager::new(metainfo.clone());
         Self {
             metainfo,
             needed,
             peers: HashMap::new(),
             availability: HashMap::new(),
             in_flight: HashMap::new(),
+            pieces,
         }
     }
 
@@ -116,20 +120,47 @@ impl Pool {
                 }
                 self.schedule_requests()
             },
-            Message::Piece { index, begin, .. } => {
-                self.on_block_received(addr, *index as usize, *begin)
+            Message::Piece { index, begin, block } => {
+                self.on_block_received(addr, *index as usize, *begin, *block)
             },
             _ => vec![],
         }
     }
 
-    fn on_block_received(&mut self, addr: SocketAddr, piece: usize, begin: u32) -> Vec<Output> {
+    fn on_block_received(
+        &mut self,
+        addr: SocketAddr,
+        piece: usize,
+        begin: u32,
+        block: Vec<u8>,
+    ) -> Vec<Output> {
+        // 1. In-flight accounting (peer responsibility)
         if self.in_flight.remove(&(piece, begin)).is_some() {
             if let Some(state) = self.peers.get_mut(&addr) {
                 state.in_flight = state.in_flight.saturating_sub(1);
             }
         }
-        self.schedule_requests()
+
+        // 2. Piece assembly and verification (piece manager responsibility)
+        let mut outputs = vec![];
+        match self.pieces.receive_block(piece as u32, begin as usize, block.clone()) {
+            Ok(PieceEvent::BlockReceived) => {},
+            Ok(PieceEvent::PieceCompleted {
+                piece,
+                command: StorageCommand::Write { offset, data },
+            }) => {
+                outputs.push(Output::WritePiece { piece: piece as usize, offset, data });
+            },
+            Ok(PieceEvent::PieceInvalid { piece }) => {
+                // PieceManager already reset the piece internally.
+                // Re-add to needed so schedule_requests() will retry.
+                let _ = self.needed.set_bit(piece as usize);
+            },
+            Err(_) => {},
+        }
+
+        outputs.extend(self.schedule_requests());
+        outputs
     }
 
     fn on_piece_verified(&mut self, piece: usize) -> Vec<Output> {
@@ -191,22 +222,23 @@ impl Pool {
         outputs
     }
 
-    fn piece_blocks(&self, piece: usize) -> Vec<(u32, u32)> {
-        // (begin, length) for every block of a piece
-        let piece_len = if piece == self.metainfo.pieces.len() - 1 {
-            let total = self.metainfo.size();
-            let full = (self.metainfo.pieces.len() - 1) as u64 * self.metainfo.piece_length;
-            (total - full) as u32
-        } else {
-            self.metainfo.piece_length as u32
-        };
+    // TODO: replace with piece_manager
+    // fn piece_blocks(&self, piece: usize) -> Vec<(u32, u32)> {
+    //     // (begin, length) for every block of a piece
+    //     let piece_len = if piece == self.metainfo.pieces.len() - 1 {
+    //         let total = self.metainfo.size();
+    //         let full = (self.metainfo.pieces.len() - 1) as u64 * self.metainfo.piece_length;
+    //         (total - full) as u32
+    //     } else {
+    //         self.metainfo.piece_length as u32
+    //     };
 
-        (0..)
-            .map(|i| i * BLOCK_SIZE)
-            .take_while(|&begin| begin < piece_len)
-            .map(|begin| (begin, BLOCK_SIZE.min(piece_len - begin)))
-            .collect()
-    }
+    //     (0..)
+    //         .map(|i| i * BLOCK_SIZE)
+    //         .take_while(|&begin| begin < piece_len)
+    //         .map(|begin| (begin, BLOCK_SIZE.min(piece_len - begin)))
+    //         .collect()
+    // }
 }
 
 struct PeerState {

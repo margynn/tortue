@@ -3,7 +3,7 @@ use std::{fmt, io};
 
 use super::{Error, Result};
 
-const MAX_MESSAGE_SIZE: usize = 1 << 20;
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1Mib
 
 pub trait AsyncByteReader {
     fn read_exact<'a>(&'a mut self, buf: &'a mut [u8])
@@ -19,19 +19,31 @@ pub enum Message {
     NotInterested,
     Have(u32),
     Bitfield(Vec<u8>),
-    Request { index: u32, begin: u32, length: u32 },
-    Piece { index: u32, begin: u32, block: Vec<u8> },
-    Cancel { index: u32, begin: u32, length: u32 },
+    Request {
+        piece_index: usize,
+        piece_offset: usize,
+        piece_len: usize,
+    },
+    Piece {
+        piece_index: usize,
+        piece_offset: usize,
+        data: Vec<u8>,
+    },
+    Cancel {
+        piece_index: usize,
+        piece_offset: usize,
+        piece_len: usize,
+    },
 }
 
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Piece { index, begin, block } => f
+            Self::Piece { piece_index, piece_offset, data } => f
                 .debug_struct("Piece")
-                .field("index", index)
-                .field("begin", begin)
-                .field("size", &block.len())
+                .field("piece_index", piece_index)
+                .field("piece_offset", piece_offset)
+                .field("data", &data.len())
                 .finish(),
             Self::Bitfield(bits) => {
                 write!(f, "Bitfield({} bytes)", bits.len())
@@ -42,17 +54,17 @@ impl fmt::Debug for Message {
             Self::Interested => write!(f, "Interested"),
             Self::NotInterested => write!(f, "NotInterested"),
             Self::Have(piece) => write!(f, "Have({piece})"),
-            Self::Request { index, begin, length } => f
+            Self::Request { piece_index, piece_offset, piece_len } => f
                 .debug_struct("Request")
-                .field("index", index)
-                .field("begin", begin)
-                .field("length", length)
+                .field("piece_index", piece_index)
+                .field("piece_offset", piece_offset)
+                .field("piece_len", piece_len)
                 .finish(),
-            Self::Cancel { index, begin, length } => f
+            Self::Cancel { piece_index, piece_offset, piece_len } => f
                 .debug_struct("Cancel")
-                .field("index", index)
-                .field("begin", begin)
-                .field("length", length)
+                .field("piece_index", piece_index)
+                .field("piece_offset", piece_offset)
+                .field("piece_len", piece_len)
                 .finish(),
         }
     }
@@ -81,7 +93,7 @@ impl Message {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Message Framing: <length prefix><message>, length prefix is 4-byte big-endian
+        // Message Framing: <piece_len prefix><message>, piece_len prefix is 4-byte big-endian
         match self {
             Message::KeepAlive => buf.extend_from_slice(&0u32.to_be_bytes()),
             Message::Choke => buf.extend_from_slice(&[0, 0, 0, 1, 0]),
@@ -98,26 +110,26 @@ impl Message {
                 buf.push(5);
                 buf.extend_from_slice(bits);
             },
-            Message::Request { index, begin, length } => {
+            Message::Request { piece_index, piece_offset, piece_len } => {
                 buf.extend_from_slice(&13u32.to_be_bytes());
                 buf.push(6);
-                buf.extend_from_slice(&index.to_be_bytes());
-                buf.extend_from_slice(&begin.to_be_bytes());
-                buf.extend_from_slice(&length.to_be_bytes());
+                buf.extend_from_slice(&piece_index.to_be_bytes());
+                buf.extend_from_slice(&piece_offset.to_be_bytes());
+                buf.extend_from_slice(&piece_len.to_be_bytes());
             },
-            Message::Piece { index, begin, block } => {
-                buf.extend_from_slice(&(9 + block.len() as u32).to_be_bytes());
+            Message::Piece { piece_index, piece_offset, data } => {
+                buf.extend_from_slice(&(9 + data.len() as u32).to_be_bytes());
                 buf.push(7);
-                buf.extend_from_slice(&index.to_be_bytes());
-                buf.extend_from_slice(&begin.to_be_bytes());
-                buf.extend_from_slice(block);
+                buf.extend_from_slice(&piece_index.to_be_bytes());
+                buf.extend_from_slice(&piece_offset.to_be_bytes());
+                buf.extend_from_slice(data);
             },
-            Message::Cancel { index, begin, length } => {
+            Message::Cancel { piece_index, piece_offset, piece_len } => {
                 buf.extend_from_slice(&13u32.to_be_bytes());
                 buf.push(8);
-                buf.extend_from_slice(&index.to_be_bytes());
-                buf.extend_from_slice(&begin.to_be_bytes());
-                buf.extend_from_slice(&length.to_be_bytes());
+                buf.extend_from_slice(&piece_index.to_be_bytes());
+                buf.extend_from_slice(&piece_offset.to_be_bytes());
+                buf.extend_from_slice(&piece_len.to_be_bytes());
             },
         }
 
@@ -150,44 +162,44 @@ impl Message {
                 if payload.len() != 12 {
                     return Err(Error::InvalidMessage);
                 }
-                let index = u32::from_be_bytes(
+                let piece_index = usize::from_be_bytes(
                     payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                let begin = u32::from_be_bytes(
+                let piece_offset = usize::from_be_bytes(
                     payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                let length = u32::from_be_bytes(
+                let piece_len = usize::from_be_bytes(
                     payload[8..12].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                Ok(Message::Request { index, begin, length })
+                Ok(Message::Request { piece_index, piece_offset, piece_len })
             },
             7 => {
                 if payload.len() < 8 {
                     return Err(Error::InvalidMessage);
                 }
-                let index = u32::from_be_bytes(
+                let piece_index = usize::from_be_bytes(
                     payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                let begin = u32::from_be_bytes(
+                let piece_offset = usize::from_be_bytes(
                     payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                let block = payload[8..].to_vec();
-                Ok(Message::Piece { index, begin, block })
+                let data = payload[8..].to_vec();
+                Ok(Message::Piece { piece_index, piece_offset, data })
             },
             8 => {
                 if payload.len() != 12 {
                     return Err(Error::InvalidMessage);
                 }
-                let index = u32::from_be_bytes(
+                let piece_index = usize::from_be_bytes(
                     payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                let begin = u32::from_be_bytes(
+                let piece_offset = usize::from_be_bytes(
                     payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                let length = u32::from_be_bytes(
+                let piece_len = usize::from_be_bytes(
                     payload[8..12].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
-                Ok(Message::Cancel { index, begin, length })
+                Ok(Message::Cancel { piece_index, piece_offset, piece_len })
             },
             _ => Err(Error::InvalidMessage),
         }

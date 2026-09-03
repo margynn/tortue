@@ -1,15 +1,19 @@
 use sha1::{Digest, Sha1};
 
-use super::super::bitfield::Bitfield;
 use super::super::torrent::Metainfo;
-use super::Result;
 use super::piece::{BLOCK_SIZE, Piece};
+use super::{Error, Result};
 
 #[derive(Debug)]
 pub enum PieceEvent {
     BlockReceived,
-    PieceCompleted { piece: u32, command: StorageCommand },
-    PieceInvalid { piece: u32 },
+    PieceCompleted {
+        piece_index: usize,
+        command: StorageCommand,
+    },
+    PieceInvalid {
+        piece_index: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -17,96 +21,80 @@ pub enum StorageCommand {
     Write { offset: u64, data: Vec<u8> },
 }
 
-pub struct PieceManager {
-    metainfo: Metainfo,
-    bitfield: Bitfield,
+pub struct PieceManager<'a> {
+    metainfo: &'a Metainfo,
     pieces: Vec<Piece>,
 }
 
 pub struct BlockRange {
-    pub begin: usize,
-    pub length: usize,
+    pub piece_index: usize,
+    pub piece_offset: usize,
+    pub piece_len: usize,
 }
 
-impl PieceManager {
-    pub fn new(metainfo: Metainfo) -> Self {
-        let mut pieces = Vec::with_capacity(metainfo.pieces.len());
+impl<'a> PieceManager<'a> {
+    pub fn new(metainfo: &'a Metainfo) -> Self {
+        let piece_count = metainfo.pieces.len();
+        let mut pieces = Vec::with_capacity(piece_count);
 
-        for (i, _) in metainfo.pieces.iter().enumerate() {
-            let is_last = i == metainfo.pieces.len() - 1;
-            let piece_length = if is_last {
-                metainfo.size() - metainfo.piece_length * i as u64
+        for i in 0..piece_count {
+            let piece_length = if i == piece_count - 1 {
+                metainfo.total_size() as usize - i * metainfo.piece_length
             } else {
                 metainfo.piece_length
             };
-            pieces.push(Piece::new(piece_length as usize));
+            pieces.push(Piece::new(piece_length));
         }
 
-        Self {
-            bitfield: Bitfield::new(metainfo.pieces.len()),
-            metainfo,
-            pieces,
-        }
+        Self { metainfo, pieces }
     }
 
-    pub fn has_piece(&self, piece: u32) -> bool {
-        self.bitfield.has_bit(piece as usize).unwrap()
-    }
-
-    pub fn missing_blocks(&self, piece: u32) -> impl Iterator<Item = BlockRange> + '_ {
-        self.pieces[piece as usize].missing_blocks().map(|index| BlockRange {
-            begin: index * BLOCK_SIZE,
-            length: BLOCK_SIZE,
+    pub fn missing_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
+        self.pieces[piece_index].missing_blocks().map(move |block_index| BlockRange {
+            piece_index,
+            piece_offset: block_index * BLOCK_SIZE,
+            piece_len: BLOCK_SIZE,
         })
     }
 
-    pub fn mark_block_requested(&mut self, piece: u32, begin: usize) {
-        let index = begin / BLOCK_SIZE;
-
-        self.pieces[piece as usize].mark_requested(index);
+    pub fn request_block(&mut self, piece_index: usize, piece_offset: usize) -> Result<()> {
+        let block_index = piece_offset / BLOCK_SIZE;
+        self.pieces[piece_index].request_block(block_index).map_err(Error::Piece)
     }
 
     pub fn receive_block(
         &mut self,
-        piece: u32,
-        offset: usize,
+        piece_index: usize,
+        piece_offset: usize,
         data: Vec<u8>,
     ) -> Result<PieceEvent> {
-        let p = &mut self.pieces[piece as usize];
+        let block_index = piece_offset / BLOCK_SIZE;
+        let p = &mut self.pieces[piece_index];
 
-        let index = offset / BLOCK_SIZE;
-
-        p.receive_block(index, data);
+        p.receive_block(block_index, data).map_err(Error::Piece)?;
 
         if !p.is_complete() {
             return Ok(PieceEvent::BlockReceived);
         }
 
-        let buffer = p.buffer();
+        let buffer = p.buffer().expect("piece is complete");
+        let expected_hash = self.metainfo.pieces[piece_index];
 
-        let expected = self.metainfo.pieces[piece as usize];
-
-        if !Self::verify_piece_hash(expected, &buffer) {
+        if !verify_piece_hash(expected_hash, &buffer) {
             p.reset();
-
-            return Ok(PieceEvent::PieceInvalid { piece });
+            return Ok(PieceEvent::PieceInvalid { piece_index });
         }
 
-        let piece_offset = piece as u64 * self.metainfo.piece_length;
+        let torrent_offset = piece_index as u64 * self.metainfo.piece_length as u64;
 
         Ok(PieceEvent::PieceCompleted {
-            piece,
-            command: StorageCommand::Write { offset: piece_offset, data: buffer },
+            piece_index,
+            command: StorageCommand::Write { offset: torrent_offset, data: buffer },
         })
     }
+}
 
-    pub fn storage_completed(&mut self, piece: u32) {
-        self.bitfield.set_bit(piece as usize).unwrap();
-    }
-
-    fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
-        let digest = Sha1::digest(buffer);
-
-        digest.as_slice() == expected
-    }
+fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
+    let digest = Sha1::digest(buffer);
+    digest.as_slice() == expected
 }
