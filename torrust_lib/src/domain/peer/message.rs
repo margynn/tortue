@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io;
+use std::{fmt, io};
 
 use super::{Error, Result};
 
@@ -10,7 +10,7 @@ pub trait AsyncByteReader {
     -> impl Future<Output = io::Result<()>> + 'a;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Message {
     KeepAlive,
     Choke,
@@ -22,6 +22,40 @@ pub enum Message {
     Request { index: u32, begin: u32, length: u32 },
     Piece { index: u32, begin: u32, block: Vec<u8> },
     Cancel { index: u32, begin: u32, length: u32 },
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Piece { index, begin, block } => f
+                .debug_struct("Piece")
+                .field("index", index)
+                .field("begin", begin)
+                .field("size", &block.len())
+                .finish(),
+            Self::Bitfield(bits) => {
+                write!(f, "Bitfield({} bytes)", bits.len())
+            },
+            Self::KeepAlive => write!(f, "KeepAlive"),
+            Self::Choke => write!(f, "Choke"),
+            Self::Unchoke => write!(f, "Unchoke"),
+            Self::Interested => write!(f, "Interested"),
+            Self::NotInterested => write!(f, "NotInterested"),
+            Self::Have(piece) => write!(f, "Have({piece})"),
+            Self::Request { index, begin, length } => f
+                .debug_struct("Request")
+                .field("index", index)
+                .field("begin", begin)
+                .field("length", length)
+                .finish(),
+            Self::Cancel { index, begin, length } => f
+                .debug_struct("Cancel")
+                .field("index", index)
+                .field("begin", begin)
+                .field("length", length)
+                .finish(),
+        }
+    }
 }
 
 impl Message {

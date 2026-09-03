@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::domain::peer::{AsyncByteReader, Handshake, Message, PeerId};
 use crate::domain::torrent::Metainfo;
@@ -21,7 +22,6 @@ pub enum PeerEvent {
     Disconnected,
     MessageReceived(Message),
 }
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -124,7 +124,10 @@ impl PeerRunner {
             tokio::time::sleep(delay).await;
             match self.connect().await {
                 Ok(result) => return result,
-                Err(_) => delay = (delay * 2).clamp(RECONNECT_DELAY, MAX_RECONNECT_DELAY),
+                Err(e) => {
+                    warn!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
+                    delay = (delay * 2).clamp(RECONNECT_DELAY, MAX_RECONNECT_DELAY);
+                },
             }
         }
     }

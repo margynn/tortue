@@ -125,7 +125,8 @@ impl UdpTransport {
                 Error::UdpRequest("tracker hostname resolved to no address".to_owned())
             })?;
 
-        let mut socket = UdpSocket::bind("[::]:0").await?;
+        let bind_addr = if tracker_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let mut socket = UdpSocket::bind(bind_addr).await?;
         socket.connect(tracker_addr).await?;
         Ok(tracker::transport::udp::announce(&mut socket, req).await?)
     }

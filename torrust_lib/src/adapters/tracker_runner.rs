@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::adapters::tracker_client::TrackerClient;
 use crate::domain::torrent::Metainfo;
@@ -62,11 +62,17 @@ impl TrackerRunner {
 
             match self.client.announce(req).await {
                 Ok(resp) => {
+                    info!(
+                        peers = resp.peers.len(),
+                        interval = resp.interval,
+                        "tracker announce succeeded"
+                    );
                     backoff = INITIAL_BACKOFF;
                     interval = Duration::from_secs(resp.interval.max(60) as u64);
                     self.peers_tx.send(resp.peers).await.map_err(|_| Error::PeersChannelClosed)?;
                 },
-                Err(_) => {
+                Err(e) => {
+                    warn!(error = %e, backoff_secs = backoff.as_secs(), "tracker announce failed");
                     interval = backoff;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                 },

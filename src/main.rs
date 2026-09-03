@@ -11,7 +11,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
     let cli = Cli::parse();
     let data = fs::read(&cli.path)?;
     download(data.as_ref()).await?;

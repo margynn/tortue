@@ -1,3 +1,5 @@
+use std::fmt;
+
 use rand::TryRng;
 
 use super::super::torrent::InfoHash;
@@ -8,7 +10,7 @@ pub struct Handshake {
     pub peer_id: PeerId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);
 
 impl Handshake {
@@ -37,9 +39,7 @@ impl Handshake {
 
         let pstrlen = buf[0] as usize;
         if pstrlen != Self::PSTR.len() {
-            return Err(Error::InvalidHandshake(
-                "invalid protocol string length",
-            ));
+            return Err(Error::InvalidHandshake("invalid protocol string length"));
         }
         if &buf[1..20] != Self::PSTR {
             return Err(Error::InvalidHandshake("invalid protocol string"));
@@ -82,5 +82,24 @@ impl PeerId {
 impl AsRef<[u8]> for PeerId {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &b in &self.0 {
+            if b.is_ascii_graphic() || b == b' ' {
+                write!(f, "{}", b as char)?;
+            } else {
+                write!(f, "\\x{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PeerId({self})")
     }
 }

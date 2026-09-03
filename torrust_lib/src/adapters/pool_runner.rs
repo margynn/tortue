@@ -107,13 +107,21 @@ impl PoolRunner {
             while let Some(event) = peer_out_rx.recv().await {
                 match &event {
                     PeerEvent::Connected(peer_id) => {
-                        info!(addr = %addr, peer_id = ?peer_id, "peer connected");
+                        info!(addr = %addr, peer_id = %peer_id, "peer connected");
                     },
                     PeerEvent::Disconnected => {
                         info!(addr = %addr, "peer disconnected");
                     },
-                    PeerEvent::MessageReceived(message) => {
-                        info!(addr = %addr, message = ?message, "peer message");
+                    PeerEvent::MessageReceived(msg) => match msg {
+                        peer::Message::Unchoke
+                        | peer::Message::Choke
+                        | peer::Message::Bitfield(_)
+                        | peer::Message::Have(_) => {
+                            tracing::debug!(addr = %addr, msg = ?msg, "peer state");
+                        },
+                        _ => {
+                            tracing::trace!(addr = %addr, msg = ?msg, "peer data");
+                        },
                     },
                 }
                 if pool_tx.send((addr, event)).await.is_err() {
