@@ -22,6 +22,7 @@ pub enum PeerEvent {
     MessageReceived(Message),
 }
 
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io error: {0}")]

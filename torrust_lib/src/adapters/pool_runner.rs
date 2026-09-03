@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::adapters::peer_runner::PeerRunner;
+use crate::adapters::peer_runner::{PeerEvent, PeerRunner};
 use crate::domain::peer::{self, PeerId};
 use crate::domain::pool::{self, Pool};
 use crate::domain::torrent::Metainfo;
@@ -21,9 +21,9 @@ pub struct PoolRunner {
     metainfo: Metainfo,
     client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
-    peer_cmds: HashMap<SocketAddr, mpsc::Sender<peer::Input>>,
-    pool_tx: mpsc::Sender<(SocketAddr, peer::Output)>,
-    pool_rx: mpsc::Receiver<(SocketAddr, peer::Output)>,
+    peer_cmds: HashMap<SocketAddr, mpsc::Sender<peer::Message>>,
+    pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
 }
 
 impl PoolRunner {
@@ -44,70 +44,86 @@ impl PoolRunner {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut pool = Pool::new(self.metainfo.pieces.len());
+        let mut pool = Pool::new(self.metainfo.clone());
 
         loop {
             let input = tokio::select! {
                 addrs = self.peers_rx.recv() => match addrs {
-                    None => return Err(Error::TrackerDisconnected),
                     Some(addrs) => pool::Input::PeersDiscovered(addrs),
+                    None => return Err(Error::TrackerDisconnected),
                 },
+
                 msg = self.pool_rx.recv() => match msg {
                     None => break,
-                    Some((addr, out)) => pool::Input::FromPeer { addr, event: out },
+                    Some((addr, PeerEvent::Connected(peer_id))) => pool::Input::PeerConnected { addr, peer_id },
+                    Some((addr, PeerEvent::Disconnected)) => pool::Input::PeerDisconnected(addr),
+                    Some((addr, PeerEvent::MessageReceived(message))) => pool::Input::MessageReceived { addr, message },
                 },
             };
 
+            if let pool::Input::PeerDisconnected(addr) = input {
+                self.peer_cmds.remove(&addr);
+            }
+
             for out in pool.step(input) {
-                self.handle_output(out);
+                self.handle_output(out).await;
             }
         }
 
         Ok(())
     }
 
-    fn handle_output(&mut self, out: pool::Output) {
+    async fn handle_output(&mut self, out: pool::Output) {
         match out {
             pool::Output::ConnectPeer(addr) => self.spawn_peer(addr),
-            pool::Output::DisconnectPeer(addr) => {
-                self.peer_cmds.remove(&addr);
+            pool::Output::SendToPeer { addr, message } => {
+                if let Some(v) = self.peer_cmds.get(&addr) {
+                    let _ = v.send(message).await;
+                }
             },
-            pool::Output::RequestPiece { from, index } => {
-                // TODO: PieceManager → block ranges → Message::Request
-                let _ = self.peer_cmds.get(&from);
-            },
-            pool::Output::Completed => {
-                // TODO: signal completion
-            },
+            pool::Output::Completed => todo!(),
         }
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {
-        let (peer_out_tx, mut peer_out_rx) = mpsc::channel(128);
+        // cmd: pool_runner → peer_runner (messages to write to TCP)
         let (cmd_tx, cmd_rx) = mpsc::channel(128);
+        // peer_out: peer_runner → forwarding task (lifecycle events + messages received)
+        let (peer_out_tx, mut peer_out_rx) = mpsc::channel(128);
 
         self.peer_cmds.insert(addr, cmd_tx);
 
+        // Task 1: pure IO — TCP connect/read/write, no domain logic.
         let metainfo = self.metainfo.clone();
-        let mut runner = PeerRunner::new(addr, self.client_id, metainfo.into(), cmd_rx, peer_out_tx);
+        let mut runner =
+            PeerRunner::new(addr, self.client_id, metainfo.into(), cmd_rx, peer_out_tx);
         tokio::spawn(async move { runner.run().await });
 
+        // Task 2: forward PeerEvents from the peer runner to the pool, with logging.
+        // Sends a final Disconnected sentinel when the peer runner stops, so Pool
+        // always cleans up even if the runner exited without sending one.
         let pool_tx = self.pool_tx.clone();
         tokio::spawn(async move {
-            while let Some(out) = peer_out_rx.recv().await {
-                match &out {
-                    peer::Output::EmitConnected(peer_id) => {
+            while let Some(event) = peer_out_rx.recv().await {
+                match &event {
+                    PeerEvent::Connected(peer_id) => {
                         info!(addr = %addr, peer_id = ?peer_id, "peer connected");
                     },
-                    peer::Output::EmitDisconnected => {
+                    PeerEvent::Disconnected => {
                         info!(addr = %addr, "peer disconnected");
                     },
-                    _ => {},
+                    PeerEvent::MessageReceived(message) => {
+                        info!(addr = %addr, message = ?message, "peer message");
+                    },
                 }
-                if pool_tx.send((addr, out)).await.is_err() {
+                if pool_tx.send((addr, event)).await.is_err() {
                     break;
                 }
             }
+
+            // Sentinel: guarantees Pool receives Disconnected even on abnormal exit.
+            // Pool handles duplicate Disconnected gracefully (peers.remove is idempotent).
+            let _ = pool_tx.send((addr, PeerEvent::Disconnected)).await;
         });
     }
 }

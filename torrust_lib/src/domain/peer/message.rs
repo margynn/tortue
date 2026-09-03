@@ -6,10 +6,8 @@ use super::{Error, Result};
 const MAX_MESSAGE_SIZE: usize = 1 << 20;
 
 pub trait AsyncByteReader {
-    fn read_exact<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> impl Future<Output = io::Result<()>> + 'a;
+    fn read_exact<'a>(&'a mut self, buf: &'a mut [u8])
+    -> impl Future<Output = io::Result<()>> + 'a;
 }
 
 #[derive(Debug, Clone)]
@@ -109,9 +107,8 @@ impl Message {
                 if payload.len() != 4 {
                     return Err(Error::InvalidMessage);
                 }
-                let piece = u32::from_be_bytes(
-                    payload.try_into().map_err(|_| Error::InvalidMessage)?,
-                );
+                let piece =
+                    u32::from_be_bytes(payload.try_into().map_err(|_| Error::InvalidMessage)?);
                 Ok(Message::Have(piece))
             },
             5 => Ok(Message::Bitfield(payload.to_vec())),
@@ -120,19 +117,13 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 let index = u32::from_be_bytes(
-                    payload[0..4]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 let begin = u32::from_be_bytes(
-                    payload[4..8]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 let length = u32::from_be_bytes(
-                    payload[8..12]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[8..12].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 Ok(Message::Request { index, begin, length })
             },
@@ -141,14 +132,10 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 let index = u32::from_be_bytes(
-                    payload[0..4]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 let begin = u32::from_be_bytes(
-                    payload[4..8]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 let block = payload[8..].to_vec();
                 Ok(Message::Piece { index, begin, block })
@@ -158,19 +145,13 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 let index = u32::from_be_bytes(
-                    payload[0..4]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 let begin = u32::from_be_bytes(
-                    payload[4..8]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 let length = u32::from_be_bytes(
-                    payload[8..12]
-                        .try_into()
-                        .map_err(|_| Error::InvalidMessage)?,
+                    payload[8..12].try_into().map_err(|_| Error::InvalidMessage)?,
                 );
                 Ok(Message::Cancel { index, begin, length })
             },
