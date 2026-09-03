@@ -125,7 +125,7 @@ impl PeerRunner {
             match self.connect().await {
                 Ok(result) => return result,
                 Err(e) => {
-                    warn!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
+                    tracing::debug!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
                     delay = (delay * 2).clamp(RECONNECT_DELAY, MAX_RECONNECT_DELAY);
                 },
             }

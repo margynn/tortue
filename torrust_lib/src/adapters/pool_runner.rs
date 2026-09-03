@@ -24,6 +24,7 @@ pub struct PoolRunner {
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<peer::Message>>,
     pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+    verified_pieces: usize,
 }
 
 impl PoolRunner {
@@ -40,6 +41,7 @@ impl PoolRunner {
             peer_cmds: HashMap::new(),
             pool_tx,
             pool_rx,
+            verified_pieces: 0,
         }
     }
 
@@ -61,8 +63,16 @@ impl PoolRunner {
                 },
             };
 
-            if let pool::Input::PeerDisconnected(addr) = input {
-                self.peer_cmds.remove(&addr);
+            match &input {
+                pool::Input::PeerDisconnected(addr) => {
+                    self.peer_cmds.remove(addr);
+                },
+                pool::Input::PieceVerified(_) => {
+                    self.verified_pieces += 1;
+                    let total = self.metainfo.pieces.len();
+                    info!(piece = self.verified_pieces, total, "piece verified");
+                },
+                _ => {},
             }
 
             for out in pool.step(input) {
@@ -81,7 +91,7 @@ impl PoolRunner {
                     let _ = v.send(message).await;
                 }
             },
-            pool::Output::Completed => todo!(),
+            pool::Output::Completed => info!("download completed"),
         }
     }
 
