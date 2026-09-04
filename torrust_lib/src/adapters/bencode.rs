@@ -57,19 +57,19 @@ impl<'a> Bencode<'a> {
                 buf.push(b'i');
                 buf.extend_from_slice(n.to_string().as_bytes());
                 buf.push(b'e');
-            }
+            },
             Bencode::Bytes(bytes) => {
                 buf.extend_from_slice(bytes.len().to_string().as_bytes());
                 buf.push(b':');
                 buf.extend_from_slice(bytes);
-            }
+            },
             Bencode::List(items) => {
                 buf.push(b'l');
                 for item in items {
                     item.encode_into(buf);
                 }
                 buf.push(b'e');
-            }
+            },
             Bencode::Dict(entries) => {
                 buf.push(b'd');
                 for (key, value) in entries {
@@ -79,7 +79,7 @@ impl<'a> Bencode<'a> {
                     value.encode_into(buf);
                 }
                 buf.push(b'e');
-            }
+            },
         }
     }
 
@@ -92,7 +92,9 @@ impl<'a> Bencode<'a> {
 
     pub fn get_utf8(&self, key: &[u8]) -> Result<String> {
         let bytes = self.get_bytes(key)?;
-        std::str::from_utf8(bytes).map(|s| s.to_owned()).map_err(|_| Error::InvalidString)
+        std::str::from_utf8(bytes)
+            .map(|s| s.to_owned())
+            .map_err(|_| Error::InvalidString)
     }
 
     pub fn get_bytes(&self, key: &[u8]) -> Result<&'a [u8]> {
@@ -300,14 +302,20 @@ mod tests {
         assert_eq!(Bencode::Bytes(b"hello").encode(), b"5:hello");
         assert_eq!(Bencode::Bytes(b"").encode(), b"0:");
         assert_eq!(
-            Bencode::List(vec![Bencode::Int(1), Bencode::Bytes(b"test"), Bencode::List(vec![])]).encode(),
+            Bencode::List(vec![
+                Bencode::Int(1),
+                Bencode::Bytes(b"test"),
+                Bencode::List(vec![])
+            ])
+            .encode(),
             b"li1e4:testlee"
         );
         assert_eq!(
             Bencode::Dict(BTreeMap::from([
                 (b"age".as_slice(), Bencode::Int(30)),
                 (b"name".as_slice(), Bencode::Bytes(b"John")),
-            ])).encode(),
+            ]))
+            .encode(),
             b"d3:agei30e4:name4:Johne"
         );
     }

@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
@@ -10,9 +11,7 @@ use url::Url;
 
 use crate::adapters::bencode::Bencode;
 use crate::domain::torrent::Metainfo;
-use crate::domain::tracker::{
-    AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse,
-};
+use crate::domain::tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse};
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -61,7 +60,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct TrackerIO {
     client: TrackerClient,
-    metainfo: Metainfo,
+    metainfo: Arc<Metainfo>,
     node: Node,
     peers_tx: mpsc::Sender<Vec<SocketAddr>>,
 }
@@ -72,7 +71,7 @@ impl TrackerIO {
 
     pub fn new(
         url: &str,
-        metainfo: Metainfo,
+        metainfo: Arc<Metainfo>,
         node: Node,
         peers_tx: mpsc::Sender<Vec<SocketAddr>>,
     ) -> Result<Self> {
@@ -103,9 +102,13 @@ impl TrackerIO {
                 compact: true,
             };
 
-            match Transport::announce(&self.client, &req).await {
+            match self.client.announce(&req).await {
                 Ok(resp) => {
-                    info!(peers = resp.peers.len(), interval = resp.interval, "tracker announce succeeded");
+                    info!(
+                        peers = resp.peers.len(),
+                        interval = resp.interval,
+                        "tracker announce succeeded"
+                    );
                     backoff = Self::INITIAL_BACKOFF;
                     interval = Duration::from_secs(resp.interval.max(60) as u64);
                     self.peers_tx.send(resp.peers).await.map_err(|_| Error::PeersChannelClosed)?;
@@ -228,11 +231,34 @@ impl HttpTransport {
 
         let peers = match (decoded.get_bytes(b"peers"), decoded.get_list(b"peers")) {
             (Ok(compact), _) => parse_compact_ipv4_peers(compact)?,
-            (_, Ok(list)) => parse_peers_list(list)?,
+            (_, Ok(list)) => Self::parse_peers_list(list)?,
             _ => return Err(Error::InvalidResponse("missing peers field".to_owned())),
         };
 
-        Ok(TrackerResponse { interval, peers, seeders: None, leechers: None })
+        Ok(TrackerResponse {
+            interval,
+            peers,
+            seeders: None,
+            leechers: None,
+        })
+    }
+
+    fn parse_peers_list(peer_list: &[Bencode<'_>]) -> Result<Vec<SocketAddr>> {
+        peer_list
+            .iter()
+            .map(|peer| {
+                let ip_raw = peer.get_bytes(b"ip")?;
+                let ip_str = std::str::from_utf8(ip_raw).map_err(|_| {
+                    Error::InvalidResponse("peer ip was not valid utf-8".to_owned())
+                })?;
+                let ip: IpAddr = ip_str
+                    .parse()
+                    .map_err(|_| Error::InvalidResponse(format!("invalid peer ip: {ip_str}")))?;
+                let port = u16::try_from(peer.get_int(b"port")?)
+                    .map_err(|_| Error::InvalidResponse("peer port out of range".to_owned()))?;
+                Ok(SocketAddr::new(ip, port))
+            })
+            .collect()
     }
 }
 
@@ -249,10 +275,12 @@ impl Transport for UdpTransport {
             .await
             .map_err(|e| Error::UdpRequest(e.to_string()))?
             .next()
-            .ok_or_else(|| Error::UdpRequest("tracker hostname resolved to no address".to_owned()))?;
+            .ok_or_else(|| {
+                Error::UdpRequest("tracker hostname resolved to no address".to_owned())
+            })?;
 
         let bind_addr = if tracker_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
-        let mut socket = TokioUdpSocket::bind(bind_addr).await?;
+        let socket = TokioUdpSocket::bind(bind_addr).await?;
         socket.connect(tracker_addr).await?;
 
         let mut buf = [0u8; 4096];
@@ -263,7 +291,9 @@ impl Transport for UdpTransport {
         let connection_id = Self::parse_connect_response(&buf[..n], connect_tx)?;
 
         let announce_tx = rand::random::<u32>();
-        socket.send(&Self::build_announce_request(connection_id, announce_tx, rand::random(), req)).await?;
+        socket
+            .send(&Self::build_announce_request(connection_id, announce_tx, rand::random(), req))
+            .await?;
         let n = socket.recv(&mut buf).await?;
         Self::parse_announce_response(&buf[..n], announce_tx)
     }
@@ -297,7 +327,12 @@ impl UdpTransport {
         Ok(u64::from_be_bytes(bytes[8..16].try_into().unwrap()))
     }
 
-    fn build_announce_request(connection_id: u64, tx_id: u32, key: u32, req: &AnnounceRequest) -> [u8; 98] {
+    fn build_announce_request(
+        connection_id: u64,
+        tx_id: u32,
+        key: u32,
+        req: &AnnounceRequest,
+    ) -> [u8; 98] {
         let mut buf = [0u8; 98];
         buf[0..8].copy_from_slice(&connection_id.to_be_bytes());
         buf[8..12].copy_from_slice(&Self::ACTION_ANNOUNCE.to_be_bytes());
@@ -322,7 +357,9 @@ impl UdpTransport {
         let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
         let tx_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
         if action != Self::ACTION_ANNOUNCE {
-            return Err(Error::InvalidResponse(format!("unexpected udp announce action: {action}")));
+            return Err(Error::InvalidResponse(format!(
+                "unexpected udp announce action: {action}"
+            )));
         }
         if tx_id != expected_tx_id {
             return Err(Error::InvalidResponse("udp announce transaction id mismatch".to_owned()));
@@ -331,7 +368,12 @@ impl UdpTransport {
         let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
         let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let peers = parse_compact_ipv4_peers(&bytes[20..])?;
-        Ok(TrackerResponse { interval, peers, seeders: Some(seeders), leechers: Some(leechers) })
+        Ok(TrackerResponse {
+            interval,
+            peers,
+            seeders: Some(seeders),
+            leechers: Some(leechers),
+        })
     }
 }
 
@@ -357,23 +399,6 @@ impl AnnounceEvent {
     }
 }
 
-// ── UDP socket abstraction ────────────────────────────────────────────────────
-
-trait UdpSocket {
-    async fn send(&self, buf: &[u8]) -> std::io::Result<()>;
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
-}
-
-impl UdpSocket for TokioUdpSocket {
-    async fn send(&self, buf: &[u8]) -> std::io::Result<()> {
-        TokioUdpSocket::send(self, buf).await.map(|_| ())
-    }
-
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        TokioUdpSocket::recv(self, buf).await
-    }
-}
-
 // ── Shared wire helpers ───────────────────────────────────────────────────────
 
 fn parse_compact_ipv4_peers(bytes: &[u8]) -> Result<Vec<SocketAddr>> {
@@ -390,21 +415,4 @@ fn parse_compact_ipv4_peers(bytes: &[u8]) -> Result<Vec<SocketAddr>> {
             SocketAddr::new(ip, port)
         })
         .collect())
-}
-
-fn parse_peers_list(peer_list: &[Bencode<'_>]) -> Result<Vec<SocketAddr>> {
-    peer_list
-        .iter()
-        .map(|peer| {
-            let ip_raw = peer.get_bytes(b"ip")?;
-            let ip_str = std::str::from_utf8(ip_raw)
-                .map_err(|_| Error::InvalidResponse("peer ip was not valid utf-8".to_owned()))?;
-            let ip: IpAddr = ip_str
-                .parse()
-                .map_err(|_| Error::InvalidResponse(format!("invalid peer ip: {ip_str}")))?;
-            let port = u16::try_from(peer.get_int(b"port")?)
-                .map_err(|_| Error::InvalidResponse("peer port out of range".to_owned()))?;
-            Ok(SocketAddr::new(ip, port))
-        })
-        .collect()
 }

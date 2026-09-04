@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::vec;
 
 use rand::seq::IteratorRandom;
@@ -34,20 +35,17 @@ pub enum Output {
 
 type PieceIndex = usize;
 
-pub struct Pool<'a> {
-    metainfo: &'a Metainfo,
+pub struct Pool {
+    metainfo: Arc<Metainfo>,
     peers: HashMap<SocketAddr, PeerState>,
     availability: HashMap<PieceIndex, HashSet<SocketAddr>>,
     block_assignments: HashMap<BlockRef, SocketAddr>,
-    pieces: PieceManager<'a>,
+    pieces: PieceManager,
 }
 
-const MAX_IN_FLIGHT_PER_PEER: usize = 30;
-const MAX_CONNECTED: usize = 256;
-
-impl<'a> Pool<'a> {
-    pub fn new(metainfo: &'a Metainfo) -> Self {
-        let pieces = PieceManager::new(metainfo);
+impl Pool {
+    pub fn new(metainfo: Arc<Metainfo>) -> Self {
+        let pieces = PieceManager::new(Arc::clone(&metainfo));
         Self {
             metainfo,
             peers: HashMap::new(),
@@ -274,8 +272,11 @@ struct PeerState {
 }
 
 impl PeerState {
+    /// Allow 16kb * 8 = 128kb max in transit - not aggressif for peers
+    const MAX_IN_FLIGHT_PER_PEER: usize = 8;
+
     fn can_accept_request(&self) -> bool {
-        !self.peer_choking && self.in_flight < MAX_IN_FLIGHT_PER_PEER
+        !self.peer_choking && self.in_flight < Self::MAX_IN_FLIGHT_PER_PEER
     }
 
     fn new(pieces: usize) -> Self {

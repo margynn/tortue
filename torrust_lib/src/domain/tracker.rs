@@ -33,6 +33,7 @@ pub struct TrackerResponse {
     pub leechers: Option<u32>,
 }
 
+#[derive(Clone, Copy)]
 pub struct Node {
     pub id: PeerId,
     pub port: u16,

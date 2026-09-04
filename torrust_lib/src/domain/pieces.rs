@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha1::{Digest, Sha1};
@@ -33,8 +34,8 @@ pub enum PieceEvent {
     },
 }
 
-pub struct PieceManager<'a> {
-    metainfo: &'a Metainfo,
+pub struct PieceManager {
+    metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
 }
 
@@ -59,8 +60,8 @@ impl From<&BlockRange> for BlockRef {
     }
 }
 
-impl<'a> PieceManager<'a> {
-    pub fn new(metainfo: &'a Metainfo) -> Self {
+impl PieceManager {
+    pub fn new(metainfo: Arc<Metainfo>) -> Self {
         let piece_count = metainfo.pieces.len();
         let mut pieces = Vec::with_capacity(piece_count);
 

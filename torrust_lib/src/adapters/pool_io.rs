@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tracing::info;
@@ -18,8 +19,8 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolIO<'a> {
-    metainfo: &'a Metainfo,
+pub struct PoolIO {
+    metainfo: Arc<Metainfo>,
     client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
@@ -27,9 +28,9 @@ pub struct PoolIO<'a> {
     pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
 }
 
-impl<'a> PoolIO<'a> {
+impl PoolIO {
     pub fn new(
-        metainfo: &'a Metainfo,
+        metainfo: Arc<Metainfo>,
         client_id: PeerId,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     ) -> Self {
@@ -45,7 +46,7 @@ impl<'a> PoolIO<'a> {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut pool = Pool::new(self.metainfo);
+        let mut pool = Pool::new(Arc::clone(&self.metainfo));
 
         loop {
             let input = tokio::select! {
