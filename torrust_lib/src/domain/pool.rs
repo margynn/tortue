@@ -197,13 +197,20 @@ impl<'a> Pool<'a> {
         }
     }
 
+    fn has_scheduling_capacity(&self) -> bool {
+        self.peers.values().any(|s| s.can_accept_request())
+    }
+
+    fn pick_peer(&self, peer_addrs: &[SocketAddr], rng: &mut impl rand::Rng) -> Option<SocketAddr> {
+        peer_addrs
+            .iter()
+            .filter(|addr| self.peers.get(addr).map_or(false, |s| s.can_accept_request()))
+            .choose(rng)
+            .copied()
+    }
+
     fn schedule_requests(&mut self) -> Vec<Output> {
-        // Early exit when no capacity
-        let has_capacity = self
-            .peers
-            .values()
-            .any(|s| !s.peer_choking && s.in_flight < MAX_IN_FLIGHT_PER_PEER);
-        if !has_capacity {
+        if !self.has_scheduling_capacity() {
             return vec![];
         }
 
@@ -226,24 +233,14 @@ impl<'a> Pool<'a> {
                 None => continue,
             }
 
-            // Find a candidate for each block_range
             let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
             for block_range in missing {
                 let block_ref = BlockRef::from(&block_range);
-                // Not 100% required - since invariant: missing only contains missing blocks
                 if self.block_assignments.contains_key(&block_ref) {
                     continue;
                 }
 
-                let candidate = peer_addrs
-                    .iter()
-                    .filter(|addr| {
-                        self.peers.get(addr).map_or(false, |s| {
-                            !s.peer_choking && s.in_flight < MAX_IN_FLIGHT_PER_PEER
-                        })
-                    })
-                    .choose(&mut rng)
-                    .copied();
+                let candidate = self.pick_peer(&peer_addrs, &mut rng);
 
                 if let Some(addr) = candidate {
                     self.peers.get_mut(&addr).unwrap().in_flight += 1;
@@ -276,6 +273,10 @@ struct PeerState {
 }
 
 impl PeerState {
+    fn can_accept_request(&self) -> bool {
+        !self.peer_choking && self.in_flight < MAX_IN_FLIGHT_PER_PEER
+    }
+
     fn new(pieces: usize) -> Self {
         Self {
             am_choking: true,

@@ -89,7 +89,7 @@ impl TrackerIO {
                     // TODO: use an Arc<SessionStats> to share ?
                     uploaded: 0,   // TODO: should update
                     downloaded: 0, // TODO: should update
-                    left: self.metainfo.size(),
+                    left: self.metainfo.total_size(),
                 },
                 event: next_event.take().unwrap_or(AnnounceEvent::None),
                 compact: true,
