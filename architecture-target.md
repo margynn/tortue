@@ -11,18 +11,17 @@ and can be approached incrementally.
 The codebase follows a **ports-and-adapters** (hexagonal) layout:
 
 ```
-           ┌─────────────────────────────────┐
-           │           application           │
-           │  ┌─────────────────────────┐   │
-           │  │         domain          │   │
-           │  └─────────────────────────┘   │
-           │  ports/ (traits defined here)  │
-           └──────────────┬──────────────── ┘
-                          │ implements
-           ┌──────────────▼──────────────── ┐
-           │          adapters               │
-           │  tcp / tracker / storage / wire │
-           └─────────────────────────────── ┘
+           ┌─────────────┐
+           │   domain    │
+           └──────┬──────┘
+                  │ used by
+           ┌──────▼──────┐
+           │    ports    │  ← traits only, no IO
+           └──────┬──────┘
+          ┌───────┴────────┐
+          ▼                ▼
+    application        adapters
+    (use cases)    (concrete impls)
 ```
 
 **Rule**: if the code depends on `tokio`, `bytes`, TCP, or a serialization library
@@ -43,7 +42,7 @@ new impl of the relevant port trait. The domain and application layers are untou
 torrust_lib/src/
 
   domain/                         # pure logic, no IO, no async runtime deps
-    torrent.rs                    # Metainfo, InfoHash, piece hashes
+    torrent.rs                    # Metainfo, InfoHash, piece hashes (structs only, no parsing)
     bitfield.rs                   # Bitfield operations
     peer/
       mod.rs                      # PeerId, Handshake (semantic types only)
@@ -54,22 +53,20 @@ torrust_lib/src/
       manager.rs                  # block assembly, SHA1 verification
       piece.rs                    # per-piece block state machine
 
+  ports/
+    piece_store.rs                # trait PieceStore
+    peer_source.rs                # trait PeerSource
+    peer_connector.rs             # trait PeerConnector + PeerEvent
+
   application/
     download.rs                   # use case: wire ports → adapters, spawn tasks
-    ports/
-      piece_store.rs              # trait PieceStore
-      peer_source.rs              # trait PeerSource
 
   adapters/
-    wire/
-      codec.rs                    # bytes ↔ domain::Message (framing + parsing)
-      handshake.rs                # bytes ↔ domain::Handshake
-    tcp/
-      peer_io.rs                  # one TCP connection (uses wire::codec)
-      pool_io.rs                  # event loop, drives Pool, calls port impls
-    tracker/
-      http.rs                     # HTTP tracker → impl PeerSource
-      udp.rs                      # UDP tracker → impl PeerSource
+    bencode.rs                    # Bencode value + encode/decode (single file, pure std)
+    torrent_file.rs               # bytes → domain::Metainfo (uses bencode)
+    peer_io.rs                    # one TCP connection: bytes ↔ domain::Message
+    pool_io.rs                    # composition root: event loop + wires PeerIO onto Pool
+    tracker_io.rs                 # impl PeerSource (HTTP/UDP, uses bencode)
     storage/
       disk.rs                     # DiskStorage → impl PieceStore
       # remote.rs                 # future: S3 / HTTP remote → impl PieceStore
@@ -83,25 +80,26 @@ torrust_lib/src/
 ### `domain/`
 
 No `tokio`, no `async_trait`, no network types. Only `std`, `sha1`, `rand` for
-cryptographic primitives.
+cryptographic primitives. No serialization: `domain/torrent.rs` holds the
+`Metainfo` struct but never parses bytes — that is `adapters/torrent_file.rs`.
 
 **`peer/message.rs`** — keeps the `Message` enum and its semantic variants.
-`encode()`, `read_from()`, and `decode_framed()` move to `adapters/wire/codec.rs`.
+`encode()`, `read_from()`, and `decode_framed()` move to `adapters/peer_io.rs`.
 `AsyncByteReader` moves there too (it is a codec concern, not a domain concept).
 
 **`tracker.rs`** — keeps `AnnounceRequest`, `TrackerResponse`, `Node`.
-The `UdpSocket` trait and transport logic move to `adapters/tracker/`.
+The `UdpSocket` trait and transport logic move to `adapters/tracker_io.rs`.
 
 **`pool.rs`** — peer scheduling, owns `PieceManager` (see `architecture.md`).
 Pure state machine: `step(Input) -> Vec<Output>`.
 
-### `application/ports/`
+### `ports/`
 
-Traits defined by the application that adapters must implement.
-No concrete types, no IO. Defined with `async_trait` where needed.
+Traits that define what the application needs from the outside world.
+No concrete types, no IO. Only `domain` types and `std` in signatures.
 
 ```rust
-// application/ports/piece_store.rs
+// ports/piece_store.rs
 use std::io;
 
 #[async_trait::async_trait]
@@ -111,7 +109,7 @@ pub trait PieceStore: Send + Sync {
 ```
 
 ```rust
-// application/ports/peer_source.rs
+// ports/peer_source.rs
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
@@ -121,6 +119,54 @@ pub trait PeerSource: Send + 'static {
     async fn run(self: Box<Self>, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()>;
 }
 ```
+
+```rust
+// ports/peer_connector.rs
+use std::net::SocketAddr;
+use tokio::sync::mpsc;
+
+use crate::domain::peer::{Message, PeerId};
+
+pub enum PeerEvent {
+    Connected(PeerId),
+    Disconnected,
+    MessageReceived(Message),
+}
+
+// Spawns a background task that manages one peer connection.
+// The task sends PeerEvents inbound and receives Messages outbound.
+// Dropping cmd_tx signals the task to stop.
+pub trait PeerConnector: Send + Sync + 'static {
+    fn connect(
+        &self,
+        addr: SocketAddr,
+        cmd_rx: mpsc::Receiver<Message>,
+        events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    );
+}
+```
+
+With this port, `pool_io` only holds a `Box<dyn PeerConnector>` and never imports
+`PeerIO`. Swapping TCP for an in-memory fake requires only a new impl:
+
+```rust
+// tests
+struct FakePeerConnector { script: Vec<PeerEvent> }
+
+impl PeerConnector for FakePeerConnector {
+    fn connect(&self, addr: SocketAddr, _cmd_rx: Receiver<Message>, events_tx: Sender<...>) {
+        let events = self.script.clone();
+        tokio::spawn(async move {
+            for event in events {
+                events_tx.send((addr, event)).await.unwrap();
+            }
+        });
+    }
+}
+```
+
+`PeerEvent` moves from `adapters/peer_io.rs` to this port so both `pool_io` and
+`peer_io` can reference it without a circular dependency.
 
 ### `application/download.rs`
 
@@ -134,7 +180,7 @@ pub async fn download(
     // Callers inject concrete adapters — the use case only sees the trait.
     store: impl PieceStore + 'static,
 ) -> anyhow::Result<()> {
-    let metainfo = domain::torrent::decode(torrent_file)?;
+    let metainfo = adapters::torrent_file::parse(torrent_file)?;
     let node = Node { id: PeerId::generate("TR", "0.1.0"), port: 1234 };
 
     let (peers_tx, peers_rx) = mpsc::channel(128);
@@ -163,24 +209,23 @@ let store = MemoryStore::new(&metainfo);
 download(file, dir, store).await?;
 ```
 
-### `adapters/wire/codec.rs`
+### `adapters/peer_io.rs`
 
-All binary encoding and framing for the peer wire protocol.
-`Message::encode()` and `Message::decode_framed()` / `Message::read_from()` move here.
+One TCP connection: codec (bytes ↔ `domain::Message`) + socket lifecycle (connect,
+reconnect, handshake). `domain::peer::Message` becomes a plain data enum with no
+encode/decode methods. The codec is the only code that knows about big-endian
+framing, message IDs, or buffer sizes.
 
-```rust
-// adapters/wire/codec.rs
-pub fn encode(msg: &Message) -> Vec<u8> { ... }
-pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Message> { ... }
-```
+### `adapters/pool_io.rs`
 
-`domain::peer::Message` becomes a plain data enum with no encode/decode methods.
-The codec is the only code that knows about big-endian framing, message IDs, or buffer sizes.
+Event loop. Drives `Pool` (domain) by translating `PeerEvent`s into `pool::Input`
+and dispatching `pool::Output`. Holds a `Box<dyn PeerConnector>` — never imports
+`PeerIO` directly.
 
-### `adapters/tracker/`
+### `adapters/tracker_io.rs`
 
-`http.rs` and `udp.rs` each implement `PeerSource`.
-The current `domain/tracker/transport/` (including the `UdpSocket` trait) moves here.
+Implements `PeerSource`. Handles HTTP and UDP tracker protocols, parses bencode
+responses into `Vec<SocketAddr>`.
 
 ```rust
 // adapters/tracker/udp.rs
@@ -230,21 +275,23 @@ No domain or application code changes.
 ## Dependency graph
 
 ```
-domain          ←── application/ports  ←── application/download
-                                               │
-                                    ┌──────────┴──────────┐
-                                    ▼                     ▼
-                             adapters/tcp          adapters/tracker
-                          (PoolIO, PeerIO)        (http, udp impls)
-                                    │
-                             adapters/wire
-                               (codec.rs)
-                                    │
-                          adapters/storage
-                          (disk, remote, …)
+domain  ←──  ports  ←──────────────────────────────────────┐
+               ↑                                            │
+               │ depends on                                 │
+         application/download                               │
+               │                                            │
+               └──────────┬──────────────┐                  │
+                          ▼              ▼                  │
+                      pool_io       tracker_io          storage/disk
+                          │         (impl               (impl
+                          ▼          PeerSource)         PieceStore)
+                      peer_io
+                   (impl PeerConnector)
 ```
 
-`domain` has no arrows pointing outward. Every arrow points left (toward domain).
+`domain` has no arrows pointing outward. `ports` depends only on `domain`.
+Adapters depend on `ports`, never on each other (except `pool_io` → `peer_io`
+which is the composition root).
 
 ---
 
@@ -275,9 +322,10 @@ tokio::spawn(async move { DhtSource::new(metainfo).run(peers_tx).await });
 
 ### Real TCP → in-memory transport (tests)
 
-`PoolIO` can be tested by replacing `PeerIO` (TCP) with a fake that sends pre-scripted
-`PeerEvent`s into the channel, and `DiskStorage` with a `MemoryStore`. No domain
-code changes.
+Because `pool_io` holds a `Box<dyn PeerConnector>`, the TCP transport is fully
+swappable. A test injects a `FakePeerConnector` that replays a scripted sequence of
+`PeerEvent`s without opening any socket. Combined with a `MemoryStore` for
+`PieceStore`, `PoolIO` is fully unit-testable with no IO.
 
 ---
 
@@ -285,14 +333,14 @@ code changes.
 
 The two architectures can coexist during migration. Each step is independent.
 
-| Step  | What changes                                                                                       | Risk                               |
-| ----- | -------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| **1** | Integrate `PieceManager` into `Pool` (see `architecture.md`)                                       | Medium — core data flow            |
-| **2** | Define `PieceStore` trait; make `DiskStorage` implement it; pass `Box<dyn PieceStore>` to `PoolIO` | Low — pure refactor                |
-| **3** | Define `PeerSource` trait; make `TrackerIO` implement it                                           | Low — pure refactor                |
-| **4** | Move `Message::encode` / `decode_framed` / `read_from` to `adapters/wire/codec.rs`                 | Low — move code, update call sites |
-| **5** | Move tracker transport (`UdpSocket`, HTTP/UDP impls) to `adapters/tracker/`                        | Low — move code                    |
-| **6** | Rename `ports/disk_storage.rs` → `adapters/storage/disk.rs`                                        | Trivial                            |
+| Step  | What changes                                                                                           | Risk                               |
+| ----- | ------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| **1** | Integrate `PieceManager` into `Pool` (see `architecture.md`)                                           | Medium — core data flow            |
+| **2** | Define `PieceStore` trait; make `DiskStorage` implement it; pass `Box<dyn PieceStore>` to `PoolIO`     | Low — pure refactor                |
+| **3** | Define `PeerSource` trait; make `TrackerIO` implement it                                               | Low — pure refactor                |
+| **4** | Define `PeerConnector` + `PeerEvent` port; make `PeerIO` implement it; inject into `PoolIO`            | Low — pure refactor                |
+| **5** | Move `Message::encode` / `decode_framed` / `read_from` into `adapters/peer_io.rs`                     | Low — move code, update call sites |
+| **6** | Move `bencode` to `adapters/bencode.rs`; add `adapters/torrent_file.rs` for metainfo parsing          | Low — move code                    |
+| **7** | Move tracker transport (`UdpSocket`, HTTP/UDP impls) into `adapters/tracker_io.rs`                    | Low — move code                    |
 
-Steps 2–6 are mechanical refactors with no behaviour change. They can be done in any order
-after step 1. Each step leaves the project in a working state.
+Each step leaves the project in a working state.
