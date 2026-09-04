@@ -7,9 +7,8 @@ use rand::seq::IteratorRandom;
 
 use super::bitfield::Bitfield;
 use super::peer::{Message, PeerId};
-use super::pieces::{PieceEvent, PieceManager};
+use super::pieces::{BlockRange, BlockRef, PieceEvent, PieceManager};
 use super::torrent::Metainfo;
-use crate::domain::pieces::BlockRef;
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
@@ -199,26 +198,40 @@ impl<'a> Pool<'a> {
     }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
+        // Early exit when no capacity
+        let has_capacity = self
+            .peers
+            .values()
+            .any(|s| !s.peer_choking && s.in_flight < MAX_IN_FLIGHT_PER_PEER);
+        if !has_capacity {
+            return vec![];
+        }
+
+        let mut rng = rand::rng();
+        let mut peer_addrs: Vec<SocketAddr> = Vec::new();
         let mut outputs = vec![];
 
-        // Rarest first
+        // Needed pieces sorted by rarest first
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
         needed.sort_by_key(|&piece| {
             self.availability.get(&piece).map_or(usize::MAX, |peers| peers.len())
         });
 
-        let mut rng = rand::rng();
-
-        for piece in needed {
+        for piece_index in needed {
             // Collect owned addrs — releases the borrow on self.availability before
             // the inner loop mutates self.peers.
-            let peer_addrs: Vec<SocketAddr> = match self.availability.get(&piece) {
-                Some(peers) => peers.iter().copied().collect(),
+            peer_addrs.clear(); // keep allocated capacity
+            match self.availability.get(&piece_index) {
+                Some(peers) => peer_addrs.extend(peers.iter().copied()),
                 None => continue,
-            };
+            }
 
-            for (begin, length) in self.piece_blocks(piece) {
-                if self.in_flight.contains_key(&(piece, begin)) {
+            // Find a candidate for each block_range
+            let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
+            for block_range in missing {
+                let block_ref = BlockRef::from(&block_range);
+                // Not 100% required - since invariant: missing only contains missing blocks
+                if self.block_assignments.contains_key(&block_ref) {
                     continue;
                 }
 
@@ -234,11 +247,16 @@ impl<'a> Pool<'a> {
 
                 if let Some(addr) = candidate {
                     self.peers.get_mut(&addr).unwrap().in_flight += 1;
-                    self.in_flight.insert((piece, begin), addr);
+                    self.block_assignments.insert(block_ref, addr);
+                    let _ = self.pieces.request_block(block_ref);
 
                     outputs.push(Output::SendToPeer {
                         addr,
-                        message: Message::Request { index: piece as u32, begin, length },
+                        message: Message::Request {
+                            piece_index: block_range.piece_index,
+                            piece_offset: block_range.piece_offset,
+                            piece_len: block_range.piece_len,
+                        },
                     });
                 }
             }
@@ -246,24 +264,6 @@ impl<'a> Pool<'a> {
 
         outputs
     }
-
-    // TODO: replace with piece_manager
-    // fn piece_blocks(&self, piece: usize) -> Vec<(u32, u32)> {
-    //     // (begin, length) for every block of a piece
-    //     let piece_len = if piece == self.metainfo.pieces.len() - 1 {
-    //         let total = self.metainfo.size();
-    //         let full = (self.metainfo.pieces.len() - 1) as u64 * self.metainfo.piece_length;
-    //         (total - full) as u32
-    //     } else {
-    //         self.metainfo.piece_length as u32
-    //     };
-
-    //     (0..)
-    //         .map(|i| i * BLOCK_SIZE)
-    //         .take_while(|&begin| begin < piece_len)
-    //         .map(|begin| (begin, BLOCK_SIZE.min(piece_len - begin)))
-    //         .collect()
-    // }
 }
 
 struct PeerState {
