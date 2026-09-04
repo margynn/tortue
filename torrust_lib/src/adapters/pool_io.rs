@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::adapters::peer_io::{PeerEvent, PeerIO};
+use crate::application::ports::piece_store::PieceStore;
 use crate::domain::message::Message;
 use crate::domain::peer::PeerId;
 use crate::domain::pool::{Input, Output, Pool};
@@ -19,20 +20,22 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolIO {
+pub struct PoolIO<S> {
     metainfo: Arc<Metainfo>,
     client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+    piece_store: S,
 }
 
-impl PoolIO {
+impl<S: PieceStore> PoolIO<S> {
     pub fn new(
         metainfo: Arc<Metainfo>,
         client_id: PeerId,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+        piece_store: S,
     ) -> Self {
         let (pool_tx, pool_rx) = mpsc::channel(256);
         Self {
@@ -42,6 +45,7 @@ impl PoolIO {
             peer_cmds: HashMap::new(),
             pool_tx,
             pool_rx,
+            piece_store,
         }
     }
 
@@ -84,7 +88,11 @@ impl PoolIO {
                 }
             },
             Output::Completed => info!("download completed"),
-            Output::WritePiece { piece_index, piece_offset, data } => todo!(),
+            Output::WritePiece { piece_offset, data, .. } => {
+                if let Err(e) = self.piece_store.write(piece_offset, &data).await {
+                    tracing::error!(error = %e, "failed to write piece");
+                }
+            },
         }
     }
 

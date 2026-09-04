@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
@@ -8,6 +9,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 struct Cli {
     path: String,
+
+    #[arg(short, long, default_value = "./")]
+    out: PathBuf,
 
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -23,7 +27,7 @@ async fn main() -> Result<()> {
         .init();
 
     let data = fs::read(&cli.path)?;
-    download(data.as_ref()).await?;
+    download(data.as_ref(), cli.out).await?;
 
     Ok(())
 }

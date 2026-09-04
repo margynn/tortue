@@ -1,4 +1,5 @@
-pub(crate) mod bencode;
+mod bencode;
+pub(crate) mod disk_storage;
 mod peer_io;
 mod torrent_file;
 

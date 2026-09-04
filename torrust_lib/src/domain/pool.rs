@@ -58,7 +58,7 @@ impl Pool {
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
-            Input::PeerConnected { addr, .. } => self.on_connected(addr),
+            Input::PeerConnected { addr, peer_id } => self.on_connected(addr, peer_id),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
         }
@@ -75,11 +75,13 @@ impl Pool {
         output
     }
 
-    fn on_connected(&mut self, addr: SocketAddr) -> Vec<Output> {
+    fn on_connected(&mut self, addr: SocketAddr, peer_id: PeerId) -> Vec<Output> {
         // Also handles future inbound connections not preceded by PeersDiscovered.
-        self.peers
+        let state = self
+            .peers
             .entry(addr)
             .or_insert_with(|| PeerState::new(self.metainfo.pieces.len()));
+        state.peer_id = Some(peer_id);
         vec![]
     }
 
@@ -99,7 +101,7 @@ impl Pool {
             .collect();
         for block_ref in orphaned {
             self.block_assignments.remove(&block_ref);
-            self.pieces.request_block(block_ref);
+            let _ = self.pieces.request_block(block_ref);
         }
 
         self.schedule_requests()
@@ -263,6 +265,7 @@ impl Pool {
 }
 
 struct PeerState {
+    peer_id: Option<PeerId>,
     am_choking: bool,
     am_interested: bool,
     peer_choking: bool,
@@ -281,6 +284,7 @@ impl PeerState {
 
     fn new(pieces: usize) -> Self {
         Self {
+            peer_id: None,
             am_choking: true,
             am_interested: false,
             peer_choking: true,

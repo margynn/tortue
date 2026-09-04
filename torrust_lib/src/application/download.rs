@@ -1,16 +1,18 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::info;
 
+use crate::adapters::disk_storage::DiskStorage;
 use crate::adapters::pool_io::PoolIO;
 use crate::adapters::tracker_io::TrackerIO;
 use crate::domain::peer::PeerId;
 use crate::domain::torrent::Metainfo;
 use crate::domain::tracker::Node;
 
-pub async fn download(torrent_file: &[u8]) -> Result<()> {
+pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<()> {
     let metainfo = Arc::new(Metainfo::try_from(torrent_file)?);
     let node = Node {
         id: PeerId::generate("TR", "0.1.0"),
@@ -27,7 +29,8 @@ pub async fn download(torrent_file: &[u8]) -> Result<()> {
         }
     }
 
-    let mut pool_runner = PoolIO::new(Arc::clone(&metainfo), node.id, peers_rx);
+    let storage = DiskStorage::new(&metainfo, output_dir).await?;
+    let mut pool_runner = PoolIO::new(Arc::clone(&metainfo), node.id, peers_rx, storage);
     tokio::spawn(async move { pool_runner.run().await });
 
     shutdown_signal().await;

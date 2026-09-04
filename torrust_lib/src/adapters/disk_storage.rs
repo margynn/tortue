@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
+use crate::application::ports::piece_store::PieceStore;
 use crate::domain::torrent::{Metainfo, Mode};
 
 type Result<T> = std::io::Result<T>;
@@ -11,6 +12,12 @@ struct OutputFile {
     file: File,
     length: u64,
     offset: u64,
+}
+
+impl PieceStore for DiskStorage {
+    async fn write(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        self.write(offset, data).await
+    }
 }
 
 pub struct DiskStorage {
@@ -68,7 +75,7 @@ impl DiskStorage {
         Ok(files)
     }
 
-    async fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+    pub async fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         let write_end = offset + data.len() as u64;
         for file in &mut self.files {
             let file_start = file.offset;
