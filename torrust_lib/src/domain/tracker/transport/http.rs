@@ -5,7 +5,7 @@ use url::Url;
 
 use super::super::{AnnounceRequest, TrackerResponse};
 use super::{Error, Result};
-use crate::domain::bencode::Bencode;
+use crate::adapters::bencode::Bencode;
 
 const ENCODE_SET: &AsciiSet = NON_ALPHANUMERIC;
 

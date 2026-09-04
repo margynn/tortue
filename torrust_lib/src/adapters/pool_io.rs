@@ -5,7 +5,8 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::adapters::peer_io::{PeerEvent, PeerIO};
-use crate::domain::peer::{self, PeerId};
+use crate::domain::message::Message;
+use crate::domain::peer::PeerId;
 use crate::domain::pool::{self, Pool};
 use crate::domain::torrent::Metainfo;
 
@@ -21,7 +22,7 @@ pub struct PoolIO {
     metainfo: Metainfo,
     client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
-    peer_cmds: HashMap<SocketAddr, mpsc::Sender<peer::Message>>,
+    peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     verified_pieces: usize,
@@ -122,10 +123,10 @@ impl PoolIO {
                         info!(addr = %addr, "peer disconnected");
                     },
                     PeerEvent::MessageReceived(msg) => match msg {
-                        peer::Message::Unchoke
-                        | peer::Message::Choke
-                        | peer::Message::Bitfield(_)
-                        | peer::Message::Have(_) => {
+                        Message::Unchoke
+                        | Message::Choke
+                        | Message::Bitfield(_)
+                        | Message::Have(_) => {
                             tracing::debug!(addr = %addr, msg = ?msg, "peer state");
                         },
                         _ => {

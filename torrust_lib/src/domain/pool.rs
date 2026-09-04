@@ -6,7 +6,8 @@ use std::vec;
 use rand::seq::IteratorRandom;
 
 use super::bitfield::Bitfield;
-use super::peer::{Message, PeerId};
+use super::message::Message;
+use super::peer::PeerId;
 use super::pieces::{BlockRange, BlockRef, PieceEvent, PieceManager};
 use super::torrent::Metainfo;
 

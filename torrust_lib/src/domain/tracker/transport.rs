@@ -7,7 +7,7 @@ pub mod udp;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("bencode: {0}")]
-    Bencode(#[from] crate::domain::bencode::Error),
+    Bencode(#[from] crate::adapters::bencode::Error),
 
     #[error("tracker failure: {0}")]
     TrackerFailure(String),

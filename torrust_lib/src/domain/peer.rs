@@ -1,24 +1,60 @@
-mod handshake;
-mod message;
-// mod session;
+use std::fmt;
 
-pub use handshake::{Handshake, PeerId};
-pub use message::{AsyncByteReader, Message};
-// pub use session::{Input, Output, PeerSession};
+use rand::TryRng;
 
-pub type Result<T> = std::result::Result<T, Error>;
+use super::torrent::InfoHash;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("invalid message")]
-    InvalidMessage,
+pub struct Handshake {
+    pub info_hash: InfoHash,
+    pub peer_id: PeerId,
+}
 
-    #[error("invalid handshake: {0}")]
-    InvalidHandshake(&'static str),
+impl Handshake {
+    pub fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
+        Self { info_hash, peer_id }
+    }
+}
 
-    #[error("message too large")]
-    MessageTooLarge,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerId([u8; 20]);
 
-    #[error("io error")]
-    Io,
+impl PeerId {
+    pub fn new(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn generate(client: &str, version: &str) -> Self {
+        let mut id = [0u8; 20];
+        let prefix = format!("-{}{}-", client, version);
+        let prefix_bytes = prefix.as_bytes();
+        let n = prefix_bytes.len().min(20);
+        id[..n].copy_from_slice(&prefix_bytes[..n]);
+        rand::rng().try_fill_bytes(&mut id[n..]);
+        Self(id)
+    }
+}
+
+impl AsRef<[u8]> for PeerId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &b in &self.0 {
+            if b.is_ascii_graphic() || b == b' ' {
+                write!(f, "{}", b as char)?;
+            } else {
+                write!(f, "\\x{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PeerId({self})")
+    }
 }

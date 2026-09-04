@@ -4,12 +4,12 @@ use tracing::info;
 
 use crate::adapters::pool_io::PoolIO;
 use crate::adapters::tracker_io::TrackerIO;
-use crate::domain;
 use crate::domain::peer::PeerId;
+use crate::domain::torrent::Metainfo;
 use crate::domain::tracker::Node;
 
 pub async fn download(torrent_file: &[u8]) -> Result<()> {
-    let metainfo = domain::torrent::decode(torrent_file)?;
+    let metainfo = Metainfo::try_from(torrent_file)?;
     let node = Node {
         id: PeerId::generate("TR", "0.1.0"),
         port: 1234,
