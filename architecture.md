@@ -1,229 +1,5 @@
 # Architecture
 
-## Current state
-
-```
-application::download
-  ├── TrackerIO          (adapter) — UDP/HTTP tracker, emits Vec<SocketAddr>
-  └── PoolIO             (adapter) — event loop, owns peer tasks
-        ├── Pool         (domain)  — peer scheduling, in-flight tracking
-        └── PeerIO×N    (adapter) — one TCP connection per peer
-```
-
-`PieceManager` exists in `domain/pieces/manager.rs` but is **never instantiated**.
-`pool::Input::PieceVerified` exists but is **never produced** by `PoolIO`.
-
-### Identified problems
-
-#### 1. Duplicated block/piece logic between Pool and PieceManager
-
-`Pool` (domain/pool.rs) owns:
-
-```rust
-const BLOCK_SIZE: u32 = 16_384;
-
-fn piece_blocks(&self, piece: usize) -> Vec<(u32, u32)>
-```
-
-`PieceManager` (domain/pieces/manager.rs) owns:
-
-```rust
-use super::piece::BLOCK_SIZE;
-
-pub fn missing_blocks(&self, piece: u32) -> impl Iterator<Item = BlockRange>
-pub fn mark_block_requested(&mut self, piece: u32, begin: usize)
-```
-
-`Pool.schedule_requests()` uses its own `piece_blocks()` — which returns **all** blocks of a
-piece — to build `Request` messages, while ignoring `PieceManager.missing_blocks()` which
-tracks which blocks are actually still needed. This means Pool can re-request blocks already
-received or in progress at the piece layer.
-
-#### 2. PieceManager has an imperative API in an event-driven codebase
-
-`Pool` exposes `step(input: Input) -> Vec<Output>` — pure, event-driven.
-`PieceManager` exposes direct mutable methods: `receive_block`, `mark_block_requested`,
-`storage_completed`. This asymmetry complicates integration and testing.
-
-#### 3. Block data is discarded at Pool level
-
-When `Pool.on_message()` matches `Message::Piece { index, begin, .. }`, the block data is
-silently dropped. `Pool` updates its in-flight counter and reschedules requests, but the
-actual bytes never reach `PieceManager`. No piece is ever assembled or verified.
-
-#### 4. Storage is never written
-
-`PieceManager.receive_block()` emits `PieceEvent::PieceCompleted { command: StorageCommand::Write { .. } }`,
-but nothing in `PoolIO` calls `PieceManager`, so no `StorageCommand` is ever produced and
-`ports::disk_storage` is never invoked.
-
----
-
-## Design options
-
-### Option A — PieceManager inside Pool
-
-`Pool` owns `PieceManager`. It becomes a unified download coordinator: it schedules peer
-requests **and** assembles/verifies pieces.
-
-```
-PoolIO
-  └── Pool  ←─ owns ──► PieceManager
-```
-
-**Data flow**
-
-```
-PeerIO ──► PeerEvent::MessageReceived(Piece { index, begin, block })
-              │
-              ▼
-           PoolIO
-              │  pool::Input::MessageReceived { addr, message }
-              ▼
-           Pool.step()
-              │  internally: piece_manager.receive_block(index, begin, block)
-              │
-              ├─ PieceEvent::BlockAcknowledged  →  reschedule requests
-              ├─ PieceEvent::PieceCompleted     →  Output::WritePiece + Output::PieceVerified (internal)
-              └─ PieceEvent::PieceInvalid       →  reset, reschedule
-              │
-              ▼
-           Pool::Output
-              ├── ConnectPeer(addr)
-              ├── SendToPeer { addr, message }
-              ├── WritePiece { offset, data }      ← new
-              └── Completed
-```
-
-`Pool.schedule_requests()` replaces `piece_blocks()` with `piece_manager.missing_blocks()`
-so it only requests blocks that are genuinely missing (not yet received or in-flight).
-
-`PoolIO` handles `Output::WritePiece` by calling the storage port. It feeds
-`pool::Input::PieceVerified` after the write completes (or immediately if write is async
-fire-and-forget).
-
-**Advantages**
-- `PoolIO` stays simple: one domain object to drive, one event loop.
-- No inter-domain channel needed; the coupling between scheduling and assembly is
-  synchronous and co-located.
-- `Pool.schedule_requests()` can use the real missing-block state from `PieceManager`
-  instead of recomputing all blocks.
-- `BLOCK_SIZE` and `piece_blocks()` are removed from `Pool`; they live only in
-  `PieceManager`/`Piece`.
-
-**Drawbacks**
-- `Pool` now has two responsibilities: peer scheduling and piece assembly. Its test surface
-  grows.
-- `PieceManager` can still be unit-tested in isolation, but only by constructing a `Pool` or
-  by keeping a public API on `PieceManager` that tests call directly.
-
----
-
-### Option B — PieceManager outside Pool, with Input/Output enums
-
-Both `Pool` and `PieceManager` are pure event-driven state machines. `PoolIO` orchestrates
-both, routing outputs from one as inputs to the other.
-
-```
-PoolIO
-  ├── Pool          step(Input) -> Vec<Output>
-  └── PieceManager  step(Input) -> Vec<Output>
-```
-
-**PieceManager enums**
-
-```rust
-pub enum Input {
-    BlockReceived { piece: u32, offset: usize, data: Vec<u8> },
-    StorageCompleted { piece: u32 },
-}
-
-pub enum Output {
-    BlockAcknowledged,
-    PieceCompleted { piece: u32, offset: u64, data: Vec<u8> },
-    PieceInvalid { piece: u32 },
-    NeedBlocks { piece: u32, blocks: Vec<BlockRange> },  // optional: push model
-}
-```
-
-**Pool changes**
-
-`Pool` no longer handles `Message::Piece` block data. It receives a dedicated input:
-
-```rust
-pub enum Input {
-    PeersDiscovered(Vec<SocketAddr>),
-    PeerConnected { addr: SocketAddr, peer_id: PeerId },
-    PeerDisconnected(SocketAddr),
-    MessageReceived { addr: SocketAddr, message: Message },
-    BlockAcknowledged { piece: u32, begin: u32 },  // replaces PieceVerified for in-flight
-    PieceVerified(usize),
-}
-```
-
-**Data flow in PoolIO**
-
-```
-PeerEvent::MessageReceived(Piece { index, begin, block })
-  │
-  ├─► pool::Input::BlockAcknowledged { piece: index, begin }
-  │       Pool updates in-flight, schedules next requests
-  │
-  └─► piece_manager::Input::BlockReceived { piece: index, offset: begin, data: block }
-          │
-          ├─ Output::BlockAcknowledged          → (no-op or metrics)
-          ├─ Output::PieceCompleted { .. }      → write to storage
-          │                                        then pool::Input::PieceVerified
-          └─ Output::PieceInvalid { piece }     → pool::Input::PieceVerified(piece)?
-                                                   or a dedicated InvalidPiece input
-                                                   to trigger re-request
-```
-
-`Pool.schedule_requests()` cannot call `piece_manager.missing_blocks()` directly (they are
-separate). Two approaches:
-
-1. **Pull**: `PoolIO` queries `piece_manager.missing_blocks(piece)` before calling
-   `pool.schedule_requests()`, and passes the result in via an enriched input.
-2. **Push**: `PieceManager` emits `Output::NeedBlocks` after a reset; `PoolIO` feeds this
-   back to Pool as a `BlocksNeeded` input.
-
-The simplest is to keep Pool scheduling all blocks and deduplicate at the `PieceManager`
-level: `PieceManager.receive_block()` is idempotent for already-received blocks (already the
-case in `Piece.receive_block()`).
-
-**Advantages**
-- Perfect separation: `Pool` is purely about peer topology and scheduling; `PieceManager`
-  is purely about data integrity.
-- Each can be unit-tested with zero coupling to the other.
-- `PieceManager` is reusable in a seeding scenario without dragging in Pool logic.
-
-**Drawbacks**
-- `PoolIO` becomes a non-trivial router: it must split `Message::Piece` across two state
-  machines and route outputs back as inputs.
-- The "missing blocks" problem requires an explicit solution (pull or push model above).
-- More enum variants to maintain across two domain modules.
-
----
-
-## Recommendation
-
-**Option A** is the right fit for the current scope.
-
-The coupling between peer scheduling and piece state is inherent to the BitTorrent
-protocol: the decision of *what to request next* depends directly on *what has already been
-received*. Placing `PieceManager` inside `Pool` makes this dependency explicit and
-synchronous, removes the duplicated `BLOCK_SIZE`/`piece_blocks` logic, and keeps `PoolIO`
-as a thin adapter with a single domain object to drive.
-
-`PieceManager` remains a distinct struct with its own unit tests. The boundary is internal
-to `Pool`, not across an async channel.
-
-Option B becomes attractive if `PieceManager` needs to be reused (e.g. seeding, resuming
-from disk) in a context where `Pool` is not present. At that point, adding `Input/Output`
-enums to `PieceManager` and extracting it back out of `Pool` is a contained refactor.
-
----
-
 ## Target architecture (Option A)
 
 ```
@@ -252,12 +28,12 @@ PoolIO responsibilities
 
 ### Changes required
 
-| Location | Change |
-|---|---|
-| `domain/pool.rs` | Own `PieceManager`; handle `Message::Piece` data through it; remove `piece_blocks()` and local `BLOCK_SIZE`; add `Output::WritePiece` |
-| `domain/pieces/manager.rs` | Add `reset_requested_block()`; keep imperative API (internal to Pool) |
-| `adapters/pool_io.rs` | Add `DiskStorage`; handle `Output::WritePiece` → write + feed `Input::PieceVerified`; remove dead `verified_pieces` counter |
-| `application/download.rs` | Construct `DiskStorage` and pass it to `PoolIO` |
+| Location                   | Change                                                                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `domain/pool.rs`           | Own `PieceManager`; handle `Message::Piece` data through it; remove `piece_blocks()` and local `BLOCK_SIZE`; add `Output::WritePiece` |
+| `domain/pieces/manager.rs` | Add `reset_requested_block()`; keep imperative API (internal to Pool)                                                                 |
+| `adapters/pool_io.rs`      | Add `DiskStorage`; handle `Output::WritePiece` → write + feed `Input::PieceVerified`; remove dead `verified_pieces` counter           |
+| `application/download.rs`  | Construct `DiskStorage` and pass it to `PoolIO`                                                                                       |
 
 ---
 
@@ -560,9 +336,9 @@ pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<()> {
 
 ### Invariants to maintain
 
-| Invariant | Enforced by |
-|---|---|
+| Invariant                                                          | Enforced by                                                                                  |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
 | A block is in `in_flight` iff `PieceManager` has it as `Requested` | `schedule_requests` always calls both `in_flight.insert` and `mark_block_requested` together |
-| On disconnect, orphaned `Requested` blocks return to `Missing` | `on_disconnected` resets them before clearing `in_flight` |
-| `needed` bitfield and `PieceManager` bitfield stay in sync | `on_write_completed` calls both `needed.unset_bit` and `pieces.storage_completed` |
-| A piece is re-queued for retry after hash failure | `on_message` calls `needed.set_bit` when `PieceInvalid` is returned |
+| On disconnect, orphaned `Requested` blocks return to `Missing`     | `on_disconnected` resets them before clearing `in_flight`                                    |
+| `needed` bitfield and `PieceManager` bitfield stay in sync         | `on_write_completed` calls both `needed.unset_bit` and `pieces.storage_completed`            |
+| A piece is re-queued for retry after hash failure                  | `on_message` calls `needed.set_bit` when `PieceInvalid` is returned                          |

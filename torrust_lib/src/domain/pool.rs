@@ -32,11 +32,12 @@ pub enum Output {
     Completed,
 }
 
+type PieceIndex = usize;
+
 pub struct Pool<'a> {
     metainfo: &'a Metainfo,
-    needed: Bitfield,
     peers: HashMap<SocketAddr, PeerState>,
-    availability: HashMap<usize, HashSet<SocketAddr>>,
+    availability: HashMap<PieceIndex, HashSet<SocketAddr>>,
     block_assignments: HashMap<BlockRef, SocketAddr>,
     pieces: PieceManager<'a>,
 }
@@ -46,12 +47,9 @@ const MAX_CONNECTED: usize = 256;
 
 impl<'a> Pool<'a> {
     pub fn new(metainfo: &'a Metainfo) -> Self {
-        let mut needed = Bitfield::new(metainfo.pieces.len());
-        let _ = needed.set_all();
         let pieces = PieceManager::new(metainfo);
         Self {
             metainfo,
-            needed,
             peers: HashMap::new(),
             availability: HashMap::new(),
             block_assignments: HashMap::new(),
@@ -65,7 +63,6 @@ impl<'a> Pool<'a> {
             Input::PeerConnected { addr, .. } => self.on_connected(addr),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            // Input::PieceVerified(piece) => self.on_piece_verified(piece),
         }
     }
 
@@ -94,7 +91,19 @@ impl<'a> Pool<'a> {
             peers.remove(&addr);
             !peers.is_empty()
         });
-        self.block_assignments.retain(|_, peer| *peer != addr);
+
+        // Reset orphaned in-flight blocks in PieceManager before removing them.
+        let orphaned: Vec<BlockRef> = self
+            .block_assignments
+            .iter()
+            .filter(|(_, peer)| **peer == addr)
+            .map(|(key, _)| *key)
+            .collect();
+        for block_ref in orphaned {
+            self.block_assignments.remove(&block_ref);
+            self.pieces.request_block(block_ref);
+        }
+
         self.schedule_requests()
     }
 
@@ -175,19 +184,14 @@ impl<'a> Pool<'a> {
             Err(_) => vec![], // malformed block - drop silently
             Ok(piece_event) => match piece_event {
                 PieceEvent::BlockReceived => self.schedule_requests(),
-                PieceEvent::PieceInvalid { piece_index } => {
-                    self.needed.set_bit(piece_index);
-                    self.schedule_requests()
-                },
+                PieceEvent::PieceInvalid { .. } => self.schedule_requests(),
                 PieceEvent::PieceCompleted { piece_index, piece_offset, data } => {
-                    let mut outputs = self.schedule_requests();
-                    outputs.push(Output::WritePiece { piece_index, piece_offset, data });
-
-                    // Check if last piece
-                    let _ = self.needed.unset_bit(piece_index);
-                    if self.needed.into_iter().next().is_none() {
-                        outputs.push(Output::Completed);
+                    let write = Output::WritePiece { piece_index, piece_offset, data };
+                    if self.pieces.is_complete() {
+                        return vec![write, Output::Completed];
                     }
+                    let mut outputs = self.schedule_requests();
+                    outputs.push(write);
                     outputs
                 },
             },
@@ -198,7 +202,7 @@ impl<'a> Pool<'a> {
         let mut outputs = vec![];
 
         // Rarest first
-        let mut needed: Vec<usize> = self.needed.into_iter().map(|i| i as usize).collect();
+        let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
         needed.sort_by_key(|&piece| {
             self.availability.get(&piece).map_or(usize::MAX, |peers| peers.len())
         });

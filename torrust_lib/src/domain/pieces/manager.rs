@@ -76,6 +76,17 @@ impl<'a> PieceManager<'a> {
             .map_err(Error::Piece)
     }
 
+    pub fn needed_pieces(&self) -> impl Iterator<Item = usize> + '_ {
+        self.pieces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| (!p.is_complete()).then_some(i))
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.pieces.iter().all(|p| p.is_complete())
+    }
+
     pub fn receive_block(&mut self, block_ref: BlockRef, data: Vec<u8>) -> Result<PieceEvent> {
         let piece_index = block_ref.piece_index;
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
