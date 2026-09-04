@@ -9,13 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::domain::message::Message;
-use crate::domain::peer::{Handshake, PeerId};
+use crate::domain::peer::PeerId;
 use crate::domain::torrent::{InfoHash, Metainfo};
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum PeerEvent {
@@ -75,6 +70,10 @@ pub struct PeerIO {
 }
 
 impl PeerIO {
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+    const RECONNECT_DELAY: Duration = Duration::from_secs(4);
+    const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
+
     pub fn new(
         peer_addr: SocketAddr,
         client_id: PeerId,
@@ -113,7 +112,7 @@ impl PeerIO {
                         },
                         Err(_) => {
                             let _ = self.tx.send(PeerEvent::Disconnected).await;
-                            break 'session RECONNECT_DELAY;
+                            break 'session Self::RECONNECT_DELAY;
                         },
                     },
 
@@ -122,7 +121,7 @@ impl PeerIO {
                         Some(msg) => {
                             if tcp.write_all(&msg.encode()).await.is_err() {
                                 let _ = self.tx.send(PeerEvent::Disconnected).await;
-                                break 'session RECONNECT_DELAY;
+                                break 'session Self::RECONNECT_DELAY;
                             }
                         },
                     },
@@ -140,24 +139,24 @@ impl PeerIO {
                 Ok(result) => return result,
                 Err(e) => {
                     tracing::debug!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
-                    delay = (delay * 2).clamp(RECONNECT_DELAY, MAX_RECONNECT_DELAY);
+                    delay = (delay * 2).clamp(Self::RECONNECT_DELAY, Self::MAX_RECONNECT_DELAY);
                 },
             }
         }
     }
 
     async fn connect(&self) -> Result<(TcpStream, PeerId)> {
-        let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
+        let mut stream = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
             .await
             .map_err(|_| Error::Timeout)??;
 
         let outbound = Handshake::new(self.metainfo.hash, self.client_id);
-        timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
+        timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)??;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
-        timeout(CONNECT_TIMEOUT, AsyncReadExt::read_exact(&mut stream, &mut buf))
+        timeout(Self::CONNECT_TIMEOUT, AsyncReadExt::read_exact(&mut stream, &mut buf))
             .await
             .map_err(|_| Error::Timeout)??;
 
@@ -171,9 +170,18 @@ impl PeerIO {
     }
 }
 
+pub struct Handshake {
+    pub info_hash: InfoHash,
+    pub peer_id: PeerId,
+}
+
 impl Handshake {
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
     const HANDSHAKE_LEN: usize = 68;
+
+    fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
+        Self { info_hash, peer_id }
+    }
 
     fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
         let mut out = [0u8; Self::HANDSHAKE_LEN];
@@ -207,6 +215,8 @@ impl Handshake {
 }
 
 impl Message {
+    const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1Mb
+
     fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
@@ -255,7 +265,7 @@ impl Message {
         reader.read_exact(&mut header).await?;
 
         let len = u32::from_be_bytes(header) as usize;
-        if len > MAX_MESSAGE_SIZE {
+        if len > Self::MAX_MESSAGE_SIZE {
             return Err(Error::MessageTooLarge);
         }
 

@@ -2,19 +2,6 @@ use std::fmt;
 
 use rand::TryRng;
 
-use super::torrent::InfoHash;
-
-pub struct Handshake {
-    pub info_hash: InfoHash,
-    pub peer_id: PeerId,
-}
-
-impl Handshake {
-    pub fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
-        Self { info_hash, peer_id }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);
 

@@ -7,7 +7,7 @@ use tracing::info;
 use crate::adapters::peer_io::{PeerEvent, PeerIO};
 use crate::domain::message::Message;
 use crate::domain::peer::PeerId;
-use crate::domain::pool::{self, Pool};
+use crate::domain::pool::{Input, Output, Pool};
 use crate::domain::torrent::Metainfo;
 
 #[derive(Debug, thiserror::Error)]
@@ -18,19 +18,18 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolIO {
-    metainfo: Metainfo,
+pub struct PoolIO<'a> {
+    metainfo: &'a Metainfo,
     client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
-    verified_pieces: usize,
 }
 
-impl PoolIO {
+impl<'a> PoolIO<'a> {
     pub fn new(
-        metainfo: Metainfo,
+        metainfo: &'a Metainfo,
         client_id: PeerId,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     ) -> Self {
@@ -42,38 +41,29 @@ impl PoolIO {
             peer_cmds: HashMap::new(),
             pool_tx,
             pool_rx,
-            verified_pieces: 0,
         }
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut pool = Pool::new(self.metainfo.clone());
+        let mut pool = Pool::new(self.metainfo);
 
         loop {
             let input = tokio::select! {
                 addrs = self.peers_rx.recv() => match addrs {
-                    Some(addrs) => pool::Input::PeersDiscovered(addrs),
+                    Some(addrs) => Input::PeersDiscovered(addrs),
                     None => return Err(Error::TrackerDisconnected),
                 },
 
                 msg = self.pool_rx.recv() => match msg {
                     None => break,
-                    Some((addr, PeerEvent::Connected(peer_id))) => pool::Input::PeerConnected { addr, peer_id },
-                    Some((addr, PeerEvent::Disconnected)) => pool::Input::PeerDisconnected(addr),
-                    Some((addr, PeerEvent::MessageReceived(message))) => pool::Input::MessageReceived { addr, message },
+                    Some((addr, PeerEvent::Connected(peer_id))) => Input::PeerConnected { addr, peer_id },
+                    Some((addr, PeerEvent::Disconnected)) => Input::PeerDisconnected(addr),
+                    Some((addr, PeerEvent::MessageReceived(message))) => Input::MessageReceived { addr, message },
                 },
             };
 
-            match &input {
-                pool::Input::PeerDisconnected(addr) => {
-                    self.peer_cmds.remove(addr);
-                },
-                pool::Input::PieceVerified(_) => {
-                    self.verified_pieces += 1;
-                    let total = self.metainfo.pieces.len();
-                    info!(piece = self.verified_pieces, total, "piece verified");
-                },
-                _ => {},
+            if let Input::PeerDisconnected(addr) = input {
+                self.peer_cmds.remove(&addr);
             }
 
             for out in pool.step(input) {
@@ -84,15 +74,16 @@ impl PoolIO {
         Ok(())
     }
 
-    async fn handle_output(&mut self, out: pool::Output) {
+    async fn handle_output(&mut self, out: Output) {
         match out {
-            pool::Output::ConnectPeer(addr) => self.spawn_peer(addr),
-            pool::Output::SendToPeer { addr, message } => {
+            Output::ConnectPeer(addr) => self.spawn_peer(addr),
+            Output::SendToPeer { addr, message } => {
                 if let Some(v) = self.peer_cmds.get(&addr) {
                     let _ = v.send(message).await;
                 }
             },
-            pool::Output::Completed => info!("download completed"),
+            Output::Completed => info!("download completed"),
+            Output::WritePiece { piece_index, piece_offset, data } => todo!(),
         }
     }
 
