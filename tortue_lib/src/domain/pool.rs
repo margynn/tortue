@@ -229,16 +229,18 @@ impl Pool {
 
     fn on_message_piece(
         &mut self,
-        addr: SocketAddr,
+        _addr: SocketAddr,
         block_ref: BlockRef,
         data: Vec<u8>,
     ) -> Vec<Output> {
-        // Free in_flight peer slot
-        if let None = self.block_assignments.remove(&block_ref) {
-            // block not requested - assume malicious or unwanted
-            return vec![];
-        }
-        if let Some(state) = self.peers.get_mut(&addr) {
+        // Free in_flight slot on the assigned peer (not necessarily the sender —
+        // the block may have been reassigned after a timeout while the original
+        // peer was still responding).
+        let assigned = match self.block_assignments.remove(&block_ref) {
+            None => return vec![],
+            Some(p) => p,
+        };
+        if let Some(state) = self.peers.get_mut(&assigned) {
             state.in_flight = state.in_flight.saturating_sub(1);
         }
 

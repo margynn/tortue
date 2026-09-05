@@ -1,5 +1,5 @@
 /target
-./torrents
+./torrents/*
 
 # rust-analyzer
 /.rust-analyzer/
