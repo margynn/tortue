@@ -353,7 +353,10 @@ mod tests {
         let mut bf = Bitfield::new(8);
 
         assert!(matches!(bf.extend_bytes(&[]), Err(Error::PieceOutOfRange)));
-        assert!(matches!(bf.extend_bytes(&[0, 0]), Err(Error::PieceOutOfRange)));
+        assert!(matches!(
+            bf.extend_bytes(&[0, 0]),
+            Err(Error::PieceOutOfRange)
+        ));
     }
 
     #[test]

@@ -1,16 +1,19 @@
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::vec;
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    net::SocketAddr,
+    sync::Arc,
+    vec,
+};
 
 use rand::seq::IteratorRandom;
 
-use super::bitfield::Bitfield;
-use super::message::Message;
-use super::peer::PeerId;
-use super::pieces::{BlockRange, BlockRef, PieceEvent, PieceManager};
-use super::torrent::Metainfo;
+use super::{
+    bitfield::Bitfield,
+    message::Message,
+    peer::PeerId,
+    pieces::{BlockRange, BlockRef, PieceEvent, PieceManager},
+    torrent::Metainfo,
+};
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
@@ -21,15 +24,8 @@ pub enum Input {
 
 pub enum Output {
     ConnectPeer(SocketAddr),
-    SendToPeer {
-        addr: SocketAddr,
-        message: Message,
-    },
-    WritePiece {
-        piece_index: usize,
-        piece_offset: u64,
-        data: Vec<u8>,
-    },
+    SendToPeer { addr: SocketAddr, message: Message },
+    WritePiece { offset: u64, data: Vec<u8> },
     Completed,
 }
 
@@ -43,6 +39,20 @@ pub struct Pool {
     pieces: PieceManager,
 }
 
+pub struct PoolSnapshot {
+    pub blocks_total: usize,
+    pub blocks_done: usize,
+    pub blocks_in_flight: usize,
+    pub peers: Vec<PeerInfo>,
+}
+
+pub struct PeerInfo {
+    pub addr: SocketAddr,
+    pub peer_id: Option<PeerId>,
+    pub in_flight: usize,
+    pub is_choking: bool,
+}
+
 impl Pool {
     pub fn new(metainfo: Arc<Metainfo>) -> Self {
         let pieces = PieceManager::new(Arc::clone(&metainfo));
@@ -52,6 +62,26 @@ impl Pool {
             availability: HashMap::new(),
             block_assignments: HashMap::new(),
             pieces,
+        }
+    }
+
+    pub fn snapshot(&self) -> PoolSnapshot {
+        let peers = self
+            .peers
+            .iter()
+            .map(|(addr, s)| PeerInfo {
+                addr: *addr,
+                peer_id: s.peer_id,
+                in_flight: s.in_flight,
+                is_choking: s.peer_choking,
+            })
+            .collect();
+
+        PoolSnapshot {
+            blocks_total: self.pieces.blocks_total(),
+            blocks_done: self.pieces.blocks_received(),
+            blocks_in_flight: self.block_assignments.len(),
+            peers,
         }
     }
 
@@ -117,8 +147,15 @@ impl Pool {
             Message::Have(piece_index) => self.on_message_have(addr, piece_index),
             Message::Unchoke => self.schedule_requests(),
             Message::Choke => self.on_message_choke(addr),
-            Message::Piece { piece_index, piece_offset, data } => {
-                let block_ref = BlockRef { piece_index, piece_offset };
+            Message::Piece {
+                piece_index,
+                piece_offset,
+                data,
+            } => {
+                let block_ref = BlockRef {
+                    piece_index,
+                    piece_offset,
+                };
                 self.on_message_piece(addr, block_ref, data)
             },
             _ => vec![],
@@ -132,7 +169,10 @@ impl Pool {
         if !peer.am_interested {
             peer.am_interested = true;
             // Signal interest unconditionally — peer will unchoke us if they agree.
-            return vec![Output::SendToPeer { addr, message: Message::Interested }];
+            return vec![Output::SendToPeer {
+                addr,
+                message: Message::Interested,
+            }];
         }
         if peer.peer_choking {
             return vec![]; // Already interested, waiting for unchoke.
@@ -152,7 +192,10 @@ impl Pool {
 
     fn on_message_have(&mut self, addr: SocketAddr, piece_index: usize) -> Vec<Output> {
         // Update the piece availability at peer
-        self.availability.entry(piece_index).or_default().insert(addr);
+        self.availability
+            .entry(piece_index)
+            .or_default()
+            .insert(addr);
         self.interested_or_request(addr)
     }
 
@@ -185,8 +228,13 @@ impl Pool {
             Ok(piece_event) => match piece_event {
                 PieceEvent::BlockReceived => self.schedule_requests(),
                 PieceEvent::PieceInvalid { .. } => self.schedule_requests(),
-                PieceEvent::PieceCompleted { piece_index, piece_offset, data } => {
-                    let write = Output::WritePiece { piece_index, piece_offset, data };
+                PieceEvent::PieceCompleted {
+                    piece_offset, data, ..
+                } => {
+                    let write = Output::WritePiece {
+                        offset: piece_offset,
+                        data,
+                    };
                     if self.pieces.is_complete() {
                         return vec![write, Output::Completed];
                     }
@@ -205,7 +253,11 @@ impl Pool {
     fn pick_peer(&self, peer_addrs: &[SocketAddr], rng: &mut impl rand::Rng) -> Option<SocketAddr> {
         peer_addrs
             .iter()
-            .filter(|addr| self.peers.get(addr).map_or(false, |s| s.can_accept_request()))
+            .filter(|addr| {
+                self.peers
+                    .get(addr)
+                    .map_or(false, |s| s.can_accept_request())
+            })
             .choose(rng)
             .copied()
     }
@@ -222,7 +274,9 @@ impl Pool {
         // Needed pieces sorted by rarest first
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
         needed.sort_by_key(|&piece| {
-            self.availability.get(&piece).map_or(usize::MAX, |peers| peers.len())
+            self.availability
+                .get(&piece)
+                .map_or(usize::MAX, |peers| peers.len())
         });
 
         for piece_index in needed {
@@ -264,46 +318,9 @@ impl Pool {
     }
 }
 
-// TODO: add throughtput download/upload per peer
-pub struct PoolSnapshot {
-    pub pieces_total: usize,
-    pub pieces_done: usize,
-    pub pieces_in_flight: usize,
-    pub peers: Vec<PeerInfo>,
-}
-
-pub struct PeerInfo {
-    pub addr: SocketAddr,
-    pub peer_id: Option<PeerId>,
-    pub in_flight: usize,
-    pub is_choking: bool,
-}
-
-impl Pool {
-    pub fn snapshot(&self) -> PoolSnapshot {
-        let peers = self
-            .peers
-            .iter()
-            .map(|(addr, s)| PeerInfo {
-                addr: *addr,
-                peer_id: s.peer_id,
-                in_flight: s.in_flight,
-                is_choking: s.peer_choking,
-            })
-            .collect();
-
-        PoolSnapshot {
-            pieces_total: self.metainfo.pieces.len(),
-            pieces_done: self.pieces.completed_count(),
-            pieces_in_flight: self.block_assignments.len(),
-            peers,
-        }
-    }
-}
-
 struct PeerState {
     peer_id: Option<PeerId>,
-    am_choking: bool,
+    // am_choking: bool,
     am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
@@ -322,7 +339,7 @@ impl PeerState {
     fn new(pieces: usize) -> Self {
         Self {
             peer_id: None,
-            am_choking: true,
+            // am_choking: true,
             am_interested: false,
             peer_choking: true,
             peer_interested: false,

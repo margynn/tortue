@@ -1,5 +1,7 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use sha1::{Digest, Sha1};
 
@@ -106,6 +108,14 @@ impl PieceManager {
         self.pieces.iter().filter(|p| p.is_complete()).count()
     }
 
+    pub fn blocks_total(&self) -> usize {
+        self.pieces.iter().map(|p| p.blocks.len()).sum()
+    }
+
+    pub fn blocks_received(&self) -> usize {
+        self.pieces.iter().map(|p| p.received).sum()
+    }
+
     pub fn receive_block(&mut self, block_ref: BlockRef, data: Vec<u8>) -> Result<PieceEvent> {
         let piece_index = block_ref.piece_index;
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
@@ -165,14 +175,17 @@ impl Piece {
 
     fn missing_blocks(&self) -> impl Iterator<Item = usize> + '_ {
         let now = Instant::now();
-        self.blocks.iter().enumerate().filter_map(move |(index, state)| {
-            let requestable = match state {
-                BlockState::Missing => true,
-                BlockState::Requested { at } => now >= *at + REQUEST_TIMEOUT,
-                BlockState::Received { .. } => false,
-            };
-            requestable.then_some(index)
-        })
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, state)| {
+                let requestable = match state {
+                    BlockState::Missing => true,
+                    BlockState::Requested { at } => now >= *at + REQUEST_TIMEOUT,
+                    BlockState::Received { .. } => false,
+                };
+                requestable.then_some(index)
+            })
     }
 
     fn request_block(&mut self, block_index: usize) -> Result<()> {

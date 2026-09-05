@@ -2,8 +2,7 @@ use std::net::SocketAddr;
 
 use tokio::sync::mpsc;
 
-use crate::domain::message::Message;
-use crate::domain::peer::PeerId;
+use crate::domain::{message::Message, peer::PeerId};
 
 #[derive(Debug)]
 pub enum PeerEvent {

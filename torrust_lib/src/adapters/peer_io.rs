@@ -1,16 +1,20 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::mpsc,
+    time::timeout,
+};
 
-use crate::application::ports::peer_connector::{PeerConnector, PeerEvent};
-use crate::domain::message::Message;
-use crate::domain::peer::PeerId;
-use crate::domain::torrent::{InfoHash, Metainfo};
+use crate::{
+    application::ports::peer_connector::{PeerConnector, PeerEvent},
+    domain::{
+        message::Message,
+        peer::PeerId,
+        torrent::{InfoHash, Metainfo},
+    },
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -123,7 +127,10 @@ impl PeerIO {
         }
 
         // Sentinel: ensures Pool always receives Disconnected even on clean exit.
-        let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
+        let _ = self
+            .tx
+            .send((self.peer_addr, PeerEvent::Disconnected))
+            .await;
         Ok(())
     }
 
@@ -151,9 +158,12 @@ impl PeerIO {
             .map_err(|_| Error::Timeout)??;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
-        timeout(Self::CONNECT_TIMEOUT, AsyncReadExt::read_exact(&mut stream, &mut buf))
-            .await
-            .map_err(|_| Error::Timeout)??;
+        timeout(
+            Self::CONNECT_TIMEOUT,
+            AsyncReadExt::read_exact(&mut stream, &mut buf),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
 
         let inbound = Handshake::decode(&buf)?;
 
@@ -205,7 +215,10 @@ impl Handshake {
         let mut peer_id_bytes = [0u8; 20];
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
-        Ok(Handshake::new(InfoHash::from(hash_bytes), PeerId::new(peer_id_bytes)))
+        Ok(Handshake::new(
+            InfoHash::from(hash_bytes),
+            PeerId::new(peer_id_bytes),
+        ))
     }
 }
 
@@ -230,21 +243,33 @@ impl Message {
                 buf.push(5);
                 buf.extend_from_slice(bits);
             },
-            Message::Request { piece_index, piece_offset, piece_len } => {
+            Message::Request {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => {
                 buf.extend_from_slice(&13u32.to_be_bytes());
                 buf.push(6);
                 buf.extend_from_slice(&piece_index.to_be_bytes());
                 buf.extend_from_slice(&piece_offset.to_be_bytes());
                 buf.extend_from_slice(&piece_len.to_be_bytes());
             },
-            Message::Piece { piece_index, piece_offset, data } => {
+            Message::Piece {
+                piece_index,
+                piece_offset,
+                data,
+            } => {
                 buf.extend_from_slice(&(9 + data.len() as u32).to_be_bytes());
                 buf.push(7);
                 buf.extend_from_slice(&piece_index.to_be_bytes());
                 buf.extend_from_slice(&piece_offset.to_be_bytes());
                 buf.extend_from_slice(data);
             },
-            Message::Cancel { piece_index, piece_offset, piece_len } => {
+            Message::Cancel {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => {
                 buf.extend_from_slice(&13u32.to_be_bytes());
                 buf.push(8);
                 buf.extend_from_slice(&piece_index.to_be_bytes());
@@ -298,13 +323,19 @@ impl Message {
                 }
                 Ok(Message::Request {
                     piece_index: usize::from_be_bytes(
-                        payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[0..4]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                     piece_offset: usize::from_be_bytes(
-                        payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[4..8]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                     piece_len: usize::from_be_bytes(
-                        payload[8..12].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[8..12]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                 })
             },
@@ -314,10 +345,14 @@ impl Message {
                 }
                 Ok(Message::Piece {
                     piece_index: usize::from_be_bytes(
-                        payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[0..4]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                     piece_offset: usize::from_be_bytes(
-                        payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[4..8]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                     data: payload[8..].to_vec(),
                 })
@@ -328,13 +363,19 @@ impl Message {
                 }
                 Ok(Message::Cancel {
                     piece_index: usize::from_be_bytes(
-                        payload[0..4].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[0..4]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                     piece_offset: usize::from_be_bytes(
-                        payload[4..8].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[4..8]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                     piece_len: usize::from_be_bytes(
-                        payload[8..12].try_into().map_err(|_| Error::InvalidMessage)?,
+                        payload[8..12]
+                            .try_into()
+                            .map_err(|_| Error::InvalidMessage)?,
                     ),
                 })
             },
@@ -350,7 +391,10 @@ pub struct TcpPeerConnector {
 
 impl TcpPeerConnector {
     pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
-        Self { client_id, metainfo }
+        Self {
+            client_id,
+            metainfo,
+        }
     }
 }
 
@@ -361,8 +405,13 @@ impl PeerConnector for TcpPeerConnector {
         cmd_rx: mpsc::Receiver<Message>,
         events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) {
-        let mut runner =
-            PeerIO::new(addr, self.client_id, Arc::clone(&self.metainfo), cmd_rx, events_tx);
+        let mut runner = PeerIO::new(
+            addr,
+            self.client_id,
+            Arc::clone(&self.metainfo),
+            cmd_rx,
+            events_tx,
+        );
         tokio::spawn(async move { runner.run().await });
     }
 }

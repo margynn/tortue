@@ -1,41 +1,35 @@
-# ---- Core width / layout ----
+# Rust 2024
+edition = "2024"
+
+# Layout
 max_width = 100
 hard_tabs = false
 tab_spaces = 4
 newline_style = "Unix"
 
-# ---- Line breaking ----
-use_small_heuristics = "Max"   # pack more aggressively, fewer vertical expansions
-fn_call_width = 100
-attr_fn_like_width = 100
-struct_lit_width = 40
-struct_variant_width = 40
-array_width = 60
-chain_width = 80
-single_line_if_else_max_width = 60
-
-# ---- Imports ----
+# Imports
 reorder_imports = true
 reorder_modules = true
-imports_granularity = "Module"   # stable: Item is still unstable in some toolchains
+imports_granularity = "Crate"
 group_imports = "StdExternalCrate"
 
-# ---- Formatting style ----
-match_block_trailing_comma = true
-trailing_comma = "Vertical"
+# Readability
 use_field_init_shorthand = true
 use_try_shorthand = true
-
-# ---- Functions / items ----
-fn_params_layout = "Tall"   # more readable diffs for long signatures
-
-# ---- Misc ----
 remove_nested_parens = true
+
+# Macros / strings
+format_macro_bodies = true
+format_macro_matchers = false
+format_strings = false
+
+# Comments / docs
 normalize_comments = true
 normalize_doc_attributes = true
-format_strings = false   # keep literals stable (important for tests / hashes)
-format_macro_matchers = false
-format_macro_bodies = true
 
-# ---- Control ----
-edition = "2024"
+# Match
+match_block_trailing_comma = true
+trailing_comma = "Vertical"
+
+# Function parameters
+fn_params_layout = "Tall"

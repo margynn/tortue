@@ -73,7 +73,10 @@ fn bytes_to_str(b: &Bencode) -> Option<String> {
 
 fn parse_announces(root: &Bencode) -> Result<Vec<String>> {
     let main_announce = root.get_utf8(b"announce")?;
-    let tiers = root.get_list(b"announce-list").map(parse_announce_list).unwrap_or_default();
+    let tiers = root
+        .get_list(b"announce-list")
+        .map(parse_announce_list)
+        .unwrap_or_default();
 
     let mut seen = HashSet::new();
     let mut announces = vec![main_announce.clone()];
@@ -113,7 +116,9 @@ fn parse_info(info: &Bencode) -> Result<(String, usize, Vec<PieceHash>, Mode)> {
     let pieces = parse_pieces(info.get_bytes(b"pieces")?)?;
 
     let mode = match info.get(b"length") {
-        Ok(Bencode::Int(length)) => Mode::Single { length: to_u64(*length)? },
+        Ok(Bencode::Int(length)) => Mode::Single {
+            length: to_u64(*length)?,
+        },
         Ok(_) => return Err(Error::UnexpectedType),
         Err(_) => {
             let files = info

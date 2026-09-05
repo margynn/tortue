@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
-use super::peer::PeerId;
-use super::torrent::InfoHash;
+use super::{peer::PeerId, torrent::InfoHash};
 
 pub struct AnnounceRequest {
     pub info_hash: InfoHash,

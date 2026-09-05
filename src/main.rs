@@ -1,9 +1,9 @@
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use torrust_lib::{download, metainfo};
 use tracing_subscriber::EnvFilter;
 
@@ -47,7 +47,27 @@ async fn main() -> Result<()> {
             init_logging(verbose);
 
             let data = fs::read(path)?;
-            download(&data, out).await?;
+            let dl = download(&data, out).await?;
+
+            let bar = ProgressBar::new(0);
+            bar.set_style(ProgressStyle::default_bar());
+
+            let mut progress = dl.progress;
+            tokio::spawn(async move {
+                while progress.changed().await.is_ok() {
+                    let s = progress.borrow();
+                    bar.set_length(s.blocks_total as u64);
+                    bar.set_position(s.blocks_done as u64);
+                    bar.set_message(format!(
+                        "{} peer(s), {} in flight",
+                        s.peers.len(),
+                        s.blocks_in_flight
+                    ));
+                }
+                bar.finish_with_message("completed");
+            });
+
+            dl.task.await??;
         },
 
         Command::Inspect { path } => {

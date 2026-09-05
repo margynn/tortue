@@ -1,10 +1,14 @@
 use std::path::PathBuf;
 
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncSeekExt, AsyncWriteExt},
+};
 
-use crate::application::ports::piece_store::PieceStore;
-use crate::domain::torrent::{Metainfo, Mode};
+use crate::{
+    application::ports::piece_store::PieceStore,
+    domain::torrent::{Metainfo, Mode},
+};
 
 type Result<T> = std::io::Result<T>;
 
@@ -48,7 +52,11 @@ impl DiskStorage {
                     .open(&base)
                     .await?;
                 file.set_len(*length).await?;
-                files.push(OutputFile { file, length: *length, offset });
+                files.push(OutputFile {
+                    file,
+                    length: *length,
+                    offset,
+                });
             },
 
             Mode::Multiple { files: meta_files } => {
@@ -66,7 +74,11 @@ impl DiskStorage {
                         .open(&file_path)
                         .await?;
                     file.set_len(f.length).await?;
-                    files.push(OutputFile { file, length: f.length, offset });
+                    files.push(OutputFile {
+                        file,
+                        length: f.length,
+                        offset,
+                    });
                     offset += f.length;
                 }
             },
@@ -87,8 +99,12 @@ impl DiskStorage {
             let write_end = write_end.min(file_end);
             let buffer_start = (write_start - offset) as usize;
             let len = (write_end - write_start) as usize;
-            file.file.seek(std::io::SeekFrom::Start(write_start - file_start)).await?;
-            file.file.write_all(&data[buffer_start..buffer_start + len]).await?;
+            file.file
+                .seek(std::io::SeekFrom::Start(write_start - file_start))
+                .await?;
+            file.file
+                .write_all(&data[buffer_start..buffer_start + len])
+                .await?;
         }
         Ok(())
     }

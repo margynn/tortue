@@ -29,7 +29,11 @@ pub enum Message {
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Piece { piece_index, piece_offset, data } => f
+            Self::Piece {
+                piece_index,
+                piece_offset,
+                data,
+            } => f
                 .debug_struct("Piece")
                 .field("piece_index", piece_index)
                 .field("piece_offset", piece_offset)
@@ -42,13 +46,21 @@ impl fmt::Debug for Message {
             Self::Interested => write!(f, "Interested"),
             Self::NotInterested => write!(f, "NotInterested"),
             Self::Have(piece) => write!(f, "Have({piece})"),
-            Self::Request { piece_index, piece_offset, piece_len } => f
+            Self::Request {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => f
                 .debug_struct("Request")
                 .field("piece_index", piece_index)
                 .field("piece_offset", piece_offset)
                 .field("piece_len", piece_len)
                 .finish(),
-            Self::Cancel { piece_index, piece_offset, piece_len } => f
+            Self::Cancel {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => f
                 .debug_struct("Cancel")
                 .field("piece_index", piece_index)
                 .field("piece_offset", piece_offset)

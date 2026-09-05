@@ -1,18 +1,26 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use reqwest::Client;
-use tokio::net::{UdpSocket as TokioUdpSocket, lookup_host};
-use tokio::sync::mpsc;
+use tokio::{
+    net::{UdpSocket as TokioUdpSocket, lookup_host},
+    sync::mpsc,
+};
 use tracing::{info, warn};
 use url::Url;
 
-use crate::adapters::bencode::Bencode;
-use crate::application::ports::peer_source::PeerSource;
-use crate::domain::torrent::Metainfo;
-use crate::domain::tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse};
+use crate::{
+    adapters::bencode::Bencode,
+    application::ports::peer_source::PeerSource,
+    domain::{
+        torrent::Metainfo,
+        tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse},
+    },
+};
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -71,7 +79,11 @@ impl TrackerIO {
 
     pub fn new(url: &str, metainfo: Arc<Metainfo>, node: Node) -> Result<Self> {
         let client = TrackerClient::new(url)?;
-        Ok(Self { client, metainfo, node })
+        Ok(Self {
+            client,
+            metainfo,
+            node,
+        })
     }
 }
 
@@ -222,7 +234,9 @@ impl HttpTransport {
         let decoded = Bencode::decode(bytes)?;
 
         if let Ok(reason) = decoded.get_bytes(b"failure reason") {
-            return Err(Error::TrackerFailure(String::from_utf8_lossy(reason).into_owned()));
+            return Err(Error::TrackerFailure(
+                String::from_utf8_lossy(reason).into_owned(),
+            ));
         }
 
         let interval = u32::try_from(decoded.get_int(b"interval")?)
@@ -278,20 +292,31 @@ impl Transport for UdpTransport {
                 Error::UdpRequest("tracker hostname resolved to no address".to_owned())
             })?;
 
-        let bind_addr = if tracker_addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let bind_addr = if tracker_addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         let socket = TokioUdpSocket::bind(bind_addr).await?;
         socket.connect(tracker_addr).await?;
 
         let mut buf = [0u8; 4096];
 
         let connect_tx = rand::random::<u32>();
-        socket.send(&Self::build_connect_request(connect_tx)).await?;
+        socket
+            .send(&Self::build_connect_request(connect_tx))
+            .await?;
         let n = socket.recv(&mut buf).await?;
         let connection_id = Self::parse_connect_response(&buf[..n], connect_tx)?;
 
         let announce_tx = rand::random::<u32>();
         socket
-            .send(&Self::build_announce_request(connection_id, announce_tx, rand::random(), req))
+            .send(&Self::build_announce_request(
+                connection_id,
+                announce_tx,
+                rand::random(),
+                req,
+            ))
             .await?;
         let n = socket.recv(&mut buf).await?;
         Self::parse_announce_response(&buf[..n], announce_tx)
@@ -313,15 +338,21 @@ impl UdpTransport {
 
     fn parse_connect_response(bytes: &[u8], expected_tx_id: u32) -> Result<u64> {
         if bytes.len() < 16 {
-            return Err(Error::InvalidResponse("udp connect response too short".to_owned()));
+            return Err(Error::InvalidResponse(
+                "udp connect response too short".to_owned(),
+            ));
         }
         let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
         let tx_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
         if action != Self::ACTION_CONNECT {
-            return Err(Error::InvalidResponse(format!("unexpected udp connect action: {action}")));
+            return Err(Error::InvalidResponse(format!(
+                "unexpected udp connect action: {action}"
+            )));
         }
         if tx_id != expected_tx_id {
-            return Err(Error::InvalidResponse("udp connect transaction id mismatch".to_owned()));
+            return Err(Error::InvalidResponse(
+                "udp connect transaction id mismatch".to_owned(),
+            ));
         }
         Ok(u64::from_be_bytes(bytes[8..16].try_into().unwrap()))
     }
@@ -351,7 +382,9 @@ impl UdpTransport {
 
     fn parse_announce_response(bytes: &[u8], expected_tx_id: u32) -> Result<TrackerResponse> {
         if bytes.len() < 20 {
-            return Err(Error::InvalidResponse("udp announce response too short".to_owned()));
+            return Err(Error::InvalidResponse(
+                "udp announce response too short".to_owned(),
+            ));
         }
         let action = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
         let tx_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
@@ -361,7 +394,9 @@ impl UdpTransport {
             )));
         }
         if tx_id != expected_tx_id {
-            return Err(Error::InvalidResponse("udp announce transaction id mismatch".to_owned()));
+            return Err(Error::InvalidResponse(
+                "udp announce transaction id mismatch".to_owned(),
+            ));
         }
         let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
         let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());

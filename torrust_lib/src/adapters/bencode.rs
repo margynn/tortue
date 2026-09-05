@@ -144,7 +144,10 @@ impl<'a> Decoder<'a> {
     }
 
     fn peek_byte(&self) -> Result<u8> {
-        self.input.get(self.position).copied().ok_or(Error::UnexpectedEof)
+        self.input
+            .get(self.position)
+            .copied()
+            .ok_or(Error::UnexpectedEof)
     }
 
     fn next_byte(&mut self) -> Result<u8> {
@@ -222,7 +225,9 @@ impl<'a> Decoder<'a> {
         self.consume_byte(b'd')?;
         let mut dict = BTreeMap::new();
         while self.peek_byte()? != b'e' {
-            let key = self.parse_byte_string().map_err(|_| Error::InvalidDictKey)?;
+            let key = self
+                .parse_byte_string()
+                .map_err(|_| Error::InvalidDictKey)?;
             let value = self.parse()?;
             dict.insert(key, value);
         }
@@ -262,7 +267,11 @@ mod tests {
         assert_eq!(Bencode::decode(b"le"), Ok(Bencode::List(vec![])));
         assert_eq!(
             Bencode::decode(b"li1ei2ei3ee"),
-            Ok(Bencode::List(vec![Bencode::Int(1), Bencode::Int(2), Bencode::Int(3)]))
+            Ok(Bencode::List(vec![
+                Bencode::Int(1),
+                Bencode::Int(2),
+                Bencode::Int(3)
+            ]))
         );
         assert_eq!(
             Bencode::decode(b"lli1ei2eei3ee"),
@@ -280,7 +289,10 @@ mod tests {
         assert_eq!(Bencode::decode(b"de"), Ok(Bencode::Dict(BTreeMap::new())));
         assert_eq!(
             Bencode::decode(b"d3:cow3:mooe"),
-            Ok(Bencode::Dict(BTreeMap::from([(b"cow".as_slice(), Bencode::Bytes(b"moo"))])))
+            Ok(Bencode::Dict(BTreeMap::from([(
+                b"cow".as_slice(),
+                Bencode::Bytes(b"moo")
+            )])))
         );
         assert_eq!(
             Bencode::decode(b"d3:food3:bari1eee"),
@@ -292,7 +304,10 @@ mod tests {
         assert_eq!(Bencode::decode(b"d3:cow3:moo"), Err(Error::UnexpectedEof));
         assert_eq!(Bencode::decode(b"d3:cowe"), Err(Error::InvalidToken(b'e')));
         assert_eq!(Bencode::decode(b"di1e3:mooe"), Err(Error::InvalidDictKey));
-        assert_eq!(Bencode::decode(b"d3a:foo3:bare"), Err(Error::InvalidDictKey));
+        assert_eq!(
+            Bencode::decode(b"d3a:foo3:bare"),
+            Err(Error::InvalidDictKey)
+        );
     }
 
     #[test]
