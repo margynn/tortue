@@ -93,11 +93,7 @@ impl PeerIO {
                                 .await
                                 .map_err(|_| Error::PeerPoolGone)?;
                         },
-                        _ => {},
-                        // Err(_) => {
-                        //     let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
-                        //     break 'session Self::RECONNECT_DELAY;
-                        // },
+                        Err(_) => break 'session Self::RECONNECT_DELAY,
                     },
 
                     cmd = self.cmd_rx.recv() => match cmd {

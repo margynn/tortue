@@ -21,7 +21,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 const BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum PieceEvent {
