@@ -77,6 +77,8 @@ impl PeerIO {
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+    const READ_TIMEOUT: Duration = Duration::from_secs(120);
+    const MAX_RECONNECTION: usize = 5;
 
     fn new(peer_addr: SocketAddr, client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         Self {
@@ -93,8 +95,13 @@ impl PeerIO {
     ) -> Result<()> {
         let mut keepalive = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
         let mut reconnect_delay = Duration::ZERO;
+        let mut reconnect_cpt = 0;
 
         'run: loop {
+            if reconnect_cpt > Self::MAX_RECONNECTION {
+                break;
+            }
+            reconnect_cpt += 1;
             let (tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
 
             let _ = evt_tx
@@ -108,6 +115,7 @@ impl PeerIO {
                 tokio::select! {
                     cmd = cmd_rx.recv() => match cmd {
                         None => {
+                            // Make sure to close reader task upon exit
                             read_task.abort();
                             break 'run
                         },
@@ -142,13 +150,13 @@ impl PeerIO {
         mut reader: OwnedReadHalf,
         tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) -> JoinHandle<()> {
-        let addr = self.peer_addr.clone();
+        let addr = self.peer_addr;
 
         tokio::spawn(async move {
             loop {
-                let msg = match Message::read_from(&mut reader).await {
-                    Ok(msg) => msg,
-                    Err(_) => return,
+                let msg = match timeout(Self::READ_TIMEOUT, Message::read_from(&mut reader)).await {
+                    Ok(Ok(msg)) => msg,
+                    _ => return,
                 };
 
                 if tx
@@ -180,7 +188,7 @@ impl PeerIO {
             .await
             .map_err(|_| Error::Timeout)??;
 
-        let outbound = Handshake::new(self.metainfo.hash, self.client_id);
+        let outbound = Handshake::new(self.metainfo.hash, self.client_id, false);
         timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)??;
@@ -206,21 +214,29 @@ impl PeerIO {
 pub struct Handshake {
     pub info_hash: InfoHash,
     pub peer_id: PeerId,
+    pub fast_extension: bool,
 }
 
 impl Handshake {
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
     const HANDSHAKE_LEN: usize = 68;
+    const FAST_EXTENSION_MASK: u8 = 0b0000_0100;
 
-    fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
-        Self { info_hash, peer_id }
+    fn new(info_hash: InfoHash, peer_id: PeerId, fast_extension: bool) -> Self {
+        Self {
+            info_hash,
+            peer_id,
+            fast_extension,
+        }
     }
 
     fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
         let mut out = [0u8; Self::HANDSHAKE_LEN];
         out[0] = Self::PSTR.len() as u8;
         out[1..20].copy_from_slice(Self::PSTR);
-        // out[20..28] reserved bytes, already zero
+        if self.fast_extension {
+            out[27] |= Self::FAST_EXTENSION_MASK;
+        }
         out[28..48].copy_from_slice(self.info_hash.as_ref());
         out[48..68].copy_from_slice(self.peer_id.as_ref());
         out
@@ -243,9 +259,12 @@ impl Handshake {
         let mut peer_id_bytes = [0u8; 20];
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
+        let fast_extension = (buf[27] & Self::FAST_EXTENSION_MASK) != 0;
+
         Ok(Handshake::new(
             InfoHash::from(hash_bytes),
             PeerId::new(peer_id_bytes),
+            fast_extension,
         ))
     }
 }
