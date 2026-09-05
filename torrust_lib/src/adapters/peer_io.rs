@@ -93,17 +93,17 @@ impl PeerIO {
                                 .await
                                 .map_err(|_| Error::PeerPoolGone)?;
                         },
-                        Err(_) => {
-                            let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
-                            break 'session Self::RECONNECT_DELAY;
-                        },
+                        _ => {},
+                        // Err(_) => {
+                        //     let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
+                        //     break 'session Self::RECONNECT_DELAY;
+                        // },
                     },
 
                     cmd = self.cmd_rx.recv() => match cmd {
                         None => break 'run,
                         Some(msg) => {
                             if tcp.write_all(&msg.encode()).await.is_err() {
-                                let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
                                 break 'session Self::RECONNECT_DELAY;
                             }
                         },
@@ -111,7 +111,6 @@ impl PeerIO {
 
                     _ = keepalive.tick() => {
                         if tcp.write_all(&Message::KeepAlive.encode()).await.is_err() {
-                            let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
                             break 'session Self::RECONNECT_DELAY;
                         }
                      },
@@ -269,6 +268,7 @@ impl Message {
                 buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
                 buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
             },
+            Message::Unimplemented => {},
         }
         buf
     }
@@ -372,7 +372,7 @@ impl Message {
                     ) as usize,
                 })
             },
-            _ => Err(Error::InvalidMessage),
+            _ => Ok(Message::Unimplemented),
         }
     }
 }

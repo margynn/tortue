@@ -24,6 +24,7 @@ pub enum Message {
         piece_offset: usize,
         piece_len: usize,
     },
+    Unimplemented, // special case for unknown messages
 }
 
 impl fmt::Debug for Message {
@@ -66,6 +67,7 @@ impl fmt::Debug for Message {
                 .field("piece_offset", piece_offset)
                 .field("piece_len", piece_len)
                 .finish(),
+            Self::Unimplemented => f.debug_struct("Unimplemented").finish(),
         }
     }
 }
