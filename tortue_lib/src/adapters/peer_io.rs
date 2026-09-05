@@ -77,8 +77,8 @@ impl PeerIO {
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
-    const READ_TIMEOUT: Duration = Duration::from_secs(120);
-    const MAX_RECONNECTION: usize = 5;
+    const READ_TIMEOUT: Duration = Duration::from_secs(30);
+    const MAX_RECONNECTION: usize = 10;
 
     fn new(peer_addr: SocketAddr, client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         Self {
