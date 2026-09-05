@@ -108,13 +108,31 @@ impl Pool {
         output
     }
 
+    fn release_peer_blocks(&mut self, addr: SocketAddr) {
+        let orphaned: Vec<BlockRef> = self
+            .block_assignments
+            .iter()
+            .filter(|(_, p)| **p == addr)
+            .map(|(k, _)| *k)
+            .collect();
+        for block_ref in orphaned {
+            self.block_assignments.remove(&block_ref);
+            self.pieces.reset_block(block_ref);
+        }
+    }
+
     fn on_connected(&mut self, addr: SocketAddr, peer_id: PeerId) -> Vec<Output> {
-        // Also handles future inbound connections not preceded by PeersDiscovered.
+        self.release_peer_blocks(addr);
+
         let state = self
             .peers
             .entry(addr)
             .or_insert_with(|| PeerState::new(self.metainfo.pieces.len()));
         state.peer_id = Some(peer_id);
+        state.am_interested = false;
+        state.peer_choking = true;
+        state.in_flight = 0;
+
         self.interested_or_request(addr)
     }
 
@@ -124,19 +142,7 @@ impl Pool {
             peers.remove(&addr);
             !peers.is_empty()
         });
-
-        // Reset orphaned in-flight blocks in PieceManager before removing them.
-        let orphaned: Vec<BlockRef> = self
-            .block_assignments
-            .iter()
-            .filter(|(_, peer)| **peer == addr)
-            .map(|(key, _)| *key)
-            .collect();
-        for block_ref in orphaned {
-            self.block_assignments.remove(&block_ref);
-            self.pieces.reset_block(block_ref);
-        }
-
+        self.release_peer_blocks(addr);
         self.schedule_requests()
     }
 
@@ -211,16 +217,7 @@ impl Pool {
     }
 
     fn on_message_choke(&mut self, addr: SocketAddr) -> Vec<Output> {
-        let orphaned: Vec<BlockRef> = self
-            .block_assignments
-            .iter()
-            .filter(|(_, peer)| **peer == addr)
-            .map(|(k, _)| *k)
-            .collect();
-        for block_ref in orphaned {
-            self.block_assignments.remove(&block_ref);
-            self.pieces.reset_block(block_ref);
-        }
+        self.release_peer_blocks(addr);
         if let Some(state) = self.peers.get_mut(&addr) {
             state.in_flight = 0;
         }

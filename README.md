@@ -1,6 +1,6 @@
-# Tortue
+# Tortue 🐢
 
-Tortue (french for Turtle 🐢), is a BitTorrent client writtent in Rust.
+Tortue, is a BitTorrent client writtent in Rust.
 
 ## CLI:
 
