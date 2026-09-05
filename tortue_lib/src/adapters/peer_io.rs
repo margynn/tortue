@@ -1,9 +1,10 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, tcp::OwnedReadHalf},
     sync::mpsc,
+    task::JoinHandle,
     time::timeout,
 };
 
@@ -35,19 +36,40 @@ pub enum Error {
 
     #[error("message too large")]
     MessageTooLarge,
-
-    #[error("peer pool disconnected")]
-    PeerPoolGone,
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+pub struct TcpPeerConnector {
+    client_id: PeerId,
+    metainfo: Arc<Metainfo>,
+}
+
+impl TcpPeerConnector {
+    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
+        Self {
+            client_id,
+            metainfo,
+        }
+    }
+}
+
+impl PeerConnector for TcpPeerConnector {
+    fn connect(
+        &self,
+        addr: SocketAddr,
+        cmd_rx: mpsc::Receiver<Message>,
+        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) {
+        let mut runner = PeerIO::new(addr, self.client_id, Arc::clone(&self.metainfo));
+        tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
+    }
+}
 
 pub struct PeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
     metainfo: Arc<Metainfo>,
-    cmd_rx: mpsc::Receiver<Message>,
-    tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
 }
 
 impl PeerIO {
@@ -56,70 +78,88 @@ impl PeerIO {
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 
-    pub fn new(
-        peer_addr: SocketAddr,
-        client_id: PeerId,
-        metainfo: Arc<Metainfo>,
-        cmd_rx: mpsc::Receiver<Message>,
-        tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    ) -> Self {
+    fn new(peer_addr: SocketAddr, client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         Self {
             client_id,
             peer_addr,
             metainfo,
-            cmd_rx,
-            tx,
         }
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        let mut reconnect_delay = Duration::ZERO;
+    async fn run(
+        &mut self,
+        mut cmd_rx: mpsc::Receiver<Message>,
+        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) -> Result<()> {
         let mut keepalive = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
+        let mut reconnect_delay = Duration::ZERO;
 
         'run: loop {
-            let (mut tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
+            let (tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
 
-            self.tx
+            let _ = evt_tx
                 .send((self.peer_addr, PeerEvent::Connected(peer_id)))
-                .await
-                .map_err(|_| Error::PeerPoolGone)?;
+                .await;
 
-            reconnect_delay = 'session: loop {
+            let (reader, mut writer) = tcp.into_split();
+            let mut read_task = self.spawn_reader(reader, evt_tx.clone());
+
+            loop {
                 tokio::select! {
-                    res = Message::read_from(&mut tcp) => match res {
-                        Ok(msg) => {
-                            self.tx
-                                .send((self.peer_addr, PeerEvent::MessageReceived(msg)))
-                                .await
-                                .map_err(|_| Error::PeerPoolGone)?;
+                    cmd = cmd_rx.recv() => match cmd {
+                        None => {
+                            read_task.abort();
+                            break 'run
                         },
-                        Err(_) => break 'session Self::RECONNECT_DELAY,
-                    },
-
-                    cmd = self.cmd_rx.recv() => match cmd {
-                        None => break 'run,
                         Some(msg) => {
-                            if tcp.write_all(&msg.encode()).await.is_err() {
-                                break 'session Self::RECONNECT_DELAY;
+                            if writer.write_all(&msg.encode()).await.is_err() {
+                                break
                             }
                         },
                     },
 
+                    _ = &mut read_task => break,
+
                     _ = keepalive.tick() => {
-                        if tcp.write_all(&Message::KeepAlive.encode()).await.is_err() {
-                            break 'session Self::RECONNECT_DELAY;
+                        if writer.write_all(&Message::KeepAlive.encode()).await.is_err() {
+                           break
                         }
                      },
                 }
-            };
+            }
+
+            reconnect_delay = Self::RECONNECT_DELAY;
+            read_task.abort()
         }
 
         // Sentinel: ensures Pool always receives Disconnected even on clean exit.
-        let _ = self
-            .tx
-            .send((self.peer_addr, PeerEvent::Disconnected))
-            .await;
+        let _ = evt_tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
         Ok(())
+    }
+
+    fn spawn_reader(
+        &self,
+        mut reader: OwnedReadHalf,
+        tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) -> JoinHandle<()> {
+        let addr = self.peer_addr.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let msg = match Message::read_from(&mut reader).await {
+                    Ok(msg) => msg,
+                    Err(_) => return,
+                };
+
+                if tx
+                    .send((addr, PeerEvent::MessageReceived(msg)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
     }
 
     async fn connect_with_retry(&self, mut delay: Duration) -> (TcpStream, PeerId) {
@@ -269,7 +309,7 @@ impl Message {
         buf
     }
 
-    async fn read_from(reader: &mut TcpStream) -> Result<Self> {
+    async fn read_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
         let mut header = [0u8; 4];
         reader.read_exact(&mut header).await?;
 
@@ -370,37 +410,5 @@ impl Message {
             },
             _ => Ok(Message::Unimplemented),
         }
-    }
-}
-
-pub struct TcpPeerConnector {
-    client_id: PeerId,
-    metainfo: Arc<Metainfo>,
-}
-
-impl TcpPeerConnector {
-    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
-        Self {
-            client_id,
-            metainfo,
-        }
-    }
-}
-
-impl PeerConnector for TcpPeerConnector {
-    fn connect(
-        &self,
-        addr: SocketAddr,
-        cmd_rx: mpsc::Receiver<Message>,
-        events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    ) {
-        let mut runner = PeerIO::new(
-            addr,
-            self.client_id,
-            Arc::clone(&self.metainfo),
-            cmd_rx,
-            events_tx,
-        );
-        tokio::spawn(async move { runner.run().await });
     }
 }
