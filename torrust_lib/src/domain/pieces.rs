@@ -108,6 +108,17 @@ impl PieceManager {
         self.pieces.iter().filter(|p| p.is_complete()).count()
     }
 
+    pub fn reset_block(&mut self, block_ref: BlockRef) {
+        let block_index = block_ref.piece_offset / BLOCK_SIZE;
+        if let Some(piece) = self.pieces.get_mut(block_ref.piece_index) {
+            if let Some(block) = piece.blocks.get_mut(block_index) {
+                if !matches!(block, BlockState::Received { .. }) {
+                    *block = BlockState::Missing;
+                }
+            }
+        }
+    }
+
     pub fn blocks_total(&self) -> usize {
         self.pieces.iter().map(|p| p.blocks.len()).sum()
     }

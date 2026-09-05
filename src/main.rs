@@ -50,7 +50,14 @@ async fn main() -> Result<()> {
             let dl = download(&data, out).await?;
 
             let bar = ProgressBar::new(0);
-            bar.set_style(ProgressStyle::default_bar());
+            bar.set_style(
+                ProgressStyle::default_bar()
+                    .template(
+                        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} blocks ({percent}%) — {msg}",
+                    )
+                    .unwrap()
+                    .progress_chars("#|."),
+            );
 
             let mut progress = dl.progress;
             tokio::spawn(async move {

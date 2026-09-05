@@ -131,7 +131,7 @@ impl Pool {
             .collect();
         for block_ref in orphaned {
             self.block_assignments.remove(&block_ref);
-            let _ = self.pieces.request_block(block_ref);
+            self.pieces.reset_block(block_ref);
         }
 
         self.schedule_requests()
@@ -291,12 +291,13 @@ impl Pool {
             let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
             for block_range in missing {
                 let block_ref = BlockRef::from(&block_range);
-                if self.block_assignments.contains_key(&block_ref) {
-                    continue;
+                if let Some(old_peer) = self.block_assignments.get(&block_ref) {
+                    if let Some(state) = self.peers.get_mut(&old_peer) {
+                        state.in_flight = state.in_flight.saturating_sub(1);
+                    }
                 }
 
                 let candidate = self.pick_peer(&peer_addrs, &mut rng);
-
                 if let Some(addr) = candidate {
                     self.peers.get_mut(&addr).unwrap().in_flight += 1;
                     self.block_assignments.insert(block_ref, addr);
@@ -329,8 +330,8 @@ struct PeerState {
 }
 
 impl PeerState {
-    /// Allow 16kb * 8 = 128kb max in transit - not aggressif for peers
-    const MAX_IN_FLIGHT_PER_PEER: usize = 8;
+    /// Allow 16kb * 16 = 256kb max in transit - not aggressif for peers
+    const MAX_IN_FLIGHT_PER_PEER: usize = 16;
 
     fn can_accept_request(&self) -> bool {
         !self.peer_choking && self.in_flight < Self::MAX_IN_FLIGHT_PER_PEER

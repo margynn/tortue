@@ -54,6 +54,7 @@ impl PeerIO {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
+    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
     pub fn new(
         peer_addr: SocketAddr,
@@ -73,6 +74,7 @@ impl PeerIO {
 
     pub async fn run(&mut self) -> Result<()> {
         let mut reconnect_delay = Duration::ZERO;
+        let mut keepalive = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
 
         'run: loop {
             let (mut tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
@@ -106,6 +108,13 @@ impl PeerIO {
                             }
                         },
                     },
+
+                    _ = keepalive.tick() => {
+                        if tcp.write_all(&Message::KeepAlive.encode()).await.is_err() {
+                            let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
+                            break 'session Self::RECONNECT_DELAY;
+                        }
+                     },
                 }
             };
         }
