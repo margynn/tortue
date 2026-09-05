@@ -102,6 +102,10 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.is_complete())
     }
 
+    pub fn completed_count(&self) -> usize {
+        self.pieces.iter().filter(|p| p.is_complete()).count()
+    }
+
     pub fn receive_block(&mut self, block_ref: BlockRef, data: Vec<u8>) -> Result<PieceEvent> {
         let piece_index = block_ref.piece_index;
         let block_index = block_ref.piece_offset / BLOCK_SIZE;

@@ -264,6 +264,43 @@ impl Pool {
     }
 }
 
+// TODO: add throughtput download/upload per peer
+pub struct PoolSnapshot {
+    pub pieces_total: usize,
+    pub pieces_done: usize,
+    pub pieces_in_flight: usize,
+    pub peers: Vec<PeerInfo>,
+}
+
+pub struct PeerInfo {
+    pub addr: SocketAddr,
+    pub peer_id: Option<PeerId>,
+    pub in_flight: usize,
+    pub is_choking: bool,
+}
+
+impl Pool {
+    pub fn snapshot(&self) -> PoolSnapshot {
+        let peers = self
+            .peers
+            .iter()
+            .map(|(addr, s)| PeerInfo {
+                addr: *addr,
+                peer_id: s.peer_id,
+                in_flight: s.in_flight,
+                is_choking: s.peer_choking,
+            })
+            .collect();
+
+        PoolSnapshot {
+            pieces_total: self.metainfo.pieces.len(),
+            pieces_done: self.pieces.completed_count(),
+            pieces_in_flight: self.block_assignments.len(),
+            peers,
+        }
+    }
+}
+
 struct PeerState {
     peer_id: Option<PeerId>,
     am_choking: bool,

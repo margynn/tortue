@@ -12,6 +12,9 @@ pub enum PeerEvent {
     MessageReceived(Message),
 }
 
+/// Factory that spawns one peer connection task per `connect()` call.
+/// Implementations hold shared config (credentials, transport settings)
+/// and produce independent per-peer tasks.
 pub trait PeerConnector: Send + Sync + 'static {
     fn connect(
         &self,

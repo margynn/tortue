@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::adapters::bencode::Bencode;
+use crate::application::ports::peer_source::PeerSource;
 use crate::domain::torrent::Metainfo;
 use crate::domain::tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse};
 
@@ -62,24 +63,20 @@ pub struct TrackerIO {
     client: TrackerClient,
     metainfo: Arc<Metainfo>,
     node: Node,
-    peers_tx: mpsc::Sender<Vec<SocketAddr>>,
 }
 
 impl TrackerIO {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub fn new(
-        url: &str,
-        metainfo: Arc<Metainfo>,
-        node: Node,
-        peers_tx: mpsc::Sender<Vec<SocketAddr>>,
-    ) -> Result<Self> {
+    pub fn new(url: &str, metainfo: Arc<Metainfo>, node: Node) -> Result<Self> {
         let client = TrackerClient::new(url)?;
-        Ok(Self { client, metainfo, node, peers_tx })
+        Ok(Self { client, metainfo, node })
     }
+}
 
-    pub async fn run(&mut self) -> Result<()> {
+impl PeerSource for TrackerIO {
+    async fn run(mut self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
         info!("start_tracker");
 
         let mut interval = Duration::ZERO;
@@ -111,7 +108,9 @@ impl TrackerIO {
                     );
                     backoff = Self::INITIAL_BACKOFF;
                     interval = Duration::from_secs(resp.interval.max(60) as u64);
-                    self.peers_tx.send(resp.peers).await.map_err(|_| Error::PeersChannelClosed)?;
+                    if tx.send(resp.peers).await.is_err() {
+                        return Ok(());
+                    }
                 },
                 Err(e) => {
                     warn!(error = %e, backoff_secs = backoff.as_secs(), "tracker announce failed");

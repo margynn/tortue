@@ -2,14 +2,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
 
-use crate::adapters::peer_io::{PeerEvent, PeerIO};
+use crate::application::ports::peer_connector::{PeerConnector, PeerEvent};
 use crate::application::ports::piece_store::PieceStore;
 use crate::domain::message::Message;
-use crate::domain::peer::PeerId;
-use crate::domain::pool::{Input, Output, Pool};
+use crate::domain::pool::{Input, Output, Pool, PoolSnapshot};
 use crate::domain::torrent::Metainfo;
 
 #[derive(Debug, thiserror::Error)]
@@ -20,32 +19,35 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolIO<S> {
+pub struct PoolIO<S, C> {
     metainfo: Arc<Metainfo>,
-    client_id: PeerId,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     piece_store: S,
+    peer_connector: C,
+    progress_tx: watch::Sender<PoolSnapshot>,
 }
 
-impl<S: PieceStore> PoolIO<S> {
+impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
     pub fn new(
         metainfo: Arc<Metainfo>,
-        client_id: PeerId,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+        peer_connector: C,
         piece_store: S,
+        progress_tx: watch::Sender<PoolSnapshot>,
     ) -> Self {
         let (pool_tx, pool_rx) = mpsc::channel(256);
         Self {
-            client_id,
             metainfo,
             peers_rx,
             peer_cmds: HashMap::new(),
             pool_tx,
             pool_rx,
             piece_store,
+            peer_connector,
+            progress_tx,
         }
     }
 
@@ -61,15 +63,20 @@ impl<S: PieceStore> PoolIO<S> {
 
                 msg = self.pool_rx.recv() => match msg {
                     None => break,
-                    Some((addr, PeerEvent::Connected(peer_id))) => Input::PeerConnected { addr, peer_id },
-                    Some((addr, PeerEvent::Disconnected)) => Input::PeerDisconnected(addr),
-                    Some((addr, PeerEvent::MessageReceived(message))) => Input::MessageReceived { addr, message },
+                    Some((addr, PeerEvent::Connected(peer_id))) => {
+                        info!(addr = %addr, peer_id = %peer_id, "peer connected");
+                        Input::PeerConnected { addr, peer_id }
+                    },
+                    Some((addr, PeerEvent::Disconnected)) => {
+                        info!(addr = %addr, "peer disconnected");
+                        self.peer_cmds.remove(&addr);
+                        Input::PeerDisconnected(addr)
+                    },
+                    Some((addr, PeerEvent::MessageReceived(message))) => {
+                        Input::MessageReceived { addr, message }
+                    },
                 },
             };
-
-            if let Input::PeerDisconnected(addr) = input {
-                self.peer_cmds.remove(&addr);
-            }
 
             for out in pool.step(input) {
                 self.handle_output(out).await;
@@ -83,8 +90,8 @@ impl<S: PieceStore> PoolIO<S> {
         match out {
             Output::ConnectPeer(addr) => self.spawn_peer(addr),
             Output::SendToPeer { addr, message } => {
-                if let Some(v) = self.peer_cmds.get(&addr) {
-                    let _ = v.send(message).await;
+                if let Some(tx) = self.peer_cmds.get(&addr) {
+                    let _ = tx.send(message).await;
                 }
             },
             Output::Completed => info!("download completed"),
@@ -97,51 +104,8 @@ impl<S: PieceStore> PoolIO<S> {
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {
-        // cmd: pool_runner → peer_runner (messages to write to TCP)
         let (cmd_tx, cmd_rx) = mpsc::channel(128);
-        // peer_out: peer_runner → forwarding task (lifecycle events + messages received)
-        let (peer_out_tx, mut peer_out_rx) = mpsc::channel(128);
-
         self.peer_cmds.insert(addr, cmd_tx);
-
-        // Task 1: pure IO — TCP connect/read/write, no domain logic.
-        let metainfo = self.metainfo.clone();
-        let mut runner = PeerIO::new(addr, self.client_id, metainfo.into(), cmd_rx, peer_out_tx);
-        tokio::spawn(async move { runner.run().await });
-
-        // Task 2: forward PeerEvents from the peer runner to the pool, with logging.
-        // Sends a final Disconnected sentinel when the peer runner stops, so Pool
-        // always cleans up even if the runner exited without sending one.
-        let pool_tx = self.pool_tx.clone();
-        tokio::spawn(async move {
-            while let Some(event) = peer_out_rx.recv().await {
-                match &event {
-                    PeerEvent::Connected(peer_id) => {
-                        info!(addr = %addr, peer_id = %peer_id, "peer connected");
-                    },
-                    PeerEvent::Disconnected => {
-                        info!(addr = %addr, "peer disconnected");
-                    },
-                    PeerEvent::MessageReceived(msg) => match msg {
-                        Message::Unchoke
-                        | Message::Choke
-                        | Message::Bitfield(_)
-                        | Message::Have(_) => {
-                            tracing::debug!(addr = %addr, msg = ?msg, "peer state");
-                        },
-                        _ => {
-                            tracing::trace!(addr = %addr, msg = ?msg, "peer data");
-                        },
-                    },
-                }
-                if pool_tx.send((addr, event)).await.is_err() {
-                    break;
-                }
-            }
-
-            // Sentinel: guarantees Pool receives Disconnected even on abnormal exit.
-            // Pool handles duplicate Disconnected gracefully (peers.remove is idempotent).
-            let _ = pool_tx.send((addr, PeerEvent::Disconnected)).await;
-        });
+        self.peer_connector.connect(addr, cmd_rx, self.pool_tx.clone());
     }
 }

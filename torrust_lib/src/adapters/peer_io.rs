@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,16 +7,10 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use crate::application::ports::peer_connector::{PeerConnector, PeerEvent};
 use crate::domain::message::Message;
 use crate::domain::peer::PeerId;
 use crate::domain::torrent::{InfoHash, Metainfo};
-
-#[derive(Debug)]
-pub enum PeerEvent {
-    Connected(PeerId),
-    Disconnected,
-    MessageReceived(Message),
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -45,28 +38,28 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub trait AsyncByteReader {
-    fn read_exact<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> impl Future<Output = std::io::Result<()>> + 'a;
-}
+// pub trait AsyncByteReader {
+//     fn read_exact<'a>(
+//         &'a mut self,
+//         buf: &'a mut [u8],
+//     ) -> impl Future<Output = std::io::Result<()>> + 'a;
+// }
 
-impl AsyncByteReader for TcpStream {
-    fn read_exact<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> impl Future<Output = std::io::Result<()>> + 'a {
-        async move { AsyncReadExt::read_exact(self, buf).await.map(|_| ()) }
-    }
-}
+// impl AsyncByteReader for TcpStream {
+//     fn read_exact<'a>(
+//         &'a mut self,
+//         buf: &'a mut [u8],
+//     ) -> impl Future<Output = std::io::Result<()>> + 'a {
+//         async move { AsyncReadExt::read_exact(self, buf).await.map(|_| ()) }
+//     }
+// }
 
 pub struct PeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
     metainfo: Arc<Metainfo>,
     cmd_rx: mpsc::Receiver<Message>,
-    tx: mpsc::Sender<PeerEvent>,
+    tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
 }
 
 impl PeerIO {
@@ -79,7 +72,7 @@ impl PeerIO {
         client_id: PeerId,
         metainfo: Arc<Metainfo>,
         cmd_rx: mpsc::Receiver<Message>,
-        tx: mpsc::Sender<PeerEvent>,
+        tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) -> Self {
         Self {
             client_id,
@@ -97,7 +90,7 @@ impl PeerIO {
             let (mut tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
 
             self.tx
-                .send(PeerEvent::Connected(peer_id))
+                .send((self.peer_addr, PeerEvent::Connected(peer_id)))
                 .await
                 .map_err(|_| Error::PeerPoolGone)?;
 
@@ -106,12 +99,12 @@ impl PeerIO {
                     res = Message::read_from(&mut tcp) => match res {
                         Ok(msg) => {
                             self.tx
-                                .send(PeerEvent::MessageReceived(msg))
+                                .send((self.peer_addr, PeerEvent::MessageReceived(msg)))
                                 .await
                                 .map_err(|_| Error::PeerPoolGone)?;
                         },
                         Err(_) => {
-                            let _ = self.tx.send(PeerEvent::Disconnected).await;
+                            let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
                             break 'session Self::RECONNECT_DELAY;
                         },
                     },
@@ -120,7 +113,7 @@ impl PeerIO {
                         None => break 'run,
                         Some(msg) => {
                             if tcp.write_all(&msg.encode()).await.is_err() {
-                                let _ = self.tx.send(PeerEvent::Disconnected).await;
+                                let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
                                 break 'session Self::RECONNECT_DELAY;
                             }
                         },
@@ -129,6 +122,8 @@ impl PeerIO {
             };
         }
 
+        // Sentinel: ensures Pool always receives Disconnected even on clean exit.
+        let _ = self.tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
         Ok(())
     }
 
@@ -260,7 +255,7 @@ impl Message {
         buf
     }
 
-    async fn read_from<R: AsyncByteReader>(reader: &mut R) -> Result<Self> {
+    async fn read_from(reader: &mut TcpStream) -> Result<Self> {
         let mut header = [0u8; 4];
         reader.read_exact(&mut header).await?;
 
@@ -345,5 +340,29 @@ impl Message {
             },
             _ => Err(Error::InvalidMessage),
         }
+    }
+}
+
+pub struct TcpPeerConnector {
+    client_id: PeerId,
+    metainfo: Arc<Metainfo>,
+}
+
+impl TcpPeerConnector {
+    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
+        Self { client_id, metainfo }
+    }
+}
+
+impl PeerConnector for TcpPeerConnector {
+    fn connect(
+        &self,
+        addr: SocketAddr,
+        cmd_rx: mpsc::Receiver<Message>,
+        events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) {
+        let mut runner =
+            PeerIO::new(addr, self.client_id, Arc::clone(&self.metainfo), cmd_rx, events_tx);
+        tokio::spawn(async move { runner.run().await });
     }
 }
