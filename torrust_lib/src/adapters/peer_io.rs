@@ -54,7 +54,7 @@ impl PeerIO {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
-    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 
     pub fn new(
         peer_addr: SocketAddr,

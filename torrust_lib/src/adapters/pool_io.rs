@@ -106,11 +106,16 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
                     tracing::error!(error = %e, "failed to write piece");
                 }
             },
+            Output::Broadcast(message) => {
+                for tx in self.peer_cmds.values() {
+                    let _ = tx.send(message.clone()).await;
+                }
+            },
         }
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {
-        let (cmd_tx, cmd_rx) = mpsc::channel(128);
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
         self.peer_cmds.insert(addr, cmd_tx);
         self.peer_connector
             .connect(addr, cmd_rx, self.pool_tx.clone());

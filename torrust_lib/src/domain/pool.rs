@@ -26,6 +26,7 @@ pub enum Output {
     ConnectPeer(SocketAddr),
     SendToPeer { addr: SocketAddr, message: Message },
     WritePiece { offset: u64, data: Vec<u8> },
+    Broadcast(Message),
     Completed,
 }
 
@@ -158,7 +159,15 @@ impl Pool {
                 };
                 self.on_message_piece(addr, block_ref, data)
             },
-            _ => vec![],
+            Message::KeepAlive => vec![],
+            Message::Interested => vec![Output::SendToPeer {
+                addr,
+                message: Message::Unchoke,
+            }],
+            Message::NotInterested => vec![],
+            Message::Request { .. } => vec![],
+            Message::Cancel { .. } => vec![],
+            Message::Unimplemented => vec![],
         }
     }
 
@@ -229,17 +238,22 @@ impl Pool {
                 PieceEvent::BlockReceived => self.schedule_requests(),
                 PieceEvent::PieceInvalid { .. } => self.schedule_requests(),
                 PieceEvent::PieceCompleted {
-                    piece_offset, data, ..
+                    piece_index,
+                    piece_offset,
+                    data,
                 } => {
-                    let write = Output::WritePiece {
-                        offset: piece_offset,
-                        data,
-                    };
+                    let mut outputs = vec![
+                        Output::Broadcast(Message::Have(piece_index)),
+                        Output::WritePiece {
+                            offset: piece_offset,
+                            data,
+                        },
+                    ];
                     if self.pieces.is_complete() {
-                        return vec![write, Output::Completed];
+                        outputs.push(Output::Completed);
+                        return outputs;
                     }
-                    let mut outputs = self.schedule_requests();
-                    outputs.push(write);
+                    outputs.extend(self.schedule_requests());
                     outputs
                 },
             },
@@ -330,8 +344,8 @@ struct PeerState {
 }
 
 impl PeerState {
-    /// Allow 16kb * 16 = 256kb max in transit - not aggressif for peers
-    const MAX_IN_FLIGHT_PER_PEER: usize = 16;
+    /// Allow 16kb * 32 = 512kb max in transit - not aggressif for peers
+    const MAX_IN_FLIGHT_PER_PEER: usize = 32;
 
     fn can_accept_request(&self) -> bool {
         !self.peer_choking && self.in_flight < Self::MAX_IN_FLIGHT_PER_PEER
@@ -363,11 +377,11 @@ impl PeerState {
             Message::Have(piece) => {
                 let _ = self.bitfield.set_bit(*piece as usize);
             },
-            _ => {},
-            // Message::KeepAlive => todo!(),
-            // Message::Request { piece_index, piece_offset, piece_len } => todo!(),
-            // Message::Piece { piece_index, piece_offset, data } => todo!(),
-            // Message::Cancel { piece_index, piece_offset, piece_len } => todo!(),
+            Message::KeepAlive => {},
+            Message::Request { .. } => {},
+            Message::Piece { .. } => {},
+            Message::Cancel { .. } => {},
+            Message::Unimplemented => {},
         }
     }
 }
