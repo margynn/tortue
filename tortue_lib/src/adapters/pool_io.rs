@@ -1,6 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+    time,
+};
 use tracing::info;
 
 use crate::{
@@ -57,6 +60,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
 
     pub async fn run(&mut self) -> Result<()> {
         let mut pool = Pool::new(Arc::clone(&self.metainfo));
+        let mut tick = time::interval(Duration::from_secs(5));
 
         loop {
             let input = tokio::select! {
@@ -64,6 +68,8 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
                     Some(addrs) => Input::PeersDiscovered(addrs),
                     None => return Err(Error::TrackerDisconnected),
                 },
+
+                _ = tick.tick() => Input::Tick,
 
                 msg = self.pool_rx.recv() => match msg {
                     None => break,

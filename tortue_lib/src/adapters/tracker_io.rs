@@ -58,9 +58,6 @@ pub enum Error {
 
     #[error("missing udp port")]
     MissingUdpPort,
-
-    #[error("peers channel closed")]
-    PeersChannelClosed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -88,7 +85,7 @@ impl TrackerIO {
 }
 
 impl PeerSource for TrackerIO {
-    async fn run(mut self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
+    async fn run(self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
         info!("start_tracker");
 
         let mut interval = Duration::ZERO;
@@ -102,6 +99,7 @@ impl PeerSource for TrackerIO {
                 info_hash: self.metainfo.hash,
                 peer_id: self.node.id,
                 port: self.node.port,
+                // TODO: update
                 stats: SessionStats {
                     uploaded: 0,
                     downloaded: 0,
@@ -248,12 +246,7 @@ impl HttpTransport {
             _ => return Err(Error::InvalidResponse("missing peers field".to_owned())),
         };
 
-        Ok(TrackerResponse {
-            interval,
-            peers,
-            seeders: None,
-            leechers: None,
-        })
+        Ok(TrackerResponse { interval, peers })
     }
 
     fn parse_peers_list(peer_list: &[Bencode<'_>]) -> Result<Vec<SocketAddr>> {
@@ -399,15 +392,10 @@ impl UdpTransport {
             ));
         }
         let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
-        let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
-        let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        // let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
+        // let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let peers = parse_compact_ipv4_peers(&bytes[20..])?;
-        Ok(TrackerResponse {
-            interval,
-            peers,
-            seeders: Some(seeders),
-            leechers: Some(leechers),
-        })
+        Ok(TrackerResponse { interval, peers })
     }
 }
 

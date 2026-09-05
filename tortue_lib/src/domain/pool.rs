@@ -20,6 +20,7 @@ pub enum Input {
     PeerConnected { addr: SocketAddr, peer_id: PeerId },
     PeerDisconnected(SocketAddr),
     MessageReceived { addr: SocketAddr, message: Message },
+    Tick,
 }
 
 pub enum Output {
@@ -92,6 +93,7 @@ impl Pool {
             Input::PeerConnected { addr, peer_id } => self.on_connected(addr, peer_id),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
+            Input::Tick => self.schedule_requests(),
         }
     }
 
@@ -209,11 +211,20 @@ impl Pool {
     }
 
     fn on_message_choke(&mut self, addr: SocketAddr) -> Vec<Output> {
-        self.block_assignments.retain(|_, peer| *peer != addr);
+        let orphaned: Vec<BlockRef> = self
+            .block_assignments
+            .iter()
+            .filter(|(_, peer)| **peer == addr)
+            .map(|(k, _)| *k)
+            .collect();
+        for block_ref in orphaned {
+            self.block_assignments.remove(&block_ref);
+            self.pieces.reset_block(block_ref);
+        }
         if let Some(state) = self.peers.get_mut(&addr) {
             state.in_flight = 0;
         }
-        vec![]
+        self.schedule_requests()
     }
 
     fn on_message_piece(

@@ -31,9 +31,7 @@ pub enum PieceEvent {
         piece_offset: u64,
         data: Vec<u8>,
     },
-    PieceInvalid {
-        piece_index: usize,
-    },
+    PieceInvalid,
 }
 
 pub struct PieceManager {
@@ -104,10 +102,6 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.is_complete())
     }
 
-    pub fn completed_count(&self) -> usize {
-        self.pieces.iter().filter(|p| p.is_complete()).count()
-    }
-
     pub fn reset_block(&mut self, block_ref: BlockRef) {
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
         if let Some(piece) = self.pieces.get_mut(block_ref.piece_index) {
@@ -143,7 +137,7 @@ impl PieceManager {
 
         if !verify_piece_hash(expected_hash, &buffer) {
             p.reset();
-            return Ok(PieceEvent::PieceInvalid { piece_index });
+            return Ok(PieceEvent::PieceInvalid);
         }
 
         let torrent_offset = piece_index as u64 * self.metainfo.piece_length as u64;
