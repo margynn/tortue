@@ -1991,7 +1991,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "torrust"
+name = "tortue"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2002,13 +2002,13 @@ dependencies = [
  "ratatui",
  "reqwest",
  "tokio",
- "torrust_lib",
+ "tortue_lib",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "torrust_lib"
+name = "tortue_lib"
 version = "0.1.0"
 dependencies = [
  "anyhow",

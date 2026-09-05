@@ -4,12 +4,12 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use torrust_lib::{download, metainfo};
+use tortue_lib::{download, metainfo};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "torrust")]
-#[command(about = "A BitTorrent client")]
+#[command(name = "tortue")]
+#[command(about = "Tortue BitTorrent client in Rust")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -1,5 +1,5 @@
 [package]
-name = "torrust_lib"
+name = "tortue_lib"
 version = "0.1.0"
 edition = "2024"
 
@@ -13,7 +13,15 @@ reqwest = "0.13.2"
 url = "2.5.8"
 percent-encoding = "2.3.2"
 getrandom = "0.4.2"
-tokio = { version = "1.50.0", features = ["fs", "signal", "macros", "rt-multi-thread", "net", "io-util", "time"] }
+tokio = { version = "1.50.0", features = [
+    "fs",
+    "signal",
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+] }
 rand = "0.10.0"
 hex = "0.4.3"
 tracing = "0.1.44"

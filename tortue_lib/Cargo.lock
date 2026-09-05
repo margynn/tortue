@@ -1348,7 +1348,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "torrust_lib"
+name = "tortue_lib"
 version = "0.1.0"
 dependencies = [
  "anyhow",
