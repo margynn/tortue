@@ -112,7 +112,7 @@ impl Pool {
             .entry(addr)
             .or_insert_with(|| PeerState::new(self.metainfo.pieces.len()));
         state.peer_id = Some(peer_id);
-        vec![]
+        self.interested_or_request(addr)
     }
 
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
