@@ -235,9 +235,6 @@ impl Pool {
 
     fn on_message_choke(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.release_peer_blocks(addr);
-        if let Some(state) = self.peers.get_mut(&addr) {
-            state.in_flight = 0;
-        }
         self.schedule_requests()
     }
 
@@ -247,15 +244,8 @@ impl Pool {
         block_ref: BlockRef,
         data: Vec<u8>,
     ) -> Vec<Output> {
-        // Free in_flight slot on the assigned peer (not necessarily the sender —
-        // the block may have been reassigned after a timeout while the original
-        // peer was still responding).
-        let assigned = match self.block_assignments.remove(&block_ref) {
-            None => return vec![],
-            Some(p) => p,
-        };
-        if let Some(state) = self.peers.get_mut(&assigned) {
-            state.in_flight = state.in_flight.saturating_sub(1);
+        if self.block_assignments.remove(&block_ref).is_none() {
+            return vec![];
         }
 
         // Piece management
@@ -322,24 +312,37 @@ impl Pool {
         }
     }
 
-    fn has_scheduling_capacity(&self) -> bool {
-        self.peers.values().any(|s| s.can_accept_request())
-    }
+    const MAX_IN_FLIGHT_PER_PEER: usize = 32;
 
-    fn pick_peer(&self, peer_addrs: &[SocketAddr], rng: &mut impl rand::Rng) -> Option<SocketAddr> {
+    fn pick_peer<'a>(
+        &self,
+        peer_addrs: &'a [SocketAddr],
+        in_flight: &HashMap<SocketAddr, usize>,
+        rng: &mut impl rand::Rng,
+    ) -> Option<&'a SocketAddr> {
         peer_addrs
             .iter()
             .filter(|addr| {
-                self.peers
-                    .get(addr)
-                    .map_or(false, |s| s.can_accept_request())
+                self.peers.get(addr).map_or(false, |s| {
+                    !s.peer_choking
+                        && in_flight.get(addr).copied().unwrap_or(0) < Self::MAX_IN_FLIGHT_PER_PEER
+                })
             })
             .choose(rng)
-            .copied()
     }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
-        if !self.has_scheduling_capacity() {
+        // Build in_flight counts once — O(blocks) instead of O(blocks × peers)
+        let mut in_flight: HashMap<SocketAddr, usize> = HashMap::new();
+        for &peer in self.block_assignments.values() {
+            *in_flight.entry(peer).or_default() += 1;
+        }
+
+        let can_schedule = self.peers.iter().any(|(addr, s)| {
+            !s.peer_choking
+                && in_flight.get(addr).copied().unwrap_or(0) < Self::MAX_IN_FLIGHT_PER_PEER
+        });
+        if !can_schedule {
             return vec![];
         }
 
@@ -367,15 +370,9 @@ impl Pool {
             let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
             for block_range in missing {
                 let block_ref = BlockRef::from(&block_range);
-                if let Some(old_peer) = self.block_assignments.get(&block_ref) {
-                    if let Some(state) = self.peers.get_mut(&old_peer) {
-                        state.in_flight = state.in_flight.saturating_sub(1);
-                    }
-                }
 
-                let candidate = self.pick_peer(&peer_addrs, &mut rng);
-                if let Some(addr) = candidate {
-                    self.peers.get_mut(&addr).unwrap().in_flight += 1;
+                if let Some(&addr) = self.pick_peer(&peer_addrs, &in_flight, &mut rng) {
+                    *in_flight.entry(addr).or_default() += 1;
                     self.block_assignments.insert(block_ref, addr);
                     let _ = self.pieces.request_block(block_ref);
 
@@ -404,20 +401,12 @@ struct PeerState {
     peer_choking: bool,
     peer_interested: bool,
     bitfield: Bitfield,
-    in_flight: usize,
     dht: bool,
     fast: bool,
     extensions: Option<ExtensionHandshake>, // BEP 10
 }
 
 impl PeerState {
-    /// Allow 16kb * 32 = 512kb max in transit - not aggressif for peers
-    const MAX_IN_FLIGHT_PER_PEER: usize = 32;
-
-    fn can_accept_request(&self) -> bool {
-        !self.peer_choking && self.in_flight < Self::MAX_IN_FLIGHT_PER_PEER
-    }
-
     fn new(addr: SocketAddr, peer_id: PeerId, pieces: usize, extensions: PeerExtensions) -> Self {
         Self {
             addr,
@@ -427,7 +416,6 @@ impl PeerState {
             peer_choking: true,
             peer_interested: false,
             bitfield: Bitfield::new(pieces),
-            in_flight: 0,
             dht: extensions.dht,
             fast: extensions.fast,
             extensions: None,
