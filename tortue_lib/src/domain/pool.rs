@@ -185,6 +185,8 @@ impl Pool {
             Message::NotInterested => vec![],
             Message::Request { .. } => vec![],
             Message::Cancel { .. } => vec![],
+            Message::ExtensionHandshake(_) => vec![],
+            Message::Extension { .. } => vec![],
             Message::Unimplemented => vec![],
         }
     }
@@ -405,6 +407,7 @@ impl PeerState {
             Message::Piece { .. } => {},
             Message::Cancel { .. } => {},
             Message::Unimplemented => {},
+            Message::ExtensionHandshake(_) | Message::Extension { .. } => {},
         }
     }
 }

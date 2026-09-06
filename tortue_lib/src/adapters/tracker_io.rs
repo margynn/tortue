@@ -14,8 +14,8 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::{
-    adapters::bencode::Bencode,
     application::ports::peer_source::PeerSource,
+    domain::bencode::Bencode,
     domain::{
         torrent::Metainfo,
         tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse},
@@ -36,7 +36,7 @@ pub enum Error {
     UdpRequest(String),
 
     #[error("bencode: {0}")]
-    Bencode(#[from] crate::adapters::bencode::Error),
+    Bencode(#[from] crate::domain::bencode::Error),
 
     #[error("tracker failure: {0}")]
     TrackerFailure(String),

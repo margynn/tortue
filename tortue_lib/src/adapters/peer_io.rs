@@ -9,10 +9,9 @@ use tokio::{
 };
 
 use crate::{
-    adapters::bencode::{self, Bencode},
     application::ports::peer_connector::PeerConnector,
     domain::{
-        message::{ExtensionHandshake, Message},
+        message::{DecodeError, Message},
         peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::{InfoHash, Metainfo},
     },
@@ -23,23 +22,20 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("bencode error: {0}")]
-    Bencode(#[from] bencode::Error),
-
     #[error("connection timed out")]
     Timeout,
 
     #[error("info hash mismatch")]
     InfoHashMismatch,
 
-    #[error("invalid message")]
-    InvalidMessage,
-
     #[error("invalid handshake: {0}")]
     InvalidHandshake(&'static str),
 
     #[error("message too large")]
     MessageTooLarge,
+
+    #[error("message decode: {0}")]
+    MessageDecode(#[from] DecodeError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -129,7 +125,6 @@ impl PeerIO {
                 tokio::select! {
                     cmd = cmd_rx.recv() => match cmd {
                         None => {
-                            // Make sure to close reader task upon exit
                             read_task.abort();
                             break 'run
                         },
@@ -325,9 +320,7 @@ impl Handshake {
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
         let extension_protocol = (reserved_bytes[5] & Self::EXTENSION_PROTOCOL_MASK) != 0;
-
         let fast_extension = (reserved_bytes[7] & Self::FAST_EXTENSION_MASK) != 0;
-
         let dht_protocol = (reserved_bytes[7] & Self::DHT_PROTOCOL_MASK) != 0;
 
         Ok(Handshake::new(
@@ -342,62 +335,6 @@ impl Handshake {
 
 impl Message {
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1Mb
-
-    fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        match self {
-            Message::KeepAlive => buf.extend_from_slice(&0u32.to_be_bytes()),
-            Message::Choke => buf.extend_from_slice(&[0, 0, 0, 1, 0]),
-            Message::Unchoke => buf.extend_from_slice(&[0, 0, 0, 1, 1]),
-            Message::Interested => buf.extend_from_slice(&[0, 0, 0, 1, 2]),
-            Message::NotInterested => buf.extend_from_slice(&[0, 0, 0, 1, 3]),
-            Message::Have(piece) => {
-                buf.extend_from_slice(&5u32.to_be_bytes());
-                buf.push(4);
-                buf.extend_from_slice(&(*piece as u32).to_be_bytes());
-            },
-            Message::Bitfield(bits) => {
-                buf.extend_from_slice(&(1 + bits.len() as u32).to_be_bytes());
-                buf.push(5);
-                buf.extend_from_slice(bits);
-            },
-            Message::Request {
-                piece_index,
-                piece_offset,
-                piece_len,
-            } => {
-                buf.extend_from_slice(&13u32.to_be_bytes());
-                buf.push(6);
-                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
-            },
-            Message::Piece {
-                piece_index,
-                piece_offset,
-                data,
-            } => {
-                buf.extend_from_slice(&(9 + data.len() as u32).to_be_bytes());
-                buf.push(7);
-                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
-                buf.extend_from_slice(data);
-            },
-            Message::Cancel {
-                piece_index,
-                piece_offset,
-                piece_len,
-            } => {
-                buf.extend_from_slice(&13u32.to_be_bytes());
-                buf.push(8);
-                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
-            },
-            Message::Unimplemented => {},
-        }
-        buf
-    }
 
     async fn read_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
         // BitTorrent message framing (BEP 3):
@@ -434,124 +371,6 @@ impl Message {
         let mut payload = vec![0u8; len];
         reader.read_exact(&mut payload).await?;
 
-        Self::decode(&payload)
-    }
-
-    fn decode(data: &[u8]) -> Result<Self> {
-        if data.is_empty() {
-            return Ok(Message::KeepAlive);
-        }
-
-        let msg_id = data[0];
-        let payload = &data[1..];
-
-        match msg_id {
-            0 => Ok(Message::Choke),
-            1 => Ok(Message::Unchoke),
-            2 => Ok(Message::Interested),
-            3 => Ok(Message::NotInterested),
-            4 => {
-                if payload.len() != 4 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Have(u32::from_be_bytes(
-                    payload.try_into().map_err(|_| Error::InvalidMessage)?,
-                ) as usize))
-            },
-            5 => Ok(Message::Bitfield(payload.to_vec())),
-            6 => {
-                if payload.len() != 12 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Request {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_len: u32::from_be_bytes(
-                        payload[8..12]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                })
-            },
-            7 => {
-                if payload.len() < 8 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Piece {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    data: payload[8..].to_vec(),
-                })
-            },
-            8 => {
-                if payload.len() != 12 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Cancel {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_len: u32::from_be_bytes(
-                        payload[8..12]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                })
-            },
-            20 => {
-                let ext_msg_id = payload[0];
-                let ext_payload = &payload[1..];
-                if ext_msg_id == 0 {
-                    let payload = Bencode::decode(ext_payload)?;
-                    let ext_hs = Self::parse_extention_handshake(&payload)?;
-                    return Ok(Message::ExtensionHandshake(ext_hs));
-                }
-
-                // TODO: decode l'ext message
-
-                // todo!()
-
-                Ok(Message::Unimplemented)
-            },
-            _ => Ok(Message::Unimplemented),
-        }
-    }
-
-    fn parse_extention_handshake(payload: &Bencode) -> Result<ExtensionHandshake> {
-        // TODO: decode le handshake
-        payload.get(b"m")?;
-
-        return Ok(ExtensionHandshake {
-            extensions: {},
-            listen_port: (),
-            client: (),
-            your_ip: (),
-            ipv4: (),
-            ipv6: (),
-            reqq: (),
-        });
+        Ok(Self::decode(&payload)?)
     }
 }

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use sha1::{Digest, Sha1};
 
 use super::bencode::{Bencode, Error as BencodeError};
-use crate::domain::torrent::{File, InfoHash, Metainfo, Mode, PIECE_HASH_LEN, PieceHash};
+use super::torrent::{File, InfoHash, Metainfo, Mode, PIECE_HASH_LEN, PieceHash};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
