@@ -45,6 +45,12 @@ impl<'a> Bencode<'a> {
         Decoder::new(data).parse()
     }
 
+    pub fn decode_with_rest(data: &'a [u8]) -> Result<(Self, &'a [u8])> {
+        let mut decoder = Decoder::new(data);
+        let value = decoder.parse()?;
+        Ok((value, &data[decoder.position..]))
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         self.encode_into(&mut buf);
@@ -356,5 +362,25 @@ mod tests {
         assert_eq!(b.get_int(b"name"), Err(Error::TypeMismatch));
         assert_eq!(b.get_bytes(b"age"), Err(Error::TypeMismatch));
         assert_eq!(Bencode::Int(0).get(b"x"), Err(Error::TypeMismatch));
+    }
+
+    #[test]
+    fn decode_with_rest() {
+        // integer with trailing bytes
+        let (val, rest) = Bencode::decode_with_rest(b"i42eXYZ").unwrap();
+        assert_eq!(val, Bencode::Int(42));
+        assert_eq!(rest, b"XYZ");
+
+        // dict with trailing binary data (ut_metadata data message pattern)
+        let input = b"d8:msg_typei1e5:piecei0e10:total_sizei1000ee\xff\xfe\xfd";
+        let (dict, rest) = Bencode::decode_with_rest(input).unwrap();
+        assert_eq!(dict.get_int(b"msg_type"), Ok(1));
+        assert_eq!(dict.get_int(b"piece"), Ok(0));
+        assert_eq!(rest, b"\xff\xfe\xfd");
+
+        // no trailing bytes
+        let (val, rest) = Bencode::decode_with_rest(b"i0e").unwrap();
+        assert_eq!(val, Bencode::Int(0));
+        assert_eq!(rest, b"");
     }
 }

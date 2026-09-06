@@ -3,13 +3,14 @@ use std::{collections::HashMap, fmt};
 use super::bencode::Bencode;
 
 #[derive(Debug, thiserror::Error)]
-pub enum DecodeError {
+pub enum Error {
     #[error("invalid message")]
     InvalidMessage,
 
     #[error("bencode: {0}")]
     Bencode(#[from] super::bencode::Error),
 }
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 pub enum Message {
@@ -128,7 +129,7 @@ impl Message {
         buf
     }
 
-    pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
+    pub fn decode(data: &[u8]) -> Result<Self> {
         if data.is_empty() {
             return Ok(Message::KeepAlive);
         }
@@ -143,80 +144,78 @@ impl Message {
             3 => Ok(Message::NotInterested),
             4 => {
                 if payload.len() != 4 {
-                    return Err(DecodeError::InvalidMessage);
+                    return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Have(u32::from_be_bytes(
-                    payload
-                        .try_into()
-                        .map_err(|_| DecodeError::InvalidMessage)?,
+                    payload.try_into().map_err(|_| Error::InvalidMessage)?,
                 ) as usize))
             },
             5 => Ok(Message::Bitfield(payload.to_vec())),
             6 => {
                 if payload.len() != 12 {
-                    return Err(DecodeError::InvalidMessage);
+                    return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Request {
                     piece_index: u32::from_be_bytes(
                         payload[0..4]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                     piece_offset: u32::from_be_bytes(
                         payload[4..8]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                     piece_len: u32::from_be_bytes(
                         payload[8..12]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                 })
             },
             7 => {
                 if payload.len() < 8 {
-                    return Err(DecodeError::InvalidMessage);
+                    return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Piece {
                     piece_index: u32::from_be_bytes(
                         payload[0..4]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                     piece_offset: u32::from_be_bytes(
                         payload[4..8]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                     data: payload[8..].to_vec(),
                 })
             },
             8 => {
                 if payload.len() != 12 {
-                    return Err(DecodeError::InvalidMessage);
+                    return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Cancel {
                     piece_index: u32::from_be_bytes(
                         payload[0..4]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                     piece_offset: u32::from_be_bytes(
                         payload[4..8]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                     piece_len: u32::from_be_bytes(
                         payload[8..12]
                             .try_into()
-                            .map_err(|_| DecodeError::InvalidMessage)?,
+                            .map_err(|_| Error::InvalidMessage)?,
                     ) as usize,
                 })
             },
             20 => {
                 if payload.is_empty() {
-                    return Err(DecodeError::InvalidMessage);
+                    return Err(Error::InvalidMessage);
                 }
                 let ext_id = payload[0];
                 let ext_payload = &payload[1..];
@@ -286,7 +285,7 @@ impl fmt::Debug for Message {
 }
 
 impl ExtensionHandshake {
-    fn from_bencode(payload: &Bencode<'_>) -> Result<Self, DecodeError> {
+    fn from_bencode(payload: &Bencode<'_>) -> Result<Self> {
         let extensions = match payload.get(b"m") {
             Ok(Bencode::Dict(m)) => m
                 .iter()
@@ -372,4 +371,46 @@ impl ExtensionHandshake {
 
         Bencode::Dict(dict).encode()
     }
+}
+
+// BEP 9
+pub enum UtMetadataMessage {
+    Request {
+        piece: usize,
+    },
+    Data {
+        piece: usize,
+        total_size: usize,
+        data: Vec<u8>,
+    },
+    Reject {
+        piece: usize,
+    },
+    Unimplemented,
+}
+
+impl UtMetadataMessage {
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let (dict, rest) = Bencode::decode_with_rest(payload)?;
+        let msg_type = dict.get_int(b"msg_type")?;
+        let piece = dict.get_int(b"piece")? as usize;
+        match msg_type {
+            0 => Ok(Self::Request { piece }),
+            1 => {
+                let total_size = dict.get_int(b"total_size")? as usize;
+                Ok(Self::Data {
+                    piece,
+                    total_size,
+                    data: rest.to_vec(),
+                })
+            },
+            2 => Ok(Self::Reject { piece }),
+            _ => Ok(Self::Unimplemented),
+        }
+    }
+
+    pub fn encode(&self, ext_id: u8) -> Vec<u8> {
+        //
+        todo!()
+    } // produit un Message::Extension
 }

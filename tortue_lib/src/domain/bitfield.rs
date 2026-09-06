@@ -197,8 +197,8 @@ mod tests {
         bf.set_bit(3).unwrap();
         bf.set_bit(7).unwrap();
 
-        let indices: Vec<u32> = bf.into_iter().collect();
-        assert_eq!(indices, vec![0, 3, 7]);
+        let indices: Vec<usize> = bf.into_iter().collect();
+        assert_eq!(indices, vec![0usize, 3, 7]);
     }
 
     #[test]
@@ -213,17 +213,17 @@ mod tests {
         bf.set_bit(7).unwrap();
         bf.set_bit(8).unwrap();
 
-        let indices: Vec<u32> = bf.into_iter().collect();
-        assert_eq!(indices, vec![7, 8]);
+        let indices: Vec<usize> = bf.into_iter().collect();
+        assert_eq!(indices, vec![7usize, 8]);
     }
 
     #[test]
     fn iterator_all_bits_set() {
         let mut bf = Bitfield::new(8);
-        bf.set_all().unwrap();
+        bf.set_all();
 
-        let indices: Vec<u32> = bf.into_iter().collect();
-        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let indices: Vec<usize> = bf.into_iter().collect();
+        assert_eq!(indices, vec![0usize, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn unset_bit_does_not_affect_neighbours() {
         let mut bf = Bitfield::new(8);
-        bf.set_all().unwrap();
+        bf.set_all();
 
         bf.unset_bit(3).unwrap();
 

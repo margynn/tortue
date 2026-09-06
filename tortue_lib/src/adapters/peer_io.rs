@@ -11,7 +11,7 @@ use tokio::{
 use crate::{
     application::ports::peer_connector::PeerConnector,
     domain::{
-        message::{DecodeError, ExtensionHandshake, Message},
+        message::{Error as DecodeError, ExtensionHandshake, Message},
         peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::{InfoHash, Metainfo},
     },
