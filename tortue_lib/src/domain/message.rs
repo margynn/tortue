@@ -1,4 +1,7 @@
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
 
 use super::bencode::Bencode;
 
@@ -373,7 +376,9 @@ impl ExtensionHandshake {
     }
 }
 
-// BEP 9
+// BEP 9 - Listing our extension ids for Tortue client
+pub const UT_METADATA_EXT_ID: u8 = 1;
+
 pub enum UtMetadataMessage {
     Request {
         piece: usize,
@@ -409,8 +414,32 @@ impl UtMetadataMessage {
         }
     }
 
-    pub fn encode(&self, ext_id: u8) -> Vec<u8> {
-        //
-        todo!()
-    } // produit un Message::Extension
+    pub fn encode(&self) -> Vec<u8> {
+        let mut dict: BTreeMap<&[u8], Bencode> = BTreeMap::new();
+        match self {
+            Self::Request { piece } => {
+                dict.insert(b"msg_type", Bencode::Int(0));
+                dict.insert(b"piece", Bencode::Int(*piece as i64));
+                Bencode::Dict(dict).encode()
+            },
+            Self::Data {
+                piece,
+                total_size,
+                data,
+            } => {
+                dict.insert(b"msg_type", Bencode::Int(1));
+                dict.insert(b"piece", Bencode::Int(*piece as i64));
+                dict.insert(b"total_size", Bencode::Int(*total_size as i64));
+                let mut out = Bencode::Dict(dict).encode();
+                out.extend_from_slice(data);
+                out
+            },
+            Self::Reject { piece } => {
+                dict.insert(b"msg_type", Bencode::Int(2));
+                dict.insert(b"piece", Bencode::Int(*piece as i64));
+                Bencode::Dict(dict).encode()
+            },
+            Self::Unimplemented => vec![],
+        }
+    }
 }

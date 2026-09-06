@@ -7,7 +7,10 @@ use std::{
 
 use rand::seq::IteratorRandom;
 
-use crate::domain::peer::PeerExtensions;
+use crate::domain::{
+    message::{UT_METADATA_EXT_ID, UtMetadataMessage},
+    peer::PeerExtensions,
+};
 
 use super::{
     bitfield::Bitfield,
@@ -140,7 +143,7 @@ impl Pool {
         let pieces = self.metainfo.pieces.len();
         self.peers
             .entry(addr)
-            .insert_entry(PeerState::new(peer_id, pieces, extensions));
+            .insert_entry(PeerState::new(addr, peer_id, pieces, extensions));
 
         self.release_peer_blocks(addr);
         self.interested_or_request(addr)
@@ -183,10 +186,12 @@ impl Pool {
                 message: Message::Unchoke,
             }],
             Message::NotInterested => vec![],
-            Message::Request { .. } => vec![],
+            Message::Request { .. } => vec![], // TODO: send bytes
             Message::Cancel { .. } => vec![],
             Message::ExtensionHandshake(_) => vec![],
-            Message::Extension { .. } => vec![],
+            Message::Extension { ext_id, payload } => {
+                self.on_extension_message(addr, ext_id, &payload)
+            },
             Message::Unimplemented => vec![],
         }
     }
@@ -282,6 +287,41 @@ impl Pool {
         }
     }
 
+    fn on_extension_message(&self, addr: SocketAddr, ext_id: u8, payload: &[u8]) -> Vec<Output> {
+        let state = self.peers.get(&addr).expect("expect peer");
+        let peer_ext_id = state
+            .extensions
+            .as_ref()
+            .and_then(|hs| hs.extensions.get("ut_metadata").copied());
+        let Some(peer_ext_id) = peer_ext_id else {
+            return vec![];
+        };
+
+        match ext_id {
+            UT_METADATA_EXT_ID => match UtMetadataMessage::decode(payload) {
+                Ok(UtMetadataMessage::Request { piece }) => {
+                    let data = self.metainfo.info_bytes_block(piece);
+                    let response = UtMetadataMessage::Data {
+                        piece,
+                        total_size: self.metainfo.info_bytes.len(),
+                        data,
+                    };
+                    vec![Output::SendToPeer {
+                        addr,
+                        message: Message::Extension {
+                            ext_id: peer_ext_id,
+                            payload: response.encode(),
+                        },
+                    }]
+                },
+                _ => vec![],
+            },
+
+            // TODO: add more extension message here
+            _ => vec![],
+        }
+    }
+
     fn has_scheduling_capacity(&self) -> bool {
         self.peers.values().any(|s| s.can_accept_request())
     }
@@ -357,6 +397,7 @@ impl Pool {
 
 #[derive(Clone)]
 struct PeerState {
+    addr: SocketAddr,
     peer_id: PeerId,
     am_choking: bool,
     am_interested: bool,
@@ -377,8 +418,9 @@ impl PeerState {
         !self.peer_choking && self.in_flight < Self::MAX_IN_FLIGHT_PER_PEER
     }
 
-    fn new(peer_id: PeerId, pieces: usize, extensions: PeerExtensions) -> Self {
+    fn new(addr: SocketAddr, peer_id: PeerId, pieces: usize, extensions: PeerExtensions) -> Self {
         Self {
+            addr,
             peer_id,
             am_choking: true,
             am_interested: false,

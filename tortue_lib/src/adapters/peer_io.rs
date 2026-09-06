@@ -11,7 +11,7 @@ use tokio::{
 use crate::{
     application::ports::peer_connector::PeerConnector,
     domain::{
-        message::{Error as DecodeError, ExtensionHandshake, Message},
+        message::{Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID},
         peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::{InfoHash, Metainfo},
     },
@@ -230,7 +230,7 @@ impl PeerIO {
         if inbound.extension_protocol {
             // Upon connection we share our supported extensions via BEP10
             let mut extensions = HashMap::new();
-            extensions.insert("ut_metadata".to_string(), 1u8); // BEP 9
+            extensions.insert("ut_metadata".to_string(), UT_METADATA_EXT_ID); // BEP 9
 
             let hs = Message::ExtensionHandshake(ExtensionHandshake {
                 extensions,
@@ -240,7 +240,7 @@ impl PeerIO {
                 ipv4: None,
                 ipv6: None,
                 reqq: None,
-                metadata_size: Some(self.metainfo.info_size),
+                metadata_size: Some(self.metainfo.info_bytes.len()),
             });
             timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.encode()))
                 .await

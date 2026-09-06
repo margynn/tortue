@@ -28,7 +28,7 @@ pub struct Metainfo {
     pub created_by: Option<String>,
     pub created_at: Option<i64>,
     pub url_list: Option<Vec<String>>,
-    pub info_size: usize,
+    pub info_bytes: Vec<u8>,
     pub hash: InfoHash,
     pub piece_length: usize,
     pub pieces: Vec<PieceHash>,
@@ -48,12 +48,26 @@ pub struct File {
 }
 
 impl Metainfo {
+    const METADATA_PIECE_SIZE: usize = 16_384; // 16KB
+
     /// content size in bytes of the torrent content
     pub fn total_size(&self) -> u64 {
         match &self.mode {
             Mode::Single { length } => *length,
             Mode::Multiple { files } => files.iter().map(|f| f.length).sum(),
         }
+    }
+
+    pub fn info_bytes_block(&self, piece: usize) -> Vec<u8> {
+        let start = piece as usize * Self::METADATA_PIECE_SIZE;
+        if start >= self.info_bytes.len() {
+            return vec![];
+        }
+        self.info_bytes[start..]
+            .chunks(Self::METADATA_PIECE_SIZE)
+            .next()
+            .unwrap_or_default()
+            .to_vec()
     }
 }
 
@@ -84,7 +98,7 @@ impl TryFrom<&[u8]> for Metainfo {
         let root = Bencode::decode(data)?;
         let announce = parse_announces(&root)?;
         let info = root.get(b"info")?;
-        let (hash, info_size) = info_hash(info)?;
+        let (hash, info_bytes) = info_hash(info)?;
         let (name, piece_length, pieces, mode) = parse_info(info)?;
 
         Ok(Metainfo {
@@ -94,7 +108,7 @@ impl TryFrom<&[u8]> for Metainfo {
             piece_length,
             pieces,
             mode,
-            info_size,
+            info_bytes,
             comment: root.get_utf8(b"comment").ok(),
             created_by: root.get_utf8(b"created by").ok(),
             created_at: root.get_int(b"creation date").ok(),
@@ -186,12 +200,12 @@ fn parse_info(info: &Bencode) -> Result<(String, usize, Vec<PieceHash>, Mode)> {
     Ok((name, piece_length, pieces, mode))
 }
 
-fn info_hash(info: &Bencode) -> Result<(InfoHash, usize)> {
+fn info_hash(info: &Bencode) -> Result<(InfoHash, Vec<u8>)> {
     let encoded_info = info.encode();
     let digest = Sha1::digest(&encoded_info);
     let mut bytes = [0u8; PIECE_HASH_LEN];
     bytes.copy_from_slice(&digest);
-    Ok((InfoHash::from(bytes), encoded_info.len()))
+    Ok((InfoHash::from(bytes), encoded_info))
 }
 
 fn parse_pieces(data: &[u8]) -> Result<Vec<PieceHash>> {
