@@ -2,14 +2,7 @@ use std::net::SocketAddr;
 
 use tokio::sync::mpsc;
 
-use crate::domain::{message::Message, peer::PeerId};
-
-#[derive(Debug)]
-pub enum PeerEvent {
-    Connected(PeerId),
-    Disconnected,
-    MessageReceived(Message),
-}
+use crate::domain::{message::Message, peer::PeerEvent};
 
 /// Factory that spawns one peer connection task per `connect()` call.
 /// Implementations hold shared config (credentials, transport settings)

@@ -9,10 +9,10 @@ use tokio::{
 };
 
 use crate::{
-    application::ports::peer_connector::{PeerConnector, PeerEvent},
+    application::ports::peer_connector::PeerConnector,
     domain::{
         message::Message,
-        peer::PeerId,
+        peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::{InfoHash, Metainfo},
     },
 };
@@ -102,10 +102,20 @@ impl PeerIO {
                 break;
             }
             reconnect_cpt += 1;
-            let (tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
+            let (tcp, handshake) = self.connect_with_retry(reconnect_delay).await;
 
             let _ = evt_tx
-                .send((self.peer_addr, PeerEvent::Connected(peer_id)))
+                .send((
+                    self.peer_addr,
+                    PeerEvent::Connected {
+                        peer_id: handshake.peer_id,
+                        peer_extensions: PeerExtensions {
+                            fast_extension: handshake.fast_extension,
+                            extension_protocol: handshake.extension_protocol,
+                            dht_protocol: handshake.dht_protocol,
+                        },
+                    },
+                ))
                 .await;
 
             let (reader, mut writer) = tcp.into_split();
@@ -170,7 +180,7 @@ impl PeerIO {
         })
     }
 
-    async fn connect_with_retry(&self, mut delay: Duration) -> (TcpStream, PeerId) {
+    async fn connect_with_retry(&self, mut delay: Duration) -> (TcpStream, Handshake) {
         loop {
             tokio::time::sleep(delay).await;
             match self.connect().await {
@@ -183,12 +193,23 @@ impl PeerIO {
         }
     }
 
-    async fn connect(&self) -> Result<(TcpStream, PeerId)> {
+    async fn connect(&self) -> Result<(TcpStream, Handshake)> {
         let mut stream = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
             .await
             .map_err(|_| Error::Timeout)??;
 
-        let outbound = Handshake::new(self.metainfo.hash, self.client_id, false);
+        // TODO: switch once extensions are supported
+        let dht_protocol = false;
+        let extension_protocol = false;
+        let fast_extension = false;
+
+        let outbound = Handshake::new(
+            self.metainfo.hash,
+            self.client_id,
+            dht_protocol,
+            extension_protocol,
+            fast_extension,
+        );
         timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)??;
@@ -207,26 +228,57 @@ impl PeerIO {
             return Err(Error::InfoHashMismatch);
         }
 
-        Ok((stream, inbound.peer_id))
+        Ok((stream, inbound))
     }
 }
 
 pub struct Handshake {
     pub info_hash: InfoHash,
     pub peer_id: PeerId,
+    pub dht_protocol: bool,
+    pub extension_protocol: bool,
     pub fast_extension: bool,
 }
 
 impl Handshake {
+    // BitTorrent handshake (BEP 3).
+    //
+    // Offset  Size  Field
+    // ------  ----  ------------------------------------------------
+    // 0       1     pstrlen      = 19
+    // 1       19    pstr         = "BitTorrent protocol"
+    // 20      8     reserved     Extension / feature flags
+    // 28      20    info_hash    SHA-1 hash of the torrent info dictionary
+    // 48      20    peer_id      Peer identifier
+    //
+    // Total size: 68 bytes.
+    //
+    // `reserved` bits commonly used:
+    //
+    // reserved[5] bit 4 (0x10) → BEP 10: Extension Protocol
+    // reserved[7] bit 2 (0x04) → BEP 6:  Fast Extension
+    // reserved[7] bit 0 (0x01) → BEP 5:  DHT Protocol
+
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
     const HANDSHAKE_LEN: usize = 68;
-    const FAST_EXTENSION_MASK: u8 = 0b0000_0100;
 
-    fn new(info_hash: InfoHash, peer_id: PeerId, fast_extension: bool) -> Self {
+    const EXTENSION_PROTOCOL_MASK: u8 = 0b0001_0000;
+    const FAST_EXTENSION_MASK: u8 = 0b0000_0100;
+    const DHT_PROTOCOL_MASK: u8 = 0b0000_0001;
+
+    fn new(
+        info_hash: InfoHash,
+        peer_id: PeerId,
+        dht_protocol: bool,
+        extension_protocol: bool,
+        fast_extension: bool,
+    ) -> Self {
         Self {
             info_hash,
             peer_id,
             fast_extension,
+            extension_protocol,
+            dht_protocol,
         }
     }
 
@@ -234,8 +286,14 @@ impl Handshake {
         let mut out = [0u8; Self::HANDSHAKE_LEN];
         out[0] = Self::PSTR.len() as u8;
         out[1..20].copy_from_slice(Self::PSTR);
+        if self.extension_protocol {
+            out[25] |= Self::EXTENSION_PROTOCOL_MASK;
+        }
         if self.fast_extension {
             out[27] |= Self::FAST_EXTENSION_MASK;
+        }
+        if self.dht_protocol {
+            out[27] |= Self::DHT_PROTOCOL_MASK;
         }
         out[28..48].copy_from_slice(self.info_hash.as_ref());
         out[48..68].copy_from_slice(self.peer_id.as_ref());
@@ -253,17 +311,26 @@ impl Handshake {
             return Err(Error::InvalidHandshake("invalid protocol string"));
         }
 
+        let mut reserved_bytes = [0u8; 8];
+        reserved_bytes.copy_from_slice(&buf[20..28]);
+
         let mut hash_bytes = [0u8; 20];
         hash_bytes.copy_from_slice(&buf[28..48]);
 
         let mut peer_id_bytes = [0u8; 20];
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
-        let fast_extension = (buf[27] & Self::FAST_EXTENSION_MASK) != 0;
+        let extension_protocol = (reserved_bytes[5] & Self::EXTENSION_PROTOCOL_MASK) != 0;
+
+        let fast_extension = (reserved_bytes[7] & Self::FAST_EXTENSION_MASK) != 0;
+
+        let dht_protocol = (reserved_bytes[7] & Self::DHT_PROTOCOL_MASK) != 0;
 
         Ok(Handshake::new(
             InfoHash::from(hash_bytes),
             PeerId::new(peer_id_bytes),
+            dht_protocol,
+            extension_protocol,
             fast_extension,
         ))
     }

@@ -7,6 +7,8 @@ use std::{
 
 use rand::seq::IteratorRandom;
 
+use crate::domain::peer::PeerExtensions;
+
 use super::{
     bitfield::Bitfield,
     message::Message,
@@ -17,9 +19,16 @@ use super::{
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
-    PeerConnected { addr: SocketAddr, peer_id: PeerId },
+    PeerConnected {
+        addr: SocketAddr,
+        peer_id: PeerId,
+        peer_extensions: PeerExtensions,
+    },
     PeerDisconnected(SocketAddr),
-    MessageReceived { addr: SocketAddr, message: Message },
+    MessageReceived {
+        addr: SocketAddr,
+        message: Message,
+    },
     Tick,
 }
 
@@ -50,9 +59,7 @@ pub struct PoolSnapshot {
 
 pub struct PeerInfo {
     pub addr: SocketAddr,
-    pub peer_id: Option<PeerId>,
-    pub in_flight: usize,
-    pub is_choking: bool,
+    pub state: PeerState,
 }
 
 impl Pool {
@@ -73,9 +80,7 @@ impl Pool {
             .iter()
             .map(|(addr, s)| PeerInfo {
                 addr: *addr,
-                peer_id: s.peer_id,
-                in_flight: s.in_flight,
-                is_choking: s.peer_choking,
+                state: s.clone(),
             })
             .collect();
 
@@ -90,7 +95,11 @@ impl Pool {
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
-            Input::PeerConnected { addr, peer_id } => self.on_connected(addr, peer_id),
+            Input::PeerConnected {
+                addr,
+                peer_id,
+                peer_extensions,
+            } => self.on_connected(addr, peer_id, peer_extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
             Input::Tick => self.schedule_requests(),
@@ -100,8 +109,7 @@ impl Pool {
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
         let mut output = vec![];
         for addr in socket_addrs {
-            if let Entry::Vacant(entry) = self.peers.entry(addr) {
-                entry.insert(PeerState::new(self.metainfo.pieces.len()));
+            if let Entry::Vacant(..) = self.peers.entry(addr) {
                 output.push(Output::ConnectPeer(addr));
             }
         }
@@ -121,18 +129,20 @@ impl Pool {
         }
     }
 
-    fn on_connected(&mut self, addr: SocketAddr, peer_id: PeerId) -> Vec<Output> {
+    fn on_connected(
+        &mut self,
+        addr: SocketAddr,
+        peer_id: PeerId,
+        extensions: PeerExtensions,
+    ) -> Vec<Output> {
         self.release_peer_blocks(addr);
 
-        let state = self
-            .peers
+        let pieces = self.metainfo.pieces.len();
+        self.peers
             .entry(addr)
-            .or_insert_with(|| PeerState::new(self.metainfo.pieces.len()));
-        state.peer_id = Some(peer_id);
-        state.am_interested = false;
-        state.peer_choking = true;
-        state.in_flight = 0;
+            .insert_entry(PeerState::new(peer_id, pieces, extensions));
 
+        self.release_peer_blocks(addr);
         self.interested_or_request(addr)
     }
 
@@ -343,14 +353,16 @@ impl Pool {
     }
 }
 
+#[derive(Clone)]
 struct PeerState {
-    peer_id: Option<PeerId>,
-    // am_choking: bool,
+    peer_id: PeerId,
+    am_choking: bool,
     am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
-    bitfield: Bitfield,
     in_flight: usize,
+    extensions: PeerExtensions,
+    bitfield: Bitfield,
 }
 
 impl PeerState {
@@ -361,15 +373,16 @@ impl PeerState {
         !self.peer_choking && self.in_flight < Self::MAX_IN_FLIGHT_PER_PEER
     }
 
-    fn new(pieces: usize) -> Self {
+    fn new(peer_id: PeerId, pieces: usize, extensions: PeerExtensions) -> Self {
         Self {
-            peer_id: None,
-            // am_choking: true,
+            peer_id,
+            am_choking: true,
             am_interested: false,
             peer_choking: true,
             peer_interested: false,
             bitfield: Bitfield::new(pieces),
             in_flight: 0,
+            extensions,
         }
     }
 

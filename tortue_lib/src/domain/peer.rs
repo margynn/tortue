@@ -2,6 +2,25 @@ use std::fmt;
 
 use rand::TryRng;
 
+use super::message::Message;
+
+#[derive(Debug)]
+pub enum PeerEvent {
+    Connected {
+        peer_id: PeerId,
+        peer_extensions: PeerExtensions,
+    },
+    Disconnected,
+    MessageReceived(Message),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PeerExtensions {
+    pub extension_protocol: bool, // BEP 10
+    pub dht_protocol: bool,       // BEP 5
+    pub fast_extension: bool,     // BEP 6
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerId([u8; 20]);
 

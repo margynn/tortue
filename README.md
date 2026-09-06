@@ -28,3 +28,4 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 | BEP 12 | https://www.bittorrent.org/beps/bep_0012.html | Multi Tracker metadata    | 🟢                    |
 | BEP 23 | https://www.bittorrent.org/beps/bep_0023.html | Tracker compact peer list | 🟢                    |
 | BEP 15 | https://www.bittorrent.org/beps/bep_0015.html | UDP Tracker protocol      | 🟢                    |
+| BEP 10 | https://www.bittorrent.org/beps/bep_0010.html | Extension Protocol        | 🟠 WIP                |

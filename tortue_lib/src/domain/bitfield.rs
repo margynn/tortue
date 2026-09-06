@@ -9,7 +9,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 const BITS_PER_BYTE: usize = 8;
 
 // MSB-first bitfield.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Bitfield {
     data: Vec<u8>,
     pieces: usize,

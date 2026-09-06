@@ -7,12 +7,10 @@ use tokio::{
 use tracing::info;
 
 use crate::{
-    application::ports::{
-        peer_connector::{PeerConnector, PeerEvent},
-        piece_store::PieceStore,
-    },
+    application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
         message::Message,
+        peer::PeerEvent,
         pool::{Input, Output, Pool, PoolSnapshot},
         torrent::Metainfo,
     },
@@ -73,9 +71,9 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
 
                 msg = self.pool_rx.recv() => match msg {
                     None => break,
-                    Some((addr, PeerEvent::Connected(peer_id))) => {
+                    Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
                         info!(addr = %addr, peer_id = %peer_id, "peer connected");
-                        Input::PeerConnected { addr, peer_id }
+                        Input::PeerConnected { addr, peer_id, peer_extensions }
                     },
                     Some((addr, PeerEvent::Disconnected)) => {
                         info!(addr = %addr, "peer disconnected");
