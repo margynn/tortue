@@ -29,3 +29,7 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 | BEP 23 | https://www.bittorrent.org/beps/bep_0023.html | Tracker compact peer list | 🟢                    |
 | BEP 15 | https://www.bittorrent.org/beps/bep_0015.html | UDP Tracker protocol      | 🟢                    |
 | BEP 10 | https://www.bittorrent.org/beps/bep_0010.html | Extension Protocol        | 🟢                    |
+| BEP 9  | https://www.bittorrent.org/beps/bep_0009.html | Magnet Links support      | 🟠                    |
+| BEP 6  | https://www.bittorrent.org/beps/bep_0006.html |                           | 🔴                    |
+| BEP 5  | https://www.bittorrent.org/beps/bep_0005.html |                           | 🔴                    |
+| BEP 11 | https://www.bittorrent.org/beps/bep_0011.html |                           | 🔴                    |

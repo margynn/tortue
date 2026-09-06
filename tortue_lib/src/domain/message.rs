@@ -47,6 +47,7 @@ pub enum Message {
 #[derive(Clone)]
 pub struct ExtensionHandshake {
     pub extensions: HashMap<String, u8>,
+    pub metadata_size: Option<usize>, // BEP 9
     pub listen_port: Option<u16>,
     pub client: Option<String>,
     pub your_ip: Option<Vec<u8>>,
@@ -319,6 +320,12 @@ impl ExtensionHandshake {
             .ok()
             .and_then(|v| u32::try_from(v).ok());
 
+        // BEP 9
+        let metadata_size = payload
+            .get_int(b"metadata_size")
+            .ok()
+            .and_then(|v| usize::try_from(v).ok());
+
         Ok(Self {
             extensions,
             listen_port,
@@ -327,6 +334,7 @@ impl ExtensionHandshake {
             ipv4,
             ipv6,
             reqq,
+            metadata_size,
         })
     }
 
@@ -357,6 +365,9 @@ impl ExtensionHandshake {
         }
         if let Some(reqq) = self.reqq {
             dict.insert(b"reqq", Bencode::Int(reqq as i64));
+        }
+        if let Some(metadata_size) = self.metadata_size {
+            dict.insert(b"metadata_size", Bencode::Int(metadata_size as i64));
         }
 
         Bencode::Dict(dict).encode()

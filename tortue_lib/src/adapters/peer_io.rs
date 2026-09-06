@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -229,21 +229,22 @@ impl PeerIO {
 
         if inbound.extension_protocol {
             // Upon connection we share our supported extensions via BEP10
-            let our_extensions = Message::ExtensionHandshake(ExtensionHandshake {
-                extensions: std::collections::HashMap::new(),
-                client: Some("tortue".to_string()),
+            let mut extensions = HashMap::new();
+            extensions.insert("ut_metadata".to_string(), 1u8); // BEP 9
+
+            let hs = Message::ExtensionHandshake(ExtensionHandshake {
+                extensions,
+                client: Some("TT".to_string()),
                 listen_port: None,
                 your_ip: None,
                 ipv4: None,
                 ipv6: None,
                 reqq: None,
+                metadata_size: Some(self.metainfo.info_size),
             });
-            timeout(
-                Self::CONNECT_TIMEOUT,
-                stream.write_all(&our_extensions.encode()),
-            )
-            .await
-            .map_err(|_| Error::Timeout)??;
+            timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.encode()))
+                .await
+                .map_err(|_| Error::Timeout)??;
         }
 
         Ok((stream, inbound))

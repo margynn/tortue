@@ -5,5 +5,4 @@ pub mod peer;
 pub mod pieces;
 pub mod pool;
 pub mod torrent;
-pub mod torrent_file;
 pub mod tracker;
