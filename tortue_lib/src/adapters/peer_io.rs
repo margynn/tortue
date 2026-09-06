@@ -11,7 +11,7 @@ use tokio::{
 use crate::{
     application::ports::peer_connector::PeerConnector,
     domain::{
-        message::{DecodeError, Message},
+        message::{DecodeError, ExtensionHandshake, Message},
         peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::{InfoHash, Metainfo},
     },
@@ -197,14 +197,15 @@ impl PeerIO {
             .await
             .map_err(|_| Error::Timeout)??;
 
-        // TODO: switch once extensions are supported
+        let extension_protocol = true; // BEP 10
         let dht_protocol = false;
-        let extension_protocol = false;
         let fast_extension = false;
+        let info_hash = self.metainfo.hash;
+        let peer_id = self.client_id;
 
         let outbound = Handshake::new(
-            self.metainfo.hash,
-            self.client_id,
+            info_hash,
+            peer_id,
             dht_protocol,
             extension_protocol,
             fast_extension,
@@ -225,6 +226,25 @@ impl PeerIO {
 
         if inbound.info_hash != self.metainfo.hash {
             return Err(Error::InfoHashMismatch);
+        }
+
+        if inbound.extension_protocol {
+            // Upon connection we share our supported extensions via BEP10
+            let our_extensions = Message::ExtensionHandshake(ExtensionHandshake {
+                extensions: std::collections::HashMap::new(),
+                client: Some("tortue".to_string()),
+                listen_port: None,
+                your_ip: None,
+                ipv4: None,
+                ipv6: None,
+                reqq: None,
+            });
+            timeout(
+                Self::CONNECT_TIMEOUT,
+                stream.write_all(&our_extensions.encode()),
+            )
+            .await
+            .map_err(|_| Error::Timeout)??;
         }
 
         Ok((stream, inbound))

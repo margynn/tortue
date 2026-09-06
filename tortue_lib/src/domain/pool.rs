@@ -11,7 +11,7 @@ use crate::domain::peer::PeerExtensions;
 
 use super::{
     bitfield::Bitfield,
-    message::Message,
+    message::{ExtensionHandshake, Message},
     peer::PeerId,
     pieces::{BlockRange, BlockRef, PieceEvent, PieceManager},
     torrent::Metainfo,
@@ -364,6 +364,7 @@ struct PeerState {
     peer_interested: bool,
     in_flight: usize,
     extensions: PeerExtensions,
+    extension_handshake: Option<ExtensionHandshake>,
     bitfield: Bitfield,
 }
 
@@ -385,6 +386,7 @@ impl PeerState {
             bitfield: Bitfield::new(pieces),
             in_flight: 0,
             extensions,
+            extension_handshake: None,
         }
     }
 
@@ -407,7 +409,8 @@ impl PeerState {
             Message::Piece { .. } => {},
             Message::Cancel { .. } => {},
             Message::Unimplemented => {},
-            Message::ExtensionHandshake(_) | Message::Extension { .. } => {},
+            Message::ExtensionHandshake(hs) => self.extension_handshake = Some(hs.clone()),
+            Message::Extension { .. } => {},
         }
     }
 }

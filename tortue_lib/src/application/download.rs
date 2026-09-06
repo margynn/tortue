@@ -25,7 +25,7 @@ pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Downlo
             .map_err(|e| DownloadError::InvalidTorrentFile(e.to_string()))?,
     );
     let node = Node {
-        id: PeerId::generate("TR", "0.1.0"),
+        id: PeerId::generate("tortue", "0.1.0"),
         port: 1234,
     };
 
