@@ -110,9 +110,8 @@ impl PeerIO {
                     PeerEvent::Connected {
                         peer_id: handshake.peer_id,
                         peer_extensions: PeerExtensions {
-                            fast_extension: handshake.fast_extension,
-                            extension_protocol: handshake.extension_protocol,
-                            dht_protocol: handshake.dht_protocol,
+                            fast: handshake.fast_extension,
+                            dht: handshake.dht_protocol,
                         },
                     },
                 ))

@@ -362,10 +362,11 @@ struct PeerState {
     am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
-    in_flight: usize,
-    extensions: PeerExtensions,
-    extension_handshake: Option<ExtensionHandshake>,
     bitfield: Bitfield,
+    in_flight: usize,
+    dht: bool,
+    fast: bool,
+    extensions: Option<ExtensionHandshake>, // BEP 10
 }
 
 impl PeerState {
@@ -385,8 +386,9 @@ impl PeerState {
             peer_interested: false,
             bitfield: Bitfield::new(pieces),
             in_flight: 0,
-            extensions,
-            extension_handshake: None,
+            dht: extensions.dht,
+            fast: extensions.fast,
+            extensions: None,
         }
     }
 
@@ -409,7 +411,7 @@ impl PeerState {
             Message::Piece { .. } => {},
             Message::Cancel { .. } => {},
             Message::Unimplemented => {},
-            Message::ExtensionHandshake(hs) => self.extension_handshake = Some(hs.clone()),
+            Message::ExtensionHandshake(hs) => self.extensions = Some(hs.clone()),
             Message::Extension { .. } => {},
         }
     }

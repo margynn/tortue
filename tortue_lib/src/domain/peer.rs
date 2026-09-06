@@ -16,9 +16,8 @@ pub enum PeerEvent {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PeerExtensions {
-    pub extension_protocol: bool, // BEP 10
-    pub dht_protocol: bool,       // BEP 5
-    pub fast_extension: bool,     // BEP 6
+    pub dht: bool,  // BEP 5
+    pub fast: bool, // BEP 6
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
