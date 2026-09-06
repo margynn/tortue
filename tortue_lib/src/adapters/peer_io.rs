@@ -9,9 +9,10 @@ use tokio::{
 };
 
 use crate::{
+    adapters::bencode::{self, Bencode},
     application::ports::peer_connector::PeerConnector,
     domain::{
-        message::Message,
+        message::{ExtensionHandshake, Message},
         peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::{InfoHash, Metainfo},
     },
@@ -21,6 +22,9 @@ use crate::{
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("bencode error: {0}")]
+    Bencode(#[from] bencode::Error),
 
     #[error("connection timed out")]
     Timeout,
@@ -396,6 +400,29 @@ impl Message {
     }
 
     async fn read_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+        // BitTorrent message framing (BEP 3):
+        //
+        // Every message is prefixed with a 4-byte big-endian length:
+        //
+        //   +-------------------+----------------------+
+        //   | length (4 bytes)  | payload (length bytes)|
+        //   +-------------------+----------------------+
+        //
+        // `length` does not include the 4-byte length prefix itself.
+        //
+        // A length of 0 is a keep-alive message:
+        //
+        //   +-------------------+
+        //   | 0x00 00 00 00     |
+        //   +-------------------+
+        //
+        // For regular messages, the first byte of the payload is the
+        // BitTorrent message ID:
+        //
+        //   +-------------------+------+----------------+
+        //   | length (4 bytes)  |  ID  | payload        |
+        //   +-------------------+------+----------------+
+
         let mut header = [0u8; 4];
         reader.read_exact(&mut header).await?;
 
@@ -494,7 +521,37 @@ impl Message {
                     ) as usize,
                 })
             },
+            20 => {
+                let ext_msg_id = payload[0];
+                let ext_payload = &payload[1..];
+                if ext_msg_id == 0 {
+                    let payload = Bencode::decode(ext_payload)?;
+                    let ext_hs = Self::parse_extention_handshake(&payload)?;
+                    return Ok(Message::ExtensionHandshake(ext_hs));
+                }
+
+                // TODO: decode l'ext message
+
+                // todo!()
+
+                Ok(Message::Unimplemented)
+            },
             _ => Ok(Message::Unimplemented),
         }
+    }
+
+    fn parse_extention_handshake(payload: &Bencode) -> Result<ExtensionHandshake> {
+        // TODO: decode le handshake
+        payload.get(b"m")?;
+
+        return Ok(ExtensionHandshake {
+            extensions: {},
+            listen_port: (),
+            client: (),
+            your_ip: (),
+            ipv4: (),
+            ipv6: (),
+            reqq: (),
+        });
     }
 }

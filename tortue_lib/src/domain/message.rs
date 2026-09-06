@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 #[derive(Clone)]
 pub enum Message {
@@ -24,7 +24,24 @@ pub enum Message {
         piece_offset: usize,
         piece_len: usize,
     },
+    ExtensionHandshake(ExtensionHandshake),
+    Extension {
+        ext_id: u8,
+        payload: Vec<u8>,
+    },
     Unimplemented, // special case for unknown messages
+}
+
+// BEP 10
+#[derive(Clone)]
+pub struct ExtensionHandshake {
+    pub extensions: HashMap<String, u8>,
+    pub listen_port: Option<u16>,
+    pub client: Option<String>,
+    pub your_ip: Option<Vec<u8>>,
+    pub ipv4: Option<[u8; 4]>,
+    pub ipv6: Option<[u8; 16]>,
+    pub reqq: Option<u32>,
 }
 
 impl fmt::Debug for Message {
@@ -67,6 +84,8 @@ impl fmt::Debug for Message {
                 .field("piece_offset", piece_offset)
                 .field("piece_len", piece_len)
                 .finish(),
+            Self::ExtensionHandshake(_) => f.debug_struct("extension_handshake").finish(),
+            Self::Extension { .. } => f.debug_struct("extension_message").finish(),
             Self::Unimplemented => f.debug_struct("Unimplemented").finish(),
         }
     }
