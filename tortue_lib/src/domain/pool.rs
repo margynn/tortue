@@ -180,19 +180,23 @@ impl Pool {
                 };
                 self.on_message_piece(addr, block_ref, data)
             },
-            Message::KeepAlive => vec![],
             Message::Interested => vec![Output::SendToPeer {
                 addr,
                 message: Message::Unchoke,
             }],
             Message::NotInterested => vec![],
-            Message::Request { .. } => vec![], // TODO: send bytes
+            Message::Request {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => self.on_message_request(addr, piece_index, piece_offset, piece_len),
             Message::Cancel { .. } => vec![],
             Message::ExtensionHandshake(_) => vec![],
             Message::Extension { ext_id, payload } => {
                 self.on_extension_message(addr, ext_id, &payload)
             },
             Message::Unimplemented => vec![],
+            Message::KeepAlive => vec![],
         }
     }
 
@@ -236,6 +240,19 @@ impl Pool {
     fn on_message_choke(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.release_peer_blocks(addr);
         self.schedule_requests()
+    }
+
+    fn on_message_request(
+        &mut self,
+        addr: SocketAddr,
+        piece_index: usize,
+        piece_offset: usize,
+        piece_len: usize,
+    ) -> Vec<Output> {
+        // TODO: Check si on a la piece demandé avec pices
+        // si on l'a il faut envoyer un output sendToPeer Piece
+        // dans pool_io.rs, il faut que le store lise la piece et la retourne
+        vec![]
     }
 
     fn on_message_piece(
