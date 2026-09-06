@@ -43,7 +43,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
         piece_store: S,
         progress_tx: watch::Sender<PoolSnapshot>,
     ) -> Self {
-        let (pool_tx, pool_rx) = mpsc::channel(256);
+        let (pool_tx, pool_rx) = mpsc::channel(1024);
         Self {
             metainfo,
             peers_rx,
@@ -101,7 +101,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
             Output::ConnectPeer(addr) => self.spawn_peer(addr),
             Output::SendToPeer { addr, message } => {
                 if let Some(tx) = self.peer_cmds.get(&addr) {
-                    let _ = tx.send(message).await;
+                    let _ = tx.try_send(message);
                 }
             },
             Output::Completed => info!("download completed"),
@@ -112,7 +112,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
             },
             Output::Broadcast(message) => {
                 for tx in self.peer_cmds.values() {
-                    let _ = tx.send(message.clone()).await;
+                    let _ = tx.try_send(message.clone());
                 }
             },
         }
