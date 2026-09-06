@@ -55,82 +55,6 @@ pub struct ExtensionHandshake {
     pub reqq: Option<u32>,
 }
 
-impl ExtensionHandshake {
-    fn new(extensions: HashMap<String, u8>, client: Option<String>) -> Self {
-        Self {
-            extensions,
-            client,
-            listen_port: None,
-            your_ip: None,
-            ipv4: None,
-            ipv6: None,
-            reqq: None,
-        }
-    }
-
-    fn from_bencode(payload: &Bencode<'_>) -> Result<Self, DecodeError> {
-        let extensions = match payload.get(b"m") {
-            Ok(Bencode::Dict(m)) => m
-                .iter()
-                .filter_map(|(k, v)| {
-                    let name = std::str::from_utf8(k).ok()?;
-                    let id = match v {
-                        Bencode::Int(n) if *n >= 0 && *n <= 255 => *n as u8,
-                        _ => return None,
-                    };
-                    Some((name.to_owned(), id))
-                })
-                .collect(),
-            _ => HashMap::new(),
-        };
-
-        Ok(Self {
-            extensions,
-            listen_port: payload
-                .get_int(b"p")
-                .ok()
-                .and_then(|v| u16::try_from(v).ok()),
-            client: payload.get_utf8(b"v").ok(),
-            your_ip: payload.get_bytes(b"yourip").ok().map(|b| b.to_vec()),
-            ipv4: payload
-                .get_bytes(b"ipv4")
-                .ok()
-                .and_then(|b| b.try_into().ok()),
-            ipv6: payload
-                .get_bytes(b"ipv6")
-                .ok()
-                .and_then(|b| b.try_into().ok()),
-            reqq: payload
-                .get_int(b"reqq")
-                .ok()
-                .and_then(|v| u32::try_from(v).ok()),
-        })
-    }
-
-    fn encode(&self) -> Vec<u8> {
-        use std::collections::BTreeMap;
-
-        let mut m: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-        for (name, &id) in &self.extensions {
-            m.insert(name.as_bytes(), Bencode::Int(id as i64));
-        }
-
-        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
-        dict.insert(b"m", Bencode::Dict(m));
-        if let Some(port) = self.listen_port {
-            dict.insert(b"p", Bencode::Int(port as i64));
-        }
-        if let Some(ref v) = self.client {
-            dict.insert(b"v", Bencode::Bytes(v.as_bytes()));
-        }
-        if let Some(reqq) = self.reqq {
-            dict.insert(b"reqq", Bencode::Int(reqq as i64));
-        }
-
-        Bencode::Dict(dict).encode()
-    }
-}
-
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -357,5 +281,84 @@ impl fmt::Debug for Message {
             },
             Self::Unimplemented => f.debug_struct("Unimplemented").finish(),
         }
+    }
+}
+
+impl ExtensionHandshake {
+    fn from_bencode(payload: &Bencode<'_>) -> Result<Self, DecodeError> {
+        let extensions = match payload.get(b"m") {
+            Ok(Bencode::Dict(m)) => m
+                .iter()
+                .filter_map(|(k, v)| {
+                    let name = std::str::from_utf8(k).ok()?;
+                    let id = match v {
+                        Bencode::Int(n) if *n >= 0 && *n <= 255 => *n as u8,
+                        _ => return None,
+                    };
+                    Some((name.to_owned(), id))
+                })
+                .collect(),
+            _ => HashMap::new(),
+        };
+        let listen_port = payload
+            .get_int(b"p")
+            .ok()
+            .and_then(|v| u16::try_from(v).ok());
+        let your_ip = payload.get_bytes(b"yourip").ok().map(|b| b.to_vec());
+        let client = payload.get_utf8(b"v").ok();
+        let ipv4 = payload
+            .get_bytes(b"ipv4")
+            .ok()
+            .and_then(|b| b.try_into().ok());
+        let ipv6 = payload
+            .get_bytes(b"ipv6")
+            .ok()
+            .and_then(|b| b.try_into().ok());
+        let reqq = payload
+            .get_int(b"reqq")
+            .ok()
+            .and_then(|v| u32::try_from(v).ok());
+
+        Ok(Self {
+            extensions,
+            listen_port,
+            client,
+            your_ip,
+            ipv4,
+            ipv6,
+            reqq,
+        })
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        use std::collections::BTreeMap;
+
+        let mut m: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        for (name, &id) in &self.extensions {
+            m.insert(name.as_bytes(), Bencode::Int(id as i64));
+        }
+
+        let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
+        dict.insert(b"m", Bencode::Dict(m));
+        if let Some(port) = self.listen_port {
+            dict.insert(b"p", Bencode::Int(port as i64));
+        }
+        if let Some(ref v) = self.client {
+            dict.insert(b"v", Bencode::Bytes(v.as_bytes()));
+        }
+        if let Some(ref your_ip) = self.your_ip {
+            dict.insert(b"yourip", Bencode::Bytes(your_ip));
+        }
+        if let Some(ref ipv4) = self.ipv4 {
+            dict.insert(b"ipv4", Bencode::Bytes(ipv4));
+        }
+        if let Some(ref ipv6) = self.ipv6 {
+            dict.insert(b"ipv6", Bencode::Bytes(ipv6));
+        }
+        if let Some(reqq) = self.reqq {
+            dict.insert(b"reqq", Bencode::Int(reqq as i64));
+        }
+
+        Bencode::Dict(dict).encode()
     }
 }
