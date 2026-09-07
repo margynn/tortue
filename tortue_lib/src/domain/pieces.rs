@@ -20,7 +20,8 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
-const BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
+const BLOCK_SIZE: usize = 15 * 1024; // 15 KiB
+const MAX_BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -111,6 +112,20 @@ impl PieceManager {
                 }
             }
         }
+    }
+
+    pub fn read_block(
+        &self,
+        piece_index: usize,
+        piece_offset: usize,
+        piece_len: usize,
+    ) -> Option<Vec<u8>> {
+        if piece_len > MAX_BLOCK_SIZE {
+            return None;
+        }
+        let piece = self.pieces.get(piece_index)?;
+        let block_index = piece_offset / BLOCK_SIZE;
+        piece.read(block_index, piece_len)
     }
 
     pub fn blocks_total(&self) -> usize {
@@ -242,6 +257,26 @@ impl Piece {
             buffer.extend_from_slice(data);
         }
         Some(buffer)
+    }
+
+    fn read(&self, block_index: usize, len: usize) -> Option<Vec<u8>> {
+        if block_index >= self.blocks.len() {
+            return None;
+        }
+        let mut out: Vec<u8> = Vec::with_capacity(len);
+        for block in &self.blocks[block_index..] {
+            match block {
+                BlockState::Received { buffer } => {
+                    out.extend(buffer);
+                    if out.len() >= len {
+                        out.truncate(len);
+                        return Some(out);
+                    }
+                },
+                _ => return None,
+            }
+        }
+        None
     }
 
     fn reset(&mut self) {

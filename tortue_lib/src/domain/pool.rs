@@ -249,10 +249,17 @@ impl Pool {
         piece_offset: usize,
         piece_len: usize,
     ) -> Vec<Output> {
-        // TODO: Check si on a la piece demandé avec pices
-        // si on l'a il faut envoyer un output sendToPeer Piece
-        // dans pool_io.rs, il faut que le store lise la piece et la retourne
-        vec![]
+        let Some(data) = self.pieces.read_block(piece_index, piece_offset, piece_len) else {
+            return vec![];
+        };
+        vec![Output::SendToPeer {
+            addr,
+            message: Message::Piece {
+                piece_index,
+                piece_offset,
+                data,
+            },
+        }]
     }
 
     fn on_message_piece(
