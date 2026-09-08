@@ -7,11 +7,13 @@ use crate::domain::{message::Message, peer::PeerEvent};
 /// Factory that spawns one peer connection task per `connect()` call.
 /// Implementations hold shared config (credentials, transport settings)
 /// and produce independent per-peer tasks.
-pub trait PeerConnector: Send + Sync + 'static {
+pub trait PeerConnector: Send + 'static {
     fn connect(
-        &self,
+        &mut self,
         addr: SocketAddr,
         cmd_rx: mpsc::Receiver<Message>,
         events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     );
+
+    fn disconnect(&mut self, addr: SocketAddr);
 }

@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, tcp::OwnedReadHalf},
-    sync::mpsc,
+    sync::{mpsc, watch},
     task::JoinHandle,
     time::timeout,
 };
@@ -36,6 +36,9 @@ pub enum Error {
 
     #[error("message decode: {0}")]
     MessageDecode(#[from] DecodeError),
+
+    #[error("peer connection cancelled")]
+    Cancelled,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -43,6 +46,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct TcpPeerConnector {
     client_id: PeerId,
     peer_config: PeerConfig,
+    peer_cancels: HashMap<SocketAddr, watch::Sender<bool>>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,19 +63,28 @@ impl TcpPeerConnector {
                 info_hash,
                 metadata_size,
             },
+            peer_cancels: HashMap::new(),
         }
     }
 }
 
 impl PeerConnector for TcpPeerConnector {
     fn connect(
-        &self,
+        &mut self,
         addr: SocketAddr,
         cmd_rx: mpsc::Receiver<Message>,
         evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) {
-        let mut runner = TcpPeerIO::new(addr, self.client_id, self.peer_config);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        self.peer_cancels.insert(addr, cancel_tx);
+        let mut runner = TcpPeerIO::new(addr, self.client_id, self.peer_config, cancel_rx);
         tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
+    }
+
+    fn disconnect(&mut self, addr: SocketAddr) {
+        if let Some(tx) = self.peer_cancels.remove(&addr) {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -79,6 +92,7 @@ struct TcpPeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
     config: PeerConfig,
+    cancel_rx: watch::Receiver<bool>,
 }
 
 impl TcpPeerIO {
@@ -89,11 +103,17 @@ impl TcpPeerIO {
     const READ_TIMEOUT: Duration = Duration::from_secs(30);
     const MAX_RECONNECTION: usize = 10;
 
-    fn new(peer_addr: SocketAddr, client_id: PeerId, config: PeerConfig) -> Self {
+    fn new(
+        peer_addr: SocketAddr,
+        client_id: PeerId,
+        config: PeerConfig,
+        cancel_rx: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             client_id,
             peer_addr,
             config,
+            cancel_rx,
         }
     }
 
@@ -111,7 +131,7 @@ impl TcpPeerIO {
                 break;
             }
             reconnect_cpt += 1;
-            let (tcp, handshake) = self.connect_with_retry(reconnect_delay).await;
+            let (tcp, handshake) = self.connect_with_retry(reconnect_delay).await?;
 
             let _ = evt_tx
                 .send((
@@ -133,6 +153,7 @@ impl TcpPeerIO {
                 tokio::select! {
                     cmd = cmd_rx.recv() => match cmd {
                         None => {
+                            // Channel closed -> disconnect the peer
                             read_task.abort();
                             break 'run
                         },
@@ -142,6 +163,11 @@ impl TcpPeerIO {
                             }
                         },
                     },
+
+                    _ = self.cancel_rx.changed() => {
+                        read_task.abort();
+                        break 'run
+                    }
 
                     _ = &mut read_task => break,
 
@@ -187,11 +213,15 @@ impl TcpPeerIO {
         })
     }
 
-    async fn connect_with_retry(&self, mut delay: Duration) -> (TcpStream, Handshake) {
+    async fn connect_with_retry(&mut self, mut delay: Duration) -> Result<(TcpStream, Handshake)> {
         loop {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {},
+                _ = self.cancel_rx.changed() => return Err(Error::Cancelled),
+            };
+
             match self.connect().await {
-                Ok(result) => return result,
+                Ok(result) => return Ok(result),
                 Err(e) => {
                     tracing::debug!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
                     delay = (delay * 2).clamp(Self::RECONNECT_DELAY, Self::MAX_RECONNECT_DELAY);

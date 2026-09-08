@@ -37,6 +37,7 @@ pub enum Input {
 
 pub enum Output {
     ConnectPeer(SocketAddr),
+    DisconnectPeer(SocketAddr),
     SendToPeer { addr: SocketAddr, message: Message },
     WritePiece { offset: u64, data: Vec<u8> },
     Broadcast(Message),

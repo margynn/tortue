@@ -87,7 +87,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
             };
 
             for out in pool.step(input) {
-                self.handle_output(out).await;
+                self.handle_output(out);
             }
 
             let _ = self.progress_tx.send(pool.snapshot());
@@ -96,10 +96,13 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
         Ok(())
     }
 
-    // TODO: make sync and use channel to send piece to piece store
-    async fn handle_output(&mut self, out: Output) {
+    fn handle_output(&mut self, out: Output) {
         match out {
             Output::ConnectPeer(addr) => self.spawn_peer(addr),
+            Output::DisconnectPeer(addr) => {
+                self.peer_cmds.remove(&addr);
+                self.peer_connector.disconnect(addr);
+            },
             Output::SendToPeer { addr, message } => {
                 if let Some(tx) = self.peer_cmds.get(&addr) {
                     let _ = tx.try_send(message);
@@ -107,7 +110,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
             },
             Output::Completed => info!("download completed"),
             Output::WritePiece { offset, data } => {
-                if let Err(e) = self.piece_store.write(offset, &data).await {
+                if let Err(e) = self.piece_store.write(offset, &data) {
                     tracing::error!(error = %e, "failed to write piece");
                 }
             },
