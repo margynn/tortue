@@ -183,6 +183,12 @@ impl Pool {
             },
             Message::Unimplemented => vec![],
             Message::KeepAlive => vec![],
+            // BEP 6 - not yet handled
+            Message::HaveAll
+            | Message::HaveNone
+            | Message::SuggestPiece(_)
+            | Message::RejectRequest { .. }
+            | Message::AllowedFast(_) => vec![],
         }
     }
 
@@ -450,9 +456,14 @@ impl PeerState {
             Message::Request { .. } => {},
             Message::Piece { .. } => {},
             Message::Cancel { .. } => {},
-            Message::Unimplemented => {},
             Message::ExtensionHandshake(hs) => self.extensions = Some(hs.clone()),
             Message::Extension { .. } => {},
+            Message::SuggestPiece(_) => {},
+            Message::HaveAll => {},
+            Message::HaveNone => {},
+            Message::RejectRequest { .. } => {},
+            Message::AllowedFast(_) => {},
+            Message::Unimplemented => {},
         }
     }
 }

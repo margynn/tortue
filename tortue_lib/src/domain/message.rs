@@ -243,8 +243,18 @@ impl Message {
                 }
                 Ok(Message::SuggestPiece(Self::read_u32(payload, 0)?))
             },
-            14 => Ok(Message::HaveAll),
-            15 => Ok(Message::HaveNone),
+            14 => {
+                if !payload.is_empty() {
+                    return Err(Error::InvalidMessage);
+                }
+                Ok(Message::HaveAll)
+            },
+            15 => {
+                if !payload.is_empty() {
+                    return Err(Error::InvalidMessage);
+                }
+                Ok(Message::HaveNone)
+            },
             16 => {
                 if payload.len() != 12 {
                     return Err(Error::InvalidMessage);
