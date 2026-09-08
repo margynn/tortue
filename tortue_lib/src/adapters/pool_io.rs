@@ -28,8 +28,8 @@ pub struct PoolIO<S, C> {
     metainfo: Arc<Metainfo>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
-    pool_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    pool_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+    peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     piece_store: S,
     peer_connector: C,
     progress_tx: watch::Sender<PoolSnapshot>,
@@ -43,13 +43,13 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
         piece_store: S,
         progress_tx: watch::Sender<PoolSnapshot>,
     ) -> Self {
-        let (pool_tx, pool_rx) = mpsc::channel(1024);
+        let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
             metainfo,
             peers_rx,
             peer_cmds: HashMap::new(),
-            pool_tx,
-            pool_rx,
+            peer_events_tx,
+            peer_events_rx,
             piece_store,
             peer_connector,
             progress_tx,
@@ -69,7 +69,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
 
                 _ = tick.tick() => Input::Tick,
 
-                msg = self.pool_rx.recv() => match msg {
+                msg = self.peer_events_rx.recv() => match msg {
                     None => break,
                     Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
                         info!(addr = %addr, peer_id = %peer_id, "peer connected");
@@ -96,6 +96,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
         Ok(())
     }
 
+    // TODO: make sync and use channel to send piece to piece store
     async fn handle_output(&mut self, out: Output) {
         match out {
             Output::ConnectPeer(addr) => self.spawn_peer(addr),
@@ -122,6 +123,6 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         self.peer_cmds.insert(addr, cmd_tx);
         self.peer_connector
-            .connect(addr, cmd_rx, self.pool_tx.clone());
+            .connect(addr, cmd_rx, self.peer_events_tx.clone());
     }
 }

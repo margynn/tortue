@@ -14,7 +14,10 @@ use crate::{
         disk_storage::DiskStorage, peer_io::TcpPeerConnector, pool_io::PoolIO,
         tracker_io::TrackerIO,
     },
-    domain::{peer::PeerId, pool::PoolSnapshot, torrent::Metainfo, tracker::Node},
+    application::magnet::fetch_metadata,
+    domain::{
+        magnet::MagnetLink, peer::PeerId, pool::PoolSnapshot, torrent::Metainfo, tracker::Node,
+    },
 };
 
 pub struct Download {
@@ -26,6 +29,18 @@ pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Downlo
     let metainfo = Arc::new(
         Metainfo::try_from(torrent_file).map_err(|e| Error::InvalidTorrentFile(e.to_string()))?,
     );
+    start_download(metainfo, output_dir).await
+}
+
+pub async fn download_magnet(magnet: &str, output_dir: PathBuf) -> Result<Download> {
+    let magnet = MagnetLink::try_from(magnet)?;
+    print!("magnet: {:#?}", magnet);
+    let metainfo = fetch_metadata(magnet).await?;
+
+    start_download(metainfo, output_dir).await
+}
+
+async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<Download> {
     let node = Node {
         id: PeerId::generate("TT", "0.1.0"),
         port: 1234,

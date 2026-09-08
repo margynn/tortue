@@ -23,7 +23,6 @@ pub async fn fetch_metadata(magnet: MagnetLink) -> Result<Arc<Metainfo>> {
         }
     }
 
-    let peers: Vec<SocketAddr> = magnet.peers.iter().filter_map(|s| s.parse().ok()).collect();
     let connector = TcpPeerConnector::new(node.id, magnet.info_hash, None);
     let mut metadata_io = MetadataIO::new(magnet, peers_rx, connector);
     let raw_info = metadata_io.run().await?; // bloque jusqu'à Done
