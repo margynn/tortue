@@ -119,6 +119,7 @@ impl Pool {
         }
     }
 
+    // TODO: depending on the pieces we already have / send bitfield / HaveAll / HaveNone etc...
     fn on_connected(
         &mut self,
         addr: SocketAddr,
@@ -151,6 +152,21 @@ impl Pool {
             return vec![];
         };
         state.apply(&message);
+
+        // BEP 6 Safety
+        match message {
+            Message::HaveAll
+            | Message::HaveNone
+            | Message::SuggestPiece(_)
+            | Message::RejectRequest { .. }
+            | Message::AllowedFast(_)
+                if !state.fast =>
+            {
+                return vec![Output::DisconnectPeer(addr)];
+            },
+            _ => {},
+        };
+
         match message {
             Message::Bitfield(bits) => self.on_message_bitfield(addr, bits),
             Message::Have(piece_index) => self.on_message_have(addr, piece_index),
@@ -178,18 +194,33 @@ impl Pool {
                 piece_len,
             } => self.on_message_request(addr, piece_index, piece_offset, piece_len),
             Message::Cancel { .. } => vec![],
+            Message::KeepAlive => vec![],
+            Message::Unimplemented => vec![],
+
+            // BEP 10
             Message::ExtensionHandshake(_) => vec![],
             Message::Extension { ext_id, payload } => {
                 self.on_extension_message(addr, ext_id, &payload)
             },
-            Message::Unimplemented => vec![],
-            Message::KeepAlive => vec![],
-            // BEP 6 - not yet handled
-            Message::HaveAll
-            | Message::HaveNone
-            | Message::SuggestPiece(_)
-            | Message::RejectRequest { .. }
-            | Message::AllowedFast(_) => vec![],
+
+            // BEP 6
+            Message::HaveAll => self.interested_or_request(addr),
+            Message::HaveNone => vec![],
+            Message::SuggestPiece(_) => vec![],
+            Message::RejectRequest {
+                piece_index,
+                piece_offset,
+                ..
+            } => {
+                let block_ref = BlockRef {
+                    piece_index,
+                    piece_offset,
+                };
+                self.block_assignments.remove(&block_ref);
+                self.pieces.reset_block(block_ref);
+                self.schedule_requests()
+            },
+            Message::AllowedFast(_) => self.interested_or_request(addr),
         }
     }
 
@@ -206,6 +237,7 @@ impl Pool {
             }];
         }
         if peer.peer_choking {
+            // TODO: allow if peer has fast lane
             return vec![]; // Already interested, waiting for unchoke.
         }
         self.schedule_requests()
@@ -418,6 +450,7 @@ struct PeerState {
     peer_choking: bool,
     peer_interested: bool,
     bitfield: Bitfield,
+    allowed_fast: HashSet<usize>,
     dht: bool,
     fast: bool,
     extensions: Option<ExtensionHandshake>, // BEP 10
@@ -433,6 +466,7 @@ impl PeerState {
             peer_choking: true,
             peer_interested: false,
             bitfield: Bitfield::new(pieces),
+            allowed_fast: HashSet::new(),
             dht: extensions.dht,
             fast: extensions.fast,
             extensions: None,
@@ -460,10 +494,16 @@ impl PeerState {
             Message::ExtensionHandshake(hs) => self.extensions = Some(hs.clone()),
             Message::Extension { .. } => {},
             Message::SuggestPiece(_) => {},
-            Message::HaveAll => {},
-            Message::HaveNone => {},
+            Message::HaveAll => {
+                self.bitfield.set_all();
+            },
+            Message::HaveNone => {
+                self.bitfield.unset_all();
+            },
             Message::RejectRequest { .. } => {},
-            Message::AllowedFast(_) => {},
+            Message::AllowedFast(piece) => {
+                self.allowed_fast.insert(*piece);
+            },
             Message::Unimplemented => {},
         }
     }
