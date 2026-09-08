@@ -5,24 +5,26 @@ use tokio::{
     task::JoinHandle,
 };
 
+use super::{
+    errors::{Error, Result},
+    ports::peer_source::PeerSource,
+};
 use crate::{
     adapters::{
         disk_storage::DiskStorage, peer_io::TcpPeerConnector, pool_io::PoolIO,
         tracker_io::TrackerIO,
     },
-    application::{errors::DownloadError, ports::peer_source::PeerSource},
     domain::{peer::PeerId, pool::PoolSnapshot, torrent::Metainfo, tracker::Node},
 };
 
 pub struct Download {
     pub progress: watch::Receiver<PoolSnapshot>,
-    pub task: JoinHandle<Result<(), DownloadError>>,
+    pub task: JoinHandle<Result<()>>,
 }
 
-pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Download, DownloadError> {
+pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Download> {
     let metainfo = Arc::new(
-        Metainfo::try_from(torrent_file)
-            .map_err(|e| DownloadError::InvalidTorrentFile(e.to_string()))?,
+        Metainfo::try_from(torrent_file).map_err(|e| Error::InvalidTorrentFile(e.to_string()))?,
     );
     let node = Node {
         id: PeerId::generate("TT", "0.1.0"),
@@ -54,11 +56,8 @@ pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Downlo
         storage,
         progress_tx,
     );
-    let task = tokio::spawn(async move {
-        pool.run()
-            .await
-            .map_err(|e| DownloadError::Failed(e.to_string()))
-    });
+    let task =
+        tokio::spawn(async move { pool.run().await.map_err(|e| Error::Failed(e.to_string())) });
 
     Ok(Download {
         progress: progress_rx,

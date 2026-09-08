@@ -42,14 +42,16 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct TcpPeerConnector {
     client_id: PeerId,
-    metainfo: Arc<Metainfo>,
+    info_hash: InfoHash,
+    metadata_size: usize,
 }
 
 impl TcpPeerConnector {
     pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         Self {
             client_id,
-            metainfo,
+            info_hash: metainfo.hash,
+            metadata_size: metainfo.info_bytes.len(),
         }
     }
 }
@@ -61,7 +63,41 @@ impl PeerConnector for TcpPeerConnector {
         cmd_rx: mpsc::Receiver<Message>,
         evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) {
-        let mut runner = PeerIO::new(addr, self.client_id, Arc::clone(&self.metainfo));
+        let config = PeerConfig {
+            info_hash: self.info_hash,
+            metadata_size: Some(self.metadata_size),
+        };
+        let mut runner = PeerIO::new(addr, self.client_id, config);
+        tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
+    }
+}
+
+pub struct MetadataPeerConnector {
+    client_id: PeerId,
+    info_hash: InfoHash,
+}
+
+impl MetadataPeerConnector {
+    pub fn new(client_id: PeerId, info_hash: InfoHash) -> Self {
+        Self {
+            client_id,
+            info_hash,
+        }
+    }
+}
+
+impl PeerConnector for MetadataPeerConnector {
+    fn connect(
+        &self,
+        addr: SocketAddr,
+        cmd_rx: mpsc::Receiver<Message>,
+        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) {
+        let config = PeerConfig {
+            info_hash: self.info_hash,
+            metadata_size: None,
+        };
+        let mut runner = PeerIO::new(addr, self.client_id, config);
         tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
     }
 }
@@ -69,7 +105,12 @@ impl PeerConnector for TcpPeerConnector {
 pub struct PeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
-    metainfo: Arc<Metainfo>,
+    config: PeerConfig,
+}
+
+struct PeerConfig {
+    info_hash: InfoHash,
+    metadata_size: Option<usize>,
 }
 
 impl PeerIO {
@@ -80,11 +121,11 @@ impl PeerIO {
     const READ_TIMEOUT: Duration = Duration::from_secs(30);
     const MAX_RECONNECTION: usize = 10;
 
-    fn new(peer_addr: SocketAddr, client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
+    fn new(peer_addr: SocketAddr, client_id: PeerId, config: PeerConfig) -> Self {
         Self {
             client_id,
             peer_addr,
-            metainfo,
+            config,
         }
     }
 
@@ -199,7 +240,7 @@ impl PeerIO {
         let extension_protocol = true; // BEP 10
         let dht_protocol = false;
         let fast_extension = false;
-        let info_hash = self.metainfo.hash;
+        let info_hash = self.config.info_hash;
         let peer_id = self.client_id;
 
         let outbound = Handshake::new(
@@ -223,7 +264,7 @@ impl PeerIO {
 
         let inbound = Handshake::decode(&buf)?;
 
-        if inbound.info_hash != self.metainfo.hash {
+        if inbound.info_hash != self.config.info_hash {
             return Err(Error::InfoHashMismatch);
         }
 
@@ -240,7 +281,7 @@ impl PeerIO {
                 ipv4: None,
                 ipv6: None,
                 reqq: None,
-                metadata_size: Some(self.metainfo.info_bytes.len()),
+                metadata_size: self.config.metadata_size,
             });
             timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.encode()))
                 .await
