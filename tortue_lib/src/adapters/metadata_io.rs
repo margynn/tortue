@@ -49,8 +49,21 @@ impl<C: PeerConnector> MetadataIO<C> {
     }
 
     pub async fn run(&mut self) -> Result<Vec<u8>> {
-        // let peers: Vec<SocketAddr> = self.magnet.peers.iter().filter_map(|s| s.parse().ok()).collect();
         let mut metadata_fetcher = Metadata::new(self.magnet.info_hash);
+
+        let initial_peers: Vec<SocketAddr> = self
+            .magnet
+            .peers
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if !initial_peers.is_empty() {
+            for out in metadata_fetcher.step(Input::PeersDiscovered(initial_peers)) {
+                if let Some(buffer) = self.handle_output(out) {
+                    return Ok(buffer);
+                }
+            }
+        }
 
         loop {
             let input = tokio::select! {
