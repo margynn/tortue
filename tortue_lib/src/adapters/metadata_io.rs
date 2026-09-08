@@ -4,7 +4,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     InfoHash,
-    domain::{message::Message, peer::PeerEvent},
+    application::ports::peer_connector::PeerConnector,
+    domain::{magnet::MagnetLink, message::Message, peer::PeerEvent},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -14,32 +15,32 @@ pub enum Error {
 }
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct MetadataIO {
-    info_hash: InfoHash,
-    trackers: Vec<String>,
-    initial_peers: Vec<SocketAddr>, // from x.pe in magnet link
-    peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
-    peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+pub struct MetadataIO<C> {
+    magnet: MagnetLink,
+    peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+    // peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
+    // peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    // peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+    peer_connector: C,
 }
 
-impl MetadataIO {
-    pub fn new() -> Self {
+impl<C: PeerConnector> MetadataIO<C> {
+    pub fn new(
+        magnet: MagnetLink,
+        peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+        peer_connector: C,
+    ) -> Self {
         Self {
-            info_hash: (),
-            trackers: (),
-            initial_peers: (),
-            peer_cmds: (),
-            peer_events_tx: (),
-            peer_events_rx: (),
+            magnet,
+            peers_rx,
+            // peer_cmds: (),
+            // peer_events_tx: (),
+            // peer_events_rx: (),
+            peer_connector,
         }
     }
 
-    pub async fn run(
-        info_hash: InfoHash,
-        trackers: Vec<String>,
-        initial_peers: Vec<SocketAddr>,
-    ) -> Result<Vec<u8>> {
+    pub async fn run(&mut self) -> Result<Vec<u8>> {
         todo!()
     }
 }

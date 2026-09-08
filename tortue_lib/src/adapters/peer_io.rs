@@ -42,16 +42,23 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct TcpPeerConnector {
     client_id: PeerId,
+    peer_config: PeerConfig,
+}
+
+#[derive(Clone, Copy)]
+struct PeerConfig {
     info_hash: InfoHash,
-    metadata_size: usize,
+    metadata_size: Option<usize>,
 }
 
 impl TcpPeerConnector {
-    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
+    pub fn new(client_id: PeerId, info_hash: InfoHash, metadata_size: Option<usize>) -> Self {
         Self {
             client_id,
-            info_hash: metainfo.hash,
-            metadata_size: metainfo.info_bytes.len(),
+            peer_config: PeerConfig {
+                info_hash,
+                metadata_size,
+            },
         }
     }
 }
@@ -63,57 +70,18 @@ impl PeerConnector for TcpPeerConnector {
         cmd_rx: mpsc::Receiver<Message>,
         evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) {
-        let config = PeerConfig {
-            info_hash: self.info_hash,
-            metadata_size: Some(self.metadata_size),
-        };
-        let mut runner = PeerIO::new(addr, self.client_id, config);
+        let mut runner = TcpPeerIO::new(addr, self.client_id, self.peer_config);
         tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
     }
 }
 
-pub struct MetadataPeerConnector {
-    client_id: PeerId,
-    info_hash: InfoHash,
-}
-
-impl MetadataPeerConnector {
-    pub fn new(client_id: PeerId, info_hash: InfoHash) -> Self {
-        Self {
-            client_id,
-            info_hash,
-        }
-    }
-}
-
-impl PeerConnector for MetadataPeerConnector {
-    fn connect(
-        &self,
-        addr: SocketAddr,
-        cmd_rx: mpsc::Receiver<Message>,
-        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    ) {
-        let config = PeerConfig {
-            info_hash: self.info_hash,
-            metadata_size: None,
-        };
-        let mut runner = PeerIO::new(addr, self.client_id, config);
-        tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
-    }
-}
-
-pub struct PeerIO {
+struct TcpPeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
     config: PeerConfig,
 }
 
-struct PeerConfig {
-    info_hash: InfoHash,
-    metadata_size: Option<usize>,
-}
-
-impl PeerIO {
+impl TcpPeerIO {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
@@ -292,12 +260,12 @@ impl PeerIO {
     }
 }
 
-pub struct Handshake {
-    pub info_hash: InfoHash,
-    pub peer_id: PeerId,
-    pub dht_protocol: bool,
-    pub extension_protocol: bool,
-    pub fast_extension: bool,
+struct Handshake {
+    info_hash: InfoHash,
+    peer_id: PeerId,
+    dht_protocol: bool,
+    extension_protocol: bool,
+    fast_extension: bool,
 }
 
 impl Handshake {

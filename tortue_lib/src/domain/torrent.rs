@@ -29,7 +29,7 @@ pub struct Metainfo {
     pub created_at: Option<i64>,
     pub url_list: Option<Vec<String>>,
     pub info_bytes: Vec<u8>,
-    pub hash: InfoHash,
+    pub info_hash: InfoHash,
     pub piece_length: usize,
     pub pieces: Vec<PieceHash>,
     pub mode: Mode,
@@ -104,7 +104,7 @@ impl TryFrom<&[u8]> for Metainfo {
         Ok(Metainfo {
             announce,
             name,
-            hash,
+            info_hash: hash,
             piece_length,
             pieces,
             mode,

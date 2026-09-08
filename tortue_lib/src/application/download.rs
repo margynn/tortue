@@ -33,7 +33,7 @@ pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Downlo
 
     let (peers_tx, peers_rx) = mpsc::channel(128);
     for url in &metainfo.announce {
-        if let Ok(source) = TrackerIO::new(url, Arc::clone(&metainfo), node) {
+        if let Ok(source) = TrackerIO::new(url, metainfo.info_hash, node) {
             let tx = peers_tx.clone();
             tokio::spawn(async move { PeerSource::run(source, tx).await });
         }
@@ -47,7 +47,8 @@ pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Downlo
     };
     let (progress_tx, progress_rx) = watch::channel(initial);
 
-    let connector = TcpPeerConnector::new(node.id, Arc::clone(&metainfo));
+    let connector =
+        TcpPeerConnector::new(node.id, metainfo.info_hash, Some(metainfo.info_bytes.len()));
     let storage = DiskStorage::new(&metainfo, output_dir).await?;
     let mut pool = PoolIO::new(
         Arc::clone(&metainfo),

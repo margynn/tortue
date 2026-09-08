@@ -164,7 +164,7 @@ pub struct MetadataPeerConnector {
 }
 ```
 
-The difference in `connect()` vs the existing `PeerIO::connect()`:
+The difference in `connect()` vs the existing `TcpPeerIO::connect()`:
 
 - Use `info_hash` directly instead of `self.metainfo.hash`.
 - Send extension handshake with `metadata_size: None` (we don't know it yet).

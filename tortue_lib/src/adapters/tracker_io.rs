@@ -1,6 +1,5 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::Duration,
 };
 
@@ -14,10 +13,10 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::{
+    InfoHash,
     application::ports::peer_source::PeerSource,
-    domain::bencode::Bencode,
     domain::{
-        torrent::Metainfo,
+        bencode::Bencode,
         tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse},
     },
 };
@@ -66,7 +65,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct TrackerIO {
     client: TrackerClient,
-    metainfo: Arc<Metainfo>,
+    info_hash: InfoHash,
     node: Node,
 }
 
@@ -74,11 +73,11 @@ impl TrackerIO {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub fn new(url: &str, metainfo: Arc<Metainfo>, node: Node) -> Result<Self> {
+    pub fn new(url: &str, info_hash: InfoHash, node: Node) -> Result<Self> {
         let client = TrackerClient::new(url)?;
         Ok(Self {
             client,
-            metainfo,
+            info_hash,
             node,
         })
     }
@@ -96,14 +95,14 @@ impl PeerSource for TrackerIO {
             tokio::time::sleep(interval).await;
 
             let req = AnnounceRequest {
-                info_hash: self.metainfo.hash,
+                info_hash: self.info_hash,
                 peer_id: self.node.id,
                 port: self.node.port,
-                // TODO: update
+                // TODO: Find a way to share session stats
                 stats: SessionStats {
                     uploaded: 0,
                     downloaded: 0,
-                    left: self.metainfo.total_size(),
+                    left: 0,
                 },
                 event: next_event.take().unwrap_or(AnnounceEvent::None),
                 compact: true,
