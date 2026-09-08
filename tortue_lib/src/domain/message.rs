@@ -17,6 +17,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 pub enum Message {
+    // BEP 3 - Core
     KeepAlive,
     Choke,
     Unchoke,
@@ -39,11 +40,26 @@ pub enum Message {
         piece_offset: usize,
         piece_len: usize,
     },
+
+    // BEP 10 - Extension Protocol
     ExtensionHandshake(ExtensionHandshake),
     Extension {
         ext_id: u8,
         payload: Vec<u8>,
     },
+
+    // BEP 6 - Fast Extension
+    SuggestPiece(usize),
+    HaveAll,
+    HaveNone,
+    RejectRequest {
+        piece_index: usize,
+        piece_offset: usize,
+        piece_len: usize,
+    },
+    AllowedFast(usize),
+
+    // Safety
     Unimplemented,
 }
 
@@ -61,75 +77,97 @@ pub struct ExtensionHandshake {
 }
 
 impl Message {
+    /// Encodes the message as [msg_id][data...].
+    /// Does NOT include the 4-byte TCP length prefix — framing is the transport layer's
+    /// responsibility. See `frame()` in peer_io, which is the symmetric counterpart of
+    /// `Message::read_from` (strip length → decode vs encode → prepend length).
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
         match self {
-            Message::KeepAlive => buf.extend_from_slice(&0u32.to_be_bytes()),
-            Message::Choke => buf.extend_from_slice(&[0, 0, 0, 1, 0]),
-            Message::Unchoke => buf.extend_from_slice(&[0, 0, 0, 1, 1]),
-            Message::Interested => buf.extend_from_slice(&[0, 0, 0, 1, 2]),
-            Message::NotInterested => buf.extend_from_slice(&[0, 0, 0, 1, 3]),
+            // KeepAlive has no msg_id — empty payload frames as [0,0,0,0]
+            Message::KeepAlive => vec![],
+            Message::Choke => vec![0],
+            Message::Unchoke => vec![1],
+            Message::Interested => vec![2],
+            Message::NotInterested => vec![3],
             Message::Have(piece) => {
-                buf.extend_from_slice(&5u32.to_be_bytes());
-                buf.push(4);
+                let mut buf = vec![4];
                 buf.extend_from_slice(&(*piece as u32).to_be_bytes());
+                buf
             },
             Message::Bitfield(bits) => {
-                buf.extend_from_slice(&(1 + bits.len() as u32).to_be_bytes());
-                buf.push(5);
+                let mut buf = vec![5];
                 buf.extend_from_slice(bits);
+                buf
             },
             Message::Request {
                 piece_index,
                 piece_offset,
                 piece_len,
             } => {
-                buf.extend_from_slice(&13u32.to_be_bytes());
-                buf.push(6);
+                let mut buf = vec![6];
                 buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
                 buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
                 buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
+                buf
             },
             Message::Piece {
                 piece_index,
                 piece_offset,
                 data,
             } => {
-                buf.extend_from_slice(&(9 + data.len() as u32).to_be_bytes());
-                buf.push(7);
+                let mut buf = vec![7];
                 buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
                 buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
                 buf.extend_from_slice(data);
+                buf
             },
             Message::Cancel {
                 piece_index,
                 piece_offset,
                 piece_len,
             } => {
-                buf.extend_from_slice(&13u32.to_be_bytes());
-                buf.push(8);
+                let mut buf = vec![8];
                 buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
                 buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
                 buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
+                buf
             },
             Message::ExtensionHandshake(hs) => {
-                let payload = hs.encode();
-                // [len][0x14][0x00][bencoded]
-                buf.extend_from_slice(&(2 + payload.len() as u32).to_be_bytes());
-                buf.push(20);
-                buf.push(0);
-                buf.extend_from_slice(&payload);
+                // ext_id 0 = handshake (BEP 10)
+                let mut buf = vec![20, 0];
+                buf.extend_from_slice(&hs.encode());
+                buf
             },
             Message::Extension { ext_id, payload } => {
-                // [len][0x14][ext_id][payload]
-                buf.extend_from_slice(&(2 + payload.len() as u32).to_be_bytes());
-                buf.push(20);
-                buf.push(*ext_id);
+                let mut buf = vec![20, *ext_id];
                 buf.extend_from_slice(payload);
+                buf
             },
-            Message::Unimplemented => {},
+            Message::HaveAll => vec![14],
+            Message::HaveNone => vec![15],
+            Message::SuggestPiece(piece) => {
+                let mut buf = vec![13];
+                buf.extend_from_slice(&(*piece as u32).to_be_bytes());
+                buf
+            },
+            Message::RejectRequest {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => {
+                let mut buf = vec![16];
+                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
+                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
+                buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
+                buf
+            },
+            Message::AllowedFast(piece) => {
+                let mut buf = vec![17];
+                buf.extend_from_slice(&(*piece as u32).to_be_bytes());
+                buf
+            },
+            Message::Unimplemented => vec![],
         }
-        buf
     }
 
     pub fn decode(data: &[u8]) -> Result<Self> {
@@ -149,9 +187,7 @@ impl Message {
                 if payload.len() != 4 {
                     return Err(Error::InvalidMessage);
                 }
-                Ok(Message::Have(u32::from_be_bytes(
-                    payload.try_into().map_err(|_| Error::InvalidMessage)?,
-                ) as usize))
+                Ok(Message::Have(Self::read_u32(payload, 0)?))
             },
             5 => Ok(Message::Bitfield(payload.to_vec())),
             6 => {
@@ -159,21 +195,9 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Request {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_len: u32::from_be_bytes(
-                        payload[8..12]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
+                    piece_index: Self::read_u32(payload, 0)?,
+                    piece_offset: Self::read_u32(payload, 4)?,
+                    piece_len: Self::read_u32(payload, 8)?,
                 })
             },
             7 => {
@@ -181,16 +205,8 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Piece {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
+                    piece_index: Self::read_u32(payload, 0)?,
+                    piece_offset: Self::read_u32(payload, 4)?,
                     data: payload[8..].to_vec(),
                 })
             },
@@ -199,21 +215,9 @@ impl Message {
                     return Err(Error::InvalidMessage);
                 }
                 Ok(Message::Cancel {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_len: u32::from_be_bytes(
-                        payload[8..12]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
+                    piece_index: Self::read_u32(payload, 0)?,
+                    piece_offset: Self::read_u32(payload, 4)?,
+                    piece_len: Self::read_u32(payload, 8)?,
                 })
             },
             20 => {
@@ -233,15 +237,47 @@ impl Message {
                     payload: ext_payload.to_vec(),
                 })
             },
+            13 => {
+                if payload.len() != 4 {
+                    return Err(Error::InvalidMessage);
+                }
+                Ok(Message::SuggestPiece(Self::read_u32(payload, 0)?))
+            },
+            14 => Ok(Message::HaveAll),
+            15 => Ok(Message::HaveNone),
+            16 => {
+                if payload.len() != 12 {
+                    return Err(Error::InvalidMessage);
+                }
+                Ok(Message::RejectRequest {
+                    piece_index: Self::read_u32(payload, 0)?,
+                    piece_offset: Self::read_u32(payload, 4)?,
+                    piece_len: Self::read_u32(payload, 8)?,
+                })
+            },
+            17 => {
+                if payload.len() != 4 {
+                    return Err(Error::InvalidMessage);
+                }
+                Ok(Message::AllowedFast(Self::read_u32(payload, 0)?))
+            },
             _ => Ok(Message::Unimplemented),
         }
+    }
+
+    fn read_u32(payload: &[u8], offset: usize) -> Result<usize> {
+        Ok(u32::from_be_bytes(
+            payload[offset..offset + 4]
+                .try_into()
+                .map_err(|_| Error::InvalidMessage)?,
+        ) as usize)
     }
 }
 
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Piece {
+            Message::Piece {
                 piece_index,
                 piece_offset,
                 data,
@@ -251,14 +287,14 @@ impl fmt::Debug for Message {
                 .field("piece_offset", piece_offset)
                 .field("data", &data.len())
                 .finish(),
-            Self::Bitfield(bits) => write!(f, "Bitfield({} bytes)", bits.len()),
-            Self::KeepAlive => write!(f, "KeepAlive"),
-            Self::Choke => write!(f, "Choke"),
-            Self::Unchoke => write!(f, "Unchoke"),
-            Self::Interested => write!(f, "Interested"),
-            Self::NotInterested => write!(f, "NotInterested"),
-            Self::Have(piece) => write!(f, "Have({piece})"),
-            Self::Request {
+            Message::Bitfield(bits) => write!(f, "Bitfield({} bytes)", bits.len()),
+            Message::KeepAlive => write!(f, "KeepAlive"),
+            Message::Choke => write!(f, "Choke"),
+            Message::Unchoke => write!(f, "Unchoke"),
+            Message::Interested => write!(f, "Interested"),
+            Message::NotInterested => write!(f, "NotInterested"),
+            Message::Have(piece) => write!(f, "Have({piece})"),
+            Message::Request {
                 piece_index,
                 piece_offset,
                 piece_len,
@@ -268,7 +304,7 @@ impl fmt::Debug for Message {
                 .field("piece_offset", piece_offset)
                 .field("piece_len", piece_len)
                 .finish(),
-            Self::Cancel {
+            Message::Cancel {
                 piece_index,
                 piece_offset,
                 piece_len,
@@ -278,11 +314,25 @@ impl fmt::Debug for Message {
                 .field("piece_offset", piece_offset)
                 .field("piece_len", piece_len)
                 .finish(),
-            Self::ExtensionHandshake(_) => f.debug_struct("ExtensionHandshake").finish(),
-            Self::Extension { ext_id, .. } => {
+            Message::ExtensionHandshake(_) => f.debug_struct("ExtensionHandshake").finish(),
+            Message::Extension { ext_id, .. } => {
                 f.debug_struct("Extension").field("ext_id", ext_id).finish()
             },
-            Self::Unimplemented => f.debug_struct("Unimplemented").finish(),
+            Message::SuggestPiece(piece) => write!(f, "SuggestPiece({piece})"),
+            Message::HaveAll => f.debug_struct("HaveAll").finish(),
+            Message::HaveNone => f.debug_struct("HaveNone").finish(),
+            Message::RejectRequest {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => f
+                .debug_struct("RejectRequest")
+                .field("piece_index", piece_index)
+                .field("piece_offset", piece_offset)
+                .field("piece_len", piece_len)
+                .finish(),
+            Message::AllowedFast(piece) => write!(f, "AllowedFast({piece})"),
+            Message::Unimplemented => f.debug_struct("Unimplemented").finish(),
         }
     }
 }

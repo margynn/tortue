@@ -137,7 +137,7 @@ impl TcpPeerIO {
                             break 'run
                         },
                         Some(msg) => {
-                            if writer.write_all(&msg.encode()).await.is_err() {
+                            if writer.write_all(&msg.frame()).await.is_err() {
                                 break
                             }
                         },
@@ -146,7 +146,7 @@ impl TcpPeerIO {
                     _ = &mut read_task => break,
 
                     _ = keepalive.tick() => {
-                        if writer.write_all(&Message::KeepAlive.encode()).await.is_err() {
+                        if writer.write_all(&Message::KeepAlive.frame()).await.is_err() {
                            break
                         }
                      },
@@ -205,9 +205,10 @@ impl TcpPeerIO {
             .await
             .map_err(|_| Error::Timeout)??;
 
+        // Extension configuration during handshake
         let extension_protocol = true; // BEP 10
+        let fast_extension = true; // BEP 6
         let dht_protocol = false;
-        let fast_extension = false;
         let info_hash = self.config.info_hash;
         let peer_id = self.client_id;
 
@@ -251,7 +252,7 @@ impl TcpPeerIO {
                 reqq: None,
                 metadata_size: self.config.metadata_size,
             });
-            timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.encode()))
+            timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.frame()))
                 .await
                 .map_err(|_| Error::Timeout)??;
         }
@@ -362,33 +363,30 @@ impl Handshake {
     }
 }
 
+// TCP framing for the BitTorrent wire protocol (BEP 3):
+//
+//   send:    msg.encode() → [id][data...]  →  msg.frame() → [len][id][data...]
+//   receive: Message::read_from() strips [len] → [id][data...]  →  Message::decode()
+//
+//   +------------------+-----+------------------+
+//   | length (4 bytes) |  id |  data            |
+//   +------------------+-----+------------------+
+//
+// length = number of bytes after the 4-byte prefix (id + data).
+// KeepAlive is the special case: length = 0, no id, no data.
+
 impl Message {
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1Mb
 
-    async fn read_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
-        // BitTorrent message framing (BEP 3):
-        //
-        // Every message is prefixed with a 4-byte big-endian length:
-        //
-        //   +-------------------+----------------------+
-        //   | length (4 bytes)  | payload (length bytes)|
-        //   +-------------------+----------------------+
-        //
-        // `length` does not include the 4-byte length prefix itself.
-        //
-        // A length of 0 is a keep-alive message:
-        //
-        //   +-------------------+
-        //   | 0x00 00 00 00     |
-        //   +-------------------+
-        //
-        // For regular messages, the first byte of the payload is the
-        // BitTorrent message ID:
-        //
-        //   +-------------------+------+----------------+
-        //   | length (4 bytes)  |  ID  | payload        |
-        //   +-------------------+------+----------------+
+    fn frame(&self) -> Vec<u8> {
+        let payload = self.encode();
+        let mut buf = Vec::with_capacity(4 + payload.len());
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&payload);
+        buf
+    }
 
+    async fn read_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
         let mut header = [0u8; 4];
         reader.read_exact(&mut header).await?;
 
