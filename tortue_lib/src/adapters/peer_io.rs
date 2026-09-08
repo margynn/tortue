@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -13,7 +13,7 @@ use crate::{
     domain::{
         message::{Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID},
         peer::{PeerEvent, PeerExtensions, PeerId},
-        torrent::{InfoHash, Metainfo},
+        torrent::InfoHash,
     },
 };
 

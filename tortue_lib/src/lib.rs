@@ -5,6 +5,6 @@ mod domain;
 pub use application::{download::*, errors::Error, metainfo::*};
 pub use domain::{
     magnet::MagnetLink,
-    pool::{PeerInfo, PoolSnapshot},
+    pool::PoolSnapshot,
     torrent::{File, InfoHash, Metainfo, Mode},
 };

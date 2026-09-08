@@ -57,12 +57,7 @@ pub struct PoolSnapshot {
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
-    pub peers: Vec<PeerInfo>,
-}
-
-pub struct PeerInfo {
-    pub addr: SocketAddr,
-    pub state: PeerState,
+    pub peers: Vec<SocketAddr>,
 }
 
 impl Pool {
@@ -78,20 +73,11 @@ impl Pool {
     }
 
     pub fn snapshot(&self) -> PoolSnapshot {
-        let peers = self
-            .peers
-            .iter()
-            .map(|(addr, s)| PeerInfo {
-                addr: *addr,
-                state: s.clone(),
-            })
-            .collect();
-
         PoolSnapshot {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.len(),
-            peers,
+            peers: self.peers.keys().map(|addr| *addr).collect(),
         }
     }
 

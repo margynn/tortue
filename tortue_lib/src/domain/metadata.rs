@@ -3,23 +3,13 @@ use std::net::SocketAddr;
 
 use sha1::{Digest, Sha1};
 
-use crate::domain::peer::{PeerExtensions, PeerId};
-
 use super::message::{Message, UtMetadataMessage};
 use super::torrent::InfoHash;
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
-    PeerConnected {
-        addr: SocketAddr,
-        peer_id: PeerId,
-        peer_extensions: PeerExtensions,
-    },
     PeerDisconnected(SocketAddr),
-    MessageReceived {
-        addr: SocketAddr,
-        message: Message,
-    },
+    MessageReceived { addr: SocketAddr, message: Message },
 }
 
 pub enum Output {
@@ -58,7 +48,6 @@ impl Metadata {
                 vec![]
             },
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            Input::PeerConnected { .. } => vec![],
         }
     }
 
