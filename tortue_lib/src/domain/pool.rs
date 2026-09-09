@@ -119,7 +119,6 @@ impl Pool {
         }
     }
 
-    // TODO: depending on the pieces we already have / send bitfield / HaveAll / HaveNone etc...
     fn on_connected(
         &mut self,
         addr: SocketAddr,
@@ -133,8 +132,28 @@ impl Pool {
             .entry(addr)
             .insert_entry(PeerState::new(addr, peer_id, pieces, extensions));
 
-        self.release_peer_blocks(addr);
-        self.interested_or_request(addr)
+        // Communicate the pieces we have
+        let mut out = vec![];
+        if extensions.fast {
+            if self.pieces.is_complete() {
+                out.push(Output::SendToPeer {
+                    addr,
+                    message: Message::HaveAll,
+                });
+            }
+            if self.pieces.is_empty() {
+                out.push(Output::SendToPeer {
+                    addr,
+                    message: Message::HaveNone,
+                });
+            }
+        }
+        out.push(Output::SendToPeer {
+            addr,
+            message: Message::Bitfield(self.pieces.bitfield.clone().into()),
+        });
+        out.extend(self.interested_or_request(addr));
+        out
     }
 
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
@@ -206,7 +225,7 @@ impl Pool {
             // BEP 6
             Message::HaveAll => self.interested_or_request(addr),
             Message::HaveNone => vec![],
-            Message::SuggestPiece(_) => vec![],
+            Message::SuggestPiece(piece_index) => self.on_message_suggest_piece(addr, piece_index),
             Message::RejectRequest {
                 piece_index,
                 piece_offset,
@@ -218,7 +237,7 @@ impl Pool {
                 };
                 self.block_assignments.remove(&block_ref);
                 self.pieces.reset_block(block_ref);
-                self.schedule_requests()
+                self.interested_or_request(addr)
             },
             Message::AllowedFast(_) => self.interested_or_request(addr),
         }
@@ -264,7 +283,7 @@ impl Pool {
 
     fn on_message_choke(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.release_peer_blocks(addr);
-        self.schedule_requests()
+        self.interested_or_request(addr)
     }
 
     fn on_message_request(
@@ -361,11 +380,35 @@ impl Pool {
         }
     }
 
+    fn on_message_suggest_piece(&mut self, addr: SocketAddr, piece_index: usize) -> Vec<Output> {
+        if !self.pieces.needed_pieces().any(|p| p == piece_index) {
+            return vec![]; // already have it
+        }
+
+        let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
+        let mut outputs = vec![];
+        for block_range in missing {
+            let block_ref = BlockRef::from(&block_range);
+            self.block_assignments.insert(block_ref, addr);
+            let _ = self.pieces.request_block(block_ref);
+            outputs.push(Output::SendToPeer {
+                addr,
+                message: Message::Request {
+                    piece_index: block_range.piece_index,
+                    piece_offset: block_range.piece_offset,
+                    piece_len: block_range.piece_len,
+                },
+            });
+        }
+        outputs
+    }
+
     const MAX_IN_FLIGHT_PER_PEER: usize = 32;
 
     fn pick_peer<'a>(
         &self,
         peer_addrs: &'a [SocketAddr],
+        piece_index: usize,
         in_flight: &HashMap<SocketAddr, usize>,
         rng: &mut impl rand::Rng,
     ) -> Option<&'a SocketAddr> {
@@ -373,7 +416,7 @@ impl Pool {
             .iter()
             .filter(|addr| {
                 self.peers.get(addr).map_or(false, |s| {
-                    !s.peer_choking
+                    (!s.peer_choking || s.allowed_fast.contains(&piece_index))
                         && in_flight.get(addr).copied().unwrap_or(0) < Self::MAX_IN_FLIGHT_PER_PEER
                 })
             })
@@ -381,18 +424,10 @@ impl Pool {
     }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
-        // Build in_flight counts once — O(blocks) instead of O(blocks × peers)
+        // Build in_flight counts once
         let mut in_flight: HashMap<SocketAddr, usize> = HashMap::new();
         for &peer in self.block_assignments.values() {
             *in_flight.entry(peer).or_default() += 1;
-        }
-
-        let can_schedule = self.peers.iter().any(|(addr, s)| {
-            !s.peer_choking
-                && in_flight.get(addr).copied().unwrap_or(0) < Self::MAX_IN_FLIGHT_PER_PEER
-        });
-        if !can_schedule {
-            return vec![];
         }
 
         let mut rng = rand::rng();
@@ -420,7 +455,9 @@ impl Pool {
             for block_range in missing {
                 let block_ref = BlockRef::from(&block_range);
 
-                if let Some(&addr) = self.pick_peer(&peer_addrs, &in_flight, &mut rng) {
+                if let Some(&addr) =
+                    self.pick_peer(&peer_addrs, block_ref.piece_index, &in_flight, &mut rng)
+                {
                     *in_flight.entry(addr).or_default() += 1;
                     self.block_assignments.insert(block_ref, addr);
                     let _ = self.pieces.request_block(block_ref);

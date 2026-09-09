@@ -97,6 +97,12 @@ impl TryFrom<&[u8]> for Bitfield {
     }
 }
 
+impl From<Bitfield> for Vec<u8> {
+    fn from(value: Bitfield) -> Self {
+        value.data
+    }
+}
+
 impl<'a> IntoIterator for &'a Bitfield {
     type Item = usize;
     type IntoIter = BitfieldIter<'a>;

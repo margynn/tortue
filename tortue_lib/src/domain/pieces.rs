@@ -5,12 +5,18 @@ use std::{
 
 use sha1::{Digest, Sha1};
 
-use crate::domain::torrent::Metainfo;
+use crate::domain::{
+    bitfield::{self, Bitfield},
+    torrent::Metainfo,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("bitfield error: {0}")]
+    Bitfield(#[from] bitfield::Error),
 
     #[error("invalid block size: expected {expected}, got {actual}")]
     InvalidBlockSize { expected: usize, actual: usize },
@@ -38,6 +44,7 @@ pub enum PieceEvent {
 pub struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
+    pub bitfield: Bitfield,
 }
 
 pub struct BlockRange {
@@ -62,9 +69,11 @@ impl From<&BlockRange> for BlockRef {
 }
 
 impl PieceManager {
+    // TODO: should initialize with existing content when available
     pub fn new(metainfo: Arc<Metainfo>) -> Self {
         let piece_count = metainfo.pieces.len();
         let mut pieces = Vec::with_capacity(piece_count);
+        let bitfield = Bitfield::new(piece_count);
 
         for i in 0..piece_count {
             let piece_length = if i == piece_count - 1 {
@@ -75,7 +84,11 @@ impl PieceManager {
             pieces.push(Piece::new(piece_length));
         }
 
-        Self { metainfo, pieces }
+        Self {
+            metainfo,
+            pieces,
+            bitfield,
+        }
     }
 
     pub fn missing_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
@@ -101,6 +114,10 @@ impl PieceManager {
 
     pub fn is_complete(&self) -> bool {
         self.pieces.iter().all(|p| p.is_complete())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pieces.iter().all(|p| !p.is_complete())
     }
 
     pub fn reset_block(&mut self, block_ref: BlockRef) {
@@ -156,7 +173,7 @@ impl PieceManager {
         }
 
         let torrent_offset = piece_index as u64 * self.metainfo.piece_length as u64;
-
+        self.bitfield.set_bit(piece_index)?;
         Ok(PieceEvent::PieceCompleted {
             piece_index,
             piece_offset: torrent_offset,
