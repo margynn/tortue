@@ -405,34 +405,6 @@ impl Pool {
         }
     }
 
-    fn pick_peer<'a>(
-        &self,
-        peer_addrs: &'a [SocketAddr],
-        piece_index: usize,
-        rng: &mut impl rand::Rng,
-    ) -> Option<&'a SocketAddr> {
-        peer_addrs
-            .iter()
-            .filter(|addr| {
-                self.peers
-                    .get(addr)
-                    .is_some_and(|s| s.can_serve(piece_index))
-                    && self.block_assignments.has_capacity(**addr)
-            })
-            .choose(rng)
-    }
-
-    fn request_budget(&self) -> usize {
-        self.peers
-            .values()
-            .filter(|s| !s.peer_choking)
-            .map(|s| {
-                BlockAssignments::MAX_IN_FLIGHT_PER_PEER
-                    .saturating_sub(self.block_assignments.in_flight_for(s.addr))
-            })
-            .sum()
-    }
-
     fn schedule_requests(&mut self) -> Vec<Output> {
         // Each emitted request consumes exactly one free slot, so once the budget
         // is spent `pick_peer` would return None for every remaining block: the
@@ -479,6 +451,31 @@ impl Pool {
 
         outputs
     }
+
+    fn pick_peer<'a>(
+        &self,
+        peer_addrs: &'a [SocketAddr],
+        piece_index: usize,
+        rng: &mut impl rand::Rng,
+    ) -> Option<&'a SocketAddr> {
+        peer_addrs
+            .iter()
+            .filter(|addr| {
+                self.peers
+                    .get(addr)
+                    .is_some_and(|s| s.can_serve(piece_index))
+                    && self.block_assignments.has_capacity(**addr)
+            })
+            .choose(rng)
+    }
+
+    fn request_budget(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|s| !s.peer_choking)
+            .map(|s| self.block_assignments.free_slots_for(s.addr))
+            .sum()
+    }
 }
 
 struct BlockAssignments {
@@ -487,7 +484,7 @@ struct BlockAssignments {
 }
 
 impl BlockAssignments {
-    const MAX_IN_FLIGHT_PER_PEER: usize = 32;
+    const MAX_IN_FLIGHT_PER_PEER: usize = 16;
 
     fn new() -> Self {
         Self {
@@ -527,8 +524,12 @@ impl BlockAssignments {
         self.in_flight.get(&addr).copied().unwrap_or(0)
     }
 
+    fn free_slots_for(&self, addr: SocketAddr) -> usize {
+        Self::MAX_IN_FLIGHT_PER_PEER.saturating_sub(self.in_flight_for(addr))
+    }
+
     fn has_capacity(&self, addr: SocketAddr) -> bool {
-        self.in_flight_for(addr) < Self::MAX_IN_FLIGHT_PER_PEER
+        self.free_slots_for(addr) > 0
     }
 
     fn assigned_to(&self, block_ref: BlockRef) -> Option<SocketAddr> {
