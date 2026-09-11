@@ -422,16 +422,40 @@ impl Pool {
             .choose(rng)
     }
 
+    fn request_budget(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|s| !s.peer_choking)
+            .map(|s| {
+                BlockAssignments::MAX_IN_FLIGHT_PER_PEER
+                    .saturating_sub(self.block_assignments.in_flight_for(s.addr))
+            })
+            .sum()
+    }
+
     fn schedule_requests(&mut self) -> Vec<Output> {
+        // Each emitted request consumes exactly one free slot, so once the budget
+        // is spent `pick_peer` would return None for every remaining block: the
+        // breaks below stop useless work, they do not truncate the schedule.
+        let mut budget = self.request_budget();
+        if budget == 0 {
+            return vec![];
+        }
+
         let mut rng = rand::rng();
         let mut peer_addrs: Vec<SocketAddr> = Vec::new();
         let mut outputs = vec![];
 
-        // Needed pieces sorted by rarest first
+        // Needed pieces sorted by rarest first. Cached key: `rarity` hits a
+        // HashMap, and `sort_by_key` would re-evaluate it on every comparison.
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
-        needed.sort_by_key(|&piece| self.availability.rarity(piece));
+        needed.sort_by_cached_key(|&piece| self.availability.rarity(piece));
 
         for piece_index in needed {
+            if budget == 0 {
+                break;
+            }
+
             // Collect owned addrs — releases the borrow on self.availability before
             // the inner loop mutates self.peers.
             peer_addrs.clear(); // keep allocated capacity
@@ -442,8 +466,12 @@ impl Pool {
 
             let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
             for block_range in missing {
+                if budget == 0 {
+                    break;
+                }
                 if let Some(&addr) = self.pick_peer(&peer_addrs, block_range.piece_index, &mut rng)
                 {
+                    budget -= 1;
                     outputs.push(self.send_request(addr, block_range));
                 }
             }
