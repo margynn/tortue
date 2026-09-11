@@ -36,7 +36,6 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 
 Todo:
 
-- support endgame
 - send multi requests for blocks
 - support cancel requests
 - support connecting peers

@@ -50,6 +50,7 @@ pub struct PieceManager {
     pub bitfield: Bitfield,
 }
 
+#[derive(Clone, Copy)]
 pub struct BlockRange {
     pub piece_index: usize,
     pub piece_offset: usize,

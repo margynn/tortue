@@ -391,20 +391,6 @@ impl Pool {
         outputs
     }
 
-    fn send_request(&mut self, addr: SocketAddr, block_range: BlockRange) -> Output {
-        let block_ref = BlockRef::from(&block_range);
-        self.block_assignments.assign(block_ref, addr);
-        let _ = self.pieces.request_block(block_ref);
-        Output::SendToPeer {
-            addr,
-            message: Message::Request {
-                piece_index: block_range.piece_index,
-                piece_offset: block_range.piece_offset,
-                piece_len: block_range.piece_len,
-            },
-        }
-    }
-
     fn schedule_requests(&mut self) -> Vec<Output> {
         // Each emitted request consumes exactly one free slot, so once the budget
         // is spent `pick_peer` would return None for every remaining block: the
@@ -437,19 +423,53 @@ impl Pool {
             }
 
             let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
+            let is_endgame = budget > missing.len();
             for block_range in missing {
                 if budget == 0 {
                     break;
                 }
-                if let Some(&addr) = self.pick_peer(&peer_addrs, block_range.piece_index, &mut rng)
-                {
-                    budget -= 1;
-                    outputs.push(self.send_request(addr, block_range));
+
+                // if let Some(&addr) = self.pick_peer(&peer_addrs, block_range.piece_index, &mut rng)
+                // {
+                //     budget -= 1;
+                //     outputs.push(self.send_request(addr, block_range));
+                // }
+
+                if is_endgame {
+                    for _ in 0..5 {
+                        if let Some(&addr) =
+                            self.pick_peer(&peer_addrs, block_range.clone().piece_index, &mut rng)
+                        {
+                            // budget -= 1;
+                            outputs.push(self.send_request(addr, block_range));
+                        }
+                    }
+                } else {
+                    if let Some(&addr) =
+                        self.pick_peer(&peer_addrs, block_range.piece_index, &mut rng)
+                    {
+                        budget -= 1;
+                        outputs.push(self.send_request(addr, block_range));
+                    }
                 }
             }
         }
 
         outputs
+    }
+
+    fn send_request(&mut self, addr: SocketAddr, block_range: BlockRange) -> Output {
+        let block_ref = BlockRef::from(&block_range);
+        self.block_assignments.assign(block_ref, addr);
+        let _ = self.pieces.request_block(block_ref);
+        Output::SendToPeer {
+            addr,
+            message: Message::Request {
+                piece_index: block_range.piece_index,
+                piece_offset: block_range.piece_offset,
+                piece_len: block_range.piece_len,
+            },
+        }
     }
 
     fn pick_peer<'a>(
