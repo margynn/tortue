@@ -28,8 +28,6 @@ pub struct SessionStats {
 pub struct TrackerResponse {
     pub interval: u32,
     pub peers: Vec<SocketAddr>,
-    pub seeders: Option<u32>,
-    pub leechers: Option<u32>,
 }
 
 #[derive(Clone, Copy)]

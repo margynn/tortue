@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use tortue_lib::{download, metainfo};
+use tortue_lib::{download, download_magnet, metainfo};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -19,8 +19,8 @@ struct Cli {
 enum Command {
     /// Download a torrent
     Download {
-        /// Path to the .torrent file
-        path: PathBuf,
+        /// Path to .torrent file or magnet URI
+        source: String,
 
         /// Output directory
         #[arg(short, long, default_value = "./")]
@@ -43,11 +43,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Download { path, out, verbose } => {
+        Command::Download {
+            source,
+            out,
+            verbose,
+        } => {
             init_logging(verbose);
 
-            let data = fs::read(path)?;
-            let dl = download(&data, out).await?;
+            let dl = if source.starts_with("magnet:") {
+                download_magnet(&source, out).await?
+            } else {
+                let data = fs::read(&source)?;
+                download(&data, out).await?
+            };
 
             let bar = ProgressBar::new(0);
             bar.set_style(
@@ -82,7 +90,7 @@ async fn main() -> Result<()> {
             let m = metainfo(&data).await?;
 
             println!("{:<14} {}", "Name:", m.name);
-            println!("{:<14} {}", "Hash:", hex(m.hash.as_ref()));
+            println!("{:<14} {}", "Hash:", hex(m.info_hash.as_ref()));
             println!("{:<14} {}", "Size:", human_size(m.total_size()));
             println!(
                 "{:<14} {} × {}",

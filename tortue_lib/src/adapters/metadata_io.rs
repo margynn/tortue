@@ -1,64 +1,69 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr};
 
-use tokio::{
-    sync::{mpsc, watch},
-    time,
-};
-use tracing::info;
+use tokio::sync::mpsc;
 
 use crate::{
-    application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
+    application::ports::peer_connector::PeerConnector,
     domain::{
+        magnet::MagnetLink,
         message::Message,
+        metadata::{Input, Metadata, Output},
         peer::PeerEvent,
-        pool::{Input, Output, Pool, PoolSnapshot},
-        torrent::Metainfo,
     },
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("tracker disconnected")]
     TrackerDisconnected,
 }
-
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolIO<S, C> {
-    metainfo: Arc<Metainfo>,
+pub struct MetadataIO<C> {
+    magnet: MagnetLink,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
-    piece_store: S,
     peer_connector: C,
-    progress_tx: watch::Sender<PoolSnapshot>,
 }
 
-impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
+impl<C: PeerConnector> MetadataIO<C> {
     pub fn new(
-        metainfo: Arc<Metainfo>,
+        magnet: MagnetLink,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
         peer_connector: C,
-        piece_store: S,
-        progress_tx: watch::Sender<PoolSnapshot>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
-            metainfo,
+            magnet,
             peers_rx,
             peer_cmds: HashMap::new(),
             peer_events_tx,
             peer_events_rx,
-            piece_store,
             peer_connector,
-            progress_tx,
         }
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        let mut pool = Pool::new(Arc::clone(&self.metainfo));
-        let mut tick = time::interval(Duration::from_secs(5));
+    pub async fn run(&mut self) -> Result<Vec<u8>> {
+        let mut metadata_fetcher = Metadata::new(self.magnet.info_hash);
+
+        let initial_peers: Vec<SocketAddr> = self
+            .magnet
+            .peers
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if !initial_peers.is_empty() {
+            for out in metadata_fetcher.step(Input::PeersDiscovered(initial_peers)) {
+                if let Some(buffer) = self.handle_output(out) {
+                    return Ok(buffer);
+                }
+            }
+        }
 
         loop {
             let input = tokio::select! {
@@ -67,16 +72,10 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
                     None => return Err(Error::TrackerDisconnected),
                 },
 
-                _ = tick.tick() => Input::Tick,
-
                 msg = self.peer_events_rx.recv() => match msg {
                     None => break,
-                    Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
-                        info!(addr = %addr, peer_id = %peer_id, "peer connected");
-                        Input::PeerConnected { addr, peer_id, peer_extensions }
-                    },
+                    Some((_, PeerEvent::Connected { .. })) => continue,
                     Some((addr, PeerEvent::Disconnected)) => {
-                        info!(addr = %addr, "peer disconnected");
                         self.peer_cmds.remove(&addr);
                         Input::PeerDisconnected(addr)
                     },
@@ -86,40 +85,27 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
                 },
             };
 
-            for out in pool.step(input) {
-                self.handle_output(out);
+            for out in metadata_fetcher.step(input) {
+                if let Some(buffer) = self.handle_output(out) {
+                    return Ok(buffer);
+                }
             }
-
-            let _ = self.progress_tx.send(pool.snapshot());
         }
 
-        Ok(())
+        Ok(vec![])
     }
 
-    fn handle_output(&mut self, out: Output) {
+    fn handle_output(&mut self, out: Output) -> Option<Vec<u8>> {
         match out {
             Output::ConnectPeer(addr) => self.spawn_peer(addr),
-            Output::DisconnectPeer(addr) => {
-                self.peer_cmds.remove(&addr);
-                self.peer_connector.disconnect(addr);
-            },
             Output::SendToPeer { addr, message } => {
                 if let Some(tx) = self.peer_cmds.get(&addr) {
                     let _ = tx.try_send(message);
                 }
             },
-            Output::Completed => info!("download completed"),
-            Output::WritePiece { offset, data } => {
-                if let Err(e) = self.piece_store.write(offset, &data) {
-                    tracing::error!(error = %e, "failed to write piece");
-                }
-            },
-            Output::Broadcast(message) => {
-                for tx in self.peer_cmds.values() {
-                    let _ = tx.try_send(message.clone());
-                }
-            },
-        }
+            Output::Done(items) => return Some(items),
+        };
+        None
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {

@@ -1,18 +1,19 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    sync::mpsc,
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, tcp::OwnedReadHalf},
+    sync::{mpsc, watch},
+    task::JoinHandle,
     time::timeout,
 };
 
 use crate::{
-    application::ports::peer_connector::{PeerConnector, PeerEvent},
+    application::ports::peer_connector::PeerConnector,
     domain::{
-        message::Message,
-        peer::PeerId,
-        torrent::{InfoHash, Metainfo},
+        message::{Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID},
+        peer::{PeerEvent, PeerExtensions, PeerId},
+        torrent::InfoHash,
     },
 };
 
@@ -27,106 +28,200 @@ pub enum Error {
     #[error("info hash mismatch")]
     InfoHashMismatch,
 
-    #[error("invalid message")]
-    InvalidMessage,
-
     #[error("invalid handshake: {0}")]
     InvalidHandshake(&'static str),
 
     #[error("message too large")]
     MessageTooLarge,
 
-    #[error("peer pool disconnected")]
-    PeerPoolGone,
+    #[error("message decode: {0}")]
+    MessageDecode(#[from] DecodeError),
+
+    #[error("peer connection cancelled")]
+    Cancelled,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PeerIO {
+pub struct TcpPeerConnector {
     client_id: PeerId,
-    peer_addr: SocketAddr,
-    metainfo: Arc<Metainfo>,
-    cmd_rx: mpsc::Receiver<Message>,
-    tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    peer_config: PeerConfig,
+    peer_cancels: HashMap<SocketAddr, watch::Sender<bool>>,
 }
 
-impl PeerIO {
+#[derive(Clone, Copy)]
+struct PeerConfig {
+    info_hash: InfoHash,
+    metadata_size: Option<usize>,
+}
+
+impl TcpPeerConnector {
+    pub fn new(client_id: PeerId, info_hash: InfoHash, metadata_size: Option<usize>) -> Self {
+        Self {
+            client_id,
+            peer_config: PeerConfig {
+                info_hash,
+                metadata_size,
+            },
+            peer_cancels: HashMap::new(),
+        }
+    }
+}
+
+impl PeerConnector for TcpPeerConnector {
+    fn connect(
+        &mut self,
+        addr: SocketAddr,
+        cmd_rx: mpsc::Receiver<Message>,
+        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        self.peer_cancels.insert(addr, cancel_tx);
+        let mut runner = TcpPeerIO::new(addr, self.client_id, self.peer_config, cancel_rx);
+        tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
+    }
+
+    fn disconnect(&mut self, addr: SocketAddr) {
+        if let Some(tx) = self.peer_cancels.remove(&addr) {
+            let _ = tx.send(true);
+        }
+    }
+}
+
+struct TcpPeerIO {
+    client_id: PeerId,
+    peer_addr: SocketAddr,
+    config: PeerConfig,
+    cancel_rx: watch::Receiver<bool>,
+}
+
+impl TcpPeerIO {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+    const READ_TIMEOUT: Duration = Duration::from_secs(30);
+    const MAX_RECONNECTION: usize = 10;
 
-    pub fn new(
+    fn new(
         peer_addr: SocketAddr,
         client_id: PeerId,
-        metainfo: Arc<Metainfo>,
-        cmd_rx: mpsc::Receiver<Message>,
-        tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+        config: PeerConfig,
+        cancel_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             client_id,
             peer_addr,
-            metainfo,
-            cmd_rx,
-            tx,
+            config,
+            cancel_rx,
         }
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        let mut reconnect_delay = Duration::ZERO;
+    async fn run(
+        &mut self,
+        mut cmd_rx: mpsc::Receiver<Message>,
+        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) -> Result<()> {
         let mut keepalive = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
+        let mut reconnect_delay = Duration::ZERO;
+        let mut reconnect_cpt = 0;
 
         'run: loop {
-            let (mut tcp, peer_id) = self.connect_with_retry(reconnect_delay).await;
+            if reconnect_cpt > Self::MAX_RECONNECTION {
+                break;
+            }
+            reconnect_cpt += 1;
+            let (tcp, handshake) = self.connect_with_retry(reconnect_delay).await?;
 
-            self.tx
-                .send((self.peer_addr, PeerEvent::Connected(peer_id)))
-                .await
-                .map_err(|_| Error::PeerPoolGone)?;
-
-            reconnect_delay = 'session: loop {
-                tokio::select! {
-                    res = Message::read_from(&mut tcp) => match res {
-                        Ok(msg) => {
-                            self.tx
-                                .send((self.peer_addr, PeerEvent::MessageReceived(msg)))
-                                .await
-                                .map_err(|_| Error::PeerPoolGone)?;
+            let _ = evt_tx
+                .send((
+                    self.peer_addr,
+                    PeerEvent::Connected {
+                        peer_id: handshake.peer_id,
+                        peer_extensions: PeerExtensions {
+                            fast: handshake.fast_extension,
+                            dht: handshake.dht_protocol,
                         },
-                        Err(_) => break 'session Self::RECONNECT_DELAY,
                     },
+                ))
+                .await;
 
-                    cmd = self.cmd_rx.recv() => match cmd {
-                        None => break 'run,
+            let (reader, mut writer) = tcp.into_split();
+            let mut read_task = self.spawn_reader(reader, evt_tx.clone());
+
+            loop {
+                tokio::select! {
+                    cmd = cmd_rx.recv() => match cmd {
+                        None => {
+                            // Channel closed -> disconnect the peer
+                            read_task.abort();
+                            break 'run
+                        },
                         Some(msg) => {
-                            if tcp.write_all(&msg.encode()).await.is_err() {
-                                break 'session Self::RECONNECT_DELAY;
+                            if writer.write_all(&msg.frame()).await.is_err() {
+                                break
                             }
                         },
                     },
 
+                    _ = self.cancel_rx.changed() => {
+                        read_task.abort();
+                        break 'run
+                    }
+
+                    _ = &mut read_task => break,
+
                     _ = keepalive.tick() => {
-                        if tcp.write_all(&Message::KeepAlive.encode()).await.is_err() {
-                            break 'session Self::RECONNECT_DELAY;
+                        if writer.write_all(&Message::KeepAlive.frame()).await.is_err() {
+                           break
                         }
                      },
                 }
-            };
+            }
+
+            reconnect_delay = Self::RECONNECT_DELAY;
+            read_task.abort()
         }
 
         // Sentinel: ensures Pool always receives Disconnected even on clean exit.
-        let _ = self
-            .tx
-            .send((self.peer_addr, PeerEvent::Disconnected))
-            .await;
+        let _ = evt_tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
         Ok(())
     }
 
-    async fn connect_with_retry(&self, mut delay: Duration) -> (TcpStream, PeerId) {
+    fn spawn_reader(
+        &self,
+        mut reader: OwnedReadHalf,
+        tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) -> JoinHandle<()> {
+        let addr = self.peer_addr;
+
+        tokio::spawn(async move {
+            loop {
+                let msg = match timeout(Self::READ_TIMEOUT, Message::read_from(&mut reader)).await {
+                    Ok(Ok(msg)) => msg,
+                    _ => return,
+                };
+
+                if tx
+                    .send((addr, PeerEvent::MessageReceived(msg)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+    }
+
+    async fn connect_with_retry(&mut self, mut delay: Duration) -> Result<(TcpStream, Handshake)> {
         loop {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {},
+                _ = self.cancel_rx.changed() => return Err(Error::Cancelled),
+            };
+
             match self.connect().await {
-                Ok(result) => return result,
+                Ok(result) => return Ok(result),
                 Err(e) => {
                     tracing::debug!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
                     delay = (delay * 2).clamp(Self::RECONNECT_DELAY, Self::MAX_RECONNECT_DELAY);
@@ -135,12 +230,25 @@ impl PeerIO {
         }
     }
 
-    async fn connect(&self) -> Result<(TcpStream, PeerId)> {
+    async fn connect(&self) -> Result<(TcpStream, Handshake)> {
         let mut stream = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
             .await
             .map_err(|_| Error::Timeout)??;
 
-        let outbound = Handshake::new(self.metainfo.hash, self.client_id);
+        // Extension configuration during handshake
+        let extension_protocol = true; // BEP 10
+        let fast_extension = true; // BEP 6
+        let dht_protocol = false;
+        let info_hash = self.config.info_hash;
+        let peer_id = self.client_id;
+
+        let outbound = Handshake::new(
+            info_hash,
+            peer_id,
+            dht_protocol,
+            extension_protocol,
+            fast_extension,
+        );
         timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)??;
@@ -155,32 +263,97 @@ impl PeerIO {
 
         let inbound = Handshake::decode(&buf)?;
 
-        if inbound.info_hash != self.metainfo.hash {
+        if inbound.info_hash != self.config.info_hash {
             return Err(Error::InfoHashMismatch);
         }
 
-        Ok((stream, inbound.peer_id))
+        if inbound.extension_protocol {
+            // Upon connection we share our supported extensions via BEP10
+            let mut extensions = HashMap::new();
+            extensions.insert("ut_metadata".to_string(), UT_METADATA_EXT_ID); // BEP 9
+
+            let hs = Message::ExtensionHandshake(ExtensionHandshake {
+                extensions,
+                client: Some("TT".to_string()),
+                listen_port: None,
+                your_ip: None,
+                ipv4: None,
+                ipv6: None,
+                reqq: None,
+                metadata_size: self.config.metadata_size,
+            });
+            timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.frame()))
+                .await
+                .map_err(|_| Error::Timeout)??;
+        }
+
+        Ok((stream, inbound))
     }
 }
 
-pub struct Handshake {
-    pub info_hash: InfoHash,
-    pub peer_id: PeerId,
+struct Handshake {
+    info_hash: InfoHash,
+    peer_id: PeerId,
+    dht_protocol: bool,
+    extension_protocol: bool,
+    fast_extension: bool,
 }
 
 impl Handshake {
+    // BitTorrent handshake (BEP 3).
+    //
+    // Offset  Size  Field
+    // ------  ----  ------------------------------------------------
+    // 0       1     pstrlen      = 19
+    // 1       19    pstr         = "BitTorrent protocol"
+    // 20      8     reserved     Extension / feature flags
+    // 28      20    info_hash    SHA-1 hash of the torrent info dictionary
+    // 48      20    peer_id      Peer identifier
+    //
+    // Total size: 68 bytes.
+    //
+    // `reserved` bits commonly used:
+    //
+    // reserved[5] bit 4 (0x10) → BEP 10: Extension Protocol
+    // reserved[7] bit 2 (0x04) → BEP 6:  Fast Extension
+    // reserved[7] bit 0 (0x01) → BEP 5:  DHT Protocol
+
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
     const HANDSHAKE_LEN: usize = 68;
 
-    fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
-        Self { info_hash, peer_id }
+    const EXTENSION_PROTOCOL_MASK: u8 = 0b0001_0000;
+    const FAST_EXTENSION_MASK: u8 = 0b0000_0100;
+    const DHT_PROTOCOL_MASK: u8 = 0b0000_0001;
+
+    fn new(
+        info_hash: InfoHash,
+        peer_id: PeerId,
+        dht_protocol: bool,
+        extension_protocol: bool,
+        fast_extension: bool,
+    ) -> Self {
+        Self {
+            info_hash,
+            peer_id,
+            fast_extension,
+            extension_protocol,
+            dht_protocol,
+        }
     }
 
     fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
         let mut out = [0u8; Self::HANDSHAKE_LEN];
         out[0] = Self::PSTR.len() as u8;
         out[1..20].copy_from_slice(Self::PSTR);
-        // out[20..28] reserved bytes, already zero
+        if self.extension_protocol {
+            out[25] |= Self::EXTENSION_PROTOCOL_MASK;
+        }
+        if self.fast_extension {
+            out[27] |= Self::FAST_EXTENSION_MASK;
+        }
+        if self.dht_protocol {
+            out[27] |= Self::DHT_PROTOCOL_MASK;
+        }
         out[28..48].copy_from_slice(self.info_hash.as_ref());
         out[48..68].copy_from_slice(self.peer_id.as_ref());
         out
@@ -197,79 +370,53 @@ impl Handshake {
             return Err(Error::InvalidHandshake("invalid protocol string"));
         }
 
+        let mut reserved_bytes = [0u8; 8];
+        reserved_bytes.copy_from_slice(&buf[20..28]);
+
         let mut hash_bytes = [0u8; 20];
         hash_bytes.copy_from_slice(&buf[28..48]);
 
         let mut peer_id_bytes = [0u8; 20];
         peer_id_bytes.copy_from_slice(&buf[48..68]);
 
+        let extension_protocol = (reserved_bytes[5] & Self::EXTENSION_PROTOCOL_MASK) != 0;
+        let fast_extension = (reserved_bytes[7] & Self::FAST_EXTENSION_MASK) != 0;
+        let dht_protocol = (reserved_bytes[7] & Self::DHT_PROTOCOL_MASK) != 0;
+
         Ok(Handshake::new(
             InfoHash::from(hash_bytes),
             PeerId::new(peer_id_bytes),
+            dht_protocol,
+            extension_protocol,
+            fast_extension,
         ))
     }
 }
 
+// TCP framing for the BitTorrent wire protocol (BEP 3):
+//
+//   send:    msg.encode() → [id][data...]  →  msg.frame() → [len][id][data...]
+//   receive: Message::read_from() strips [len] → [id][data...]  →  Message::decode()
+//
+//   +------------------+-----+------------------+
+//   | length (4 bytes) |  id |  data            |
+//   +------------------+-----+------------------+
+//
+// length = number of bytes after the 4-byte prefix (id + data).
+// KeepAlive is the special case: length = 0, no id, no data.
+
 impl Message {
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1Mb
 
-    fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        match self {
-            Message::KeepAlive => buf.extend_from_slice(&0u32.to_be_bytes()),
-            Message::Choke => buf.extend_from_slice(&[0, 0, 0, 1, 0]),
-            Message::Unchoke => buf.extend_from_slice(&[0, 0, 0, 1, 1]),
-            Message::Interested => buf.extend_from_slice(&[0, 0, 0, 1, 2]),
-            Message::NotInterested => buf.extend_from_slice(&[0, 0, 0, 1, 3]),
-            Message::Have(piece) => {
-                buf.extend_from_slice(&5u32.to_be_bytes());
-                buf.push(4);
-                buf.extend_from_slice(&(*piece as u32).to_be_bytes());
-            },
-            Message::Bitfield(bits) => {
-                buf.extend_from_slice(&(1 + bits.len() as u32).to_be_bytes());
-                buf.push(5);
-                buf.extend_from_slice(bits);
-            },
-            Message::Request {
-                piece_index,
-                piece_offset,
-                piece_len,
-            } => {
-                buf.extend_from_slice(&13u32.to_be_bytes());
-                buf.push(6);
-                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
-            },
-            Message::Piece {
-                piece_index,
-                piece_offset,
-                data,
-            } => {
-                buf.extend_from_slice(&(9 + data.len() as u32).to_be_bytes());
-                buf.push(7);
-                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
-                buf.extend_from_slice(data);
-            },
-            Message::Cancel {
-                piece_index,
-                piece_offset,
-                piece_len,
-            } => {
-                buf.extend_from_slice(&13u32.to_be_bytes());
-                buf.push(8);
-                buf.extend_from_slice(&(*piece_index as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_offset as u32).to_be_bytes());
-                buf.extend_from_slice(&(*piece_len as u32).to_be_bytes());
-            },
-            Message::Unimplemented => {},
-        }
+    fn frame(&self) -> Vec<u8> {
+        let payload = self.encode();
+        let mut buf = Vec::with_capacity(4 + payload.len());
+        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&payload);
         buf
     }
 
-    async fn read_from(reader: &mut TcpStream) -> Result<Self> {
+    async fn read_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
         let mut header = [0u8; 4];
         reader.read_exact(&mut header).await?;
 
@@ -281,126 +428,6 @@ impl Message {
         let mut payload = vec![0u8; len];
         reader.read_exact(&mut payload).await?;
 
-        Self::decode(&payload)
-    }
-
-    fn decode(data: &[u8]) -> Result<Self> {
-        if data.is_empty() {
-            return Ok(Message::KeepAlive);
-        }
-
-        let msg_id = data[0];
-        let payload = &data[1..];
-
-        match msg_id {
-            0 => Ok(Message::Choke),
-            1 => Ok(Message::Unchoke),
-            2 => Ok(Message::Interested),
-            3 => Ok(Message::NotInterested),
-            4 => {
-                if payload.len() != 4 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Have(u32::from_be_bytes(
-                    payload.try_into().map_err(|_| Error::InvalidMessage)?,
-                ) as usize))
-            },
-            5 => Ok(Message::Bitfield(payload.to_vec())),
-            6 => {
-                if payload.len() != 12 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Request {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_len: u32::from_be_bytes(
-                        payload[8..12]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                })
-            },
-            7 => {
-                if payload.len() < 8 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Piece {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    data: payload[8..].to_vec(),
-                })
-            },
-            8 => {
-                if payload.len() != 12 {
-                    return Err(Error::InvalidMessage);
-                }
-                Ok(Message::Cancel {
-                    piece_index: u32::from_be_bytes(
-                        payload[0..4]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_offset: u32::from_be_bytes(
-                        payload[4..8]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                    piece_len: u32::from_be_bytes(
-                        payload[8..12]
-                            .try_into()
-                            .map_err(|_| Error::InvalidMessage)?,
-                    ) as usize,
-                })
-            },
-            _ => Ok(Message::Unimplemented),
-        }
-    }
-}
-
-pub struct TcpPeerConnector {
-    client_id: PeerId,
-    metainfo: Arc<Metainfo>,
-}
-
-impl TcpPeerConnector {
-    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
-        Self {
-            client_id,
-            metainfo,
-        }
-    }
-}
-
-impl PeerConnector for TcpPeerConnector {
-    fn connect(
-        &self,
-        addr: SocketAddr,
-        cmd_rx: mpsc::Receiver<Message>,
-        events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    ) {
-        let mut runner = PeerIO::new(
-            addr,
-            self.client_id,
-            Arc::clone(&self.metainfo),
-            cmd_rx,
-            events_tx,
-        );
-        tokio::spawn(async move { runner.run().await });
+        Ok(Self::decode(&payload)?)
     }
 }
