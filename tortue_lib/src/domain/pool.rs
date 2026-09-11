@@ -49,8 +49,8 @@ type PieceIndex = usize;
 pub struct Pool {
     metainfo: Arc<Metainfo>,
     peers: HashMap<SocketAddr, PeerState>,
-    availability: HashMap<PieceIndex, HashSet<SocketAddr>>,
-    block_assignments: HashMap<BlockRef, SocketAddr>,
+    availability: PieceAvailability,
+    block_assignments: BlockAssignments,
     pieces: PieceManager,
 }
 
@@ -67,8 +67,8 @@ impl Pool {
         Self {
             metainfo,
             peers: HashMap::new(),
-            availability: HashMap::new(),
-            block_assignments: HashMap::new(),
+            availability: PieceAvailability::new(),
+            block_assignments: BlockAssignments::new(),
             pieces,
         }
     }
@@ -107,14 +107,7 @@ impl Pool {
     }
 
     fn release_peer_blocks(&mut self, addr: SocketAddr) {
-        let orphaned: Vec<BlockRef> = self
-            .block_assignments
-            .iter()
-            .filter(|(_, p)| **p == addr)
-            .map(|(k, _)| *k)
-            .collect();
-        for block_ref in orphaned {
-            self.block_assignments.remove(&block_ref);
+        for block_ref in self.block_assignments.release_peer(addr) {
             self.pieces.reset_block(block_ref);
         }
     }
@@ -158,10 +151,7 @@ impl Pool {
 
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.peers.remove(&addr);
-        self.availability.retain(|_, peers| {
-            peers.remove(&addr);
-            !peers.is_empty()
-        });
+        self.availability.remove_peer(addr);
         self.release_peer_blocks(addr);
         self.schedule_requests()
     }
@@ -223,7 +213,12 @@ impl Pool {
             },
 
             // BEP 6
-            Message::HaveAll => self.interested_or_request(addr),
+            Message::HaveAll => {
+                for piece_index in 0..self.metainfo.pieces.len() {
+                    self.availability.record(piece_index, addr);
+                }
+                self.interested_or_request(addr)
+            },
             Message::HaveNone => vec![],
             Message::SuggestPiece(piece_index) => self.on_message_suggest_piece(addr, piece_index),
             Message::RejectRequest {
@@ -235,7 +230,7 @@ impl Pool {
                     piece_index,
                     piece_offset,
                 };
-                self.block_assignments.remove(&block_ref);
+                self.block_assignments.unassign(block_ref);
                 self.pieces.reset_block(block_ref);
                 self.interested_or_request(addr)
             },
@@ -255,8 +250,7 @@ impl Pool {
                 message: Message::Interested,
             }];
         }
-        if peer.peer_choking {
-            // TODO: allow if peer has fast lane
+        if peer.peer_choking && peer.allowed_fast.is_empty() {
             return vec![]; // Already interested, waiting for unchoke.
         }
         self.schedule_requests()
@@ -266,18 +260,14 @@ impl Pool {
         // Record the pieces available at peer
         if let Ok(bf) = Bitfield::try_from(bits.as_ref()) {
             for piece in &bf {
-                self.availability.entry(piece).or_default().insert(addr);
+                self.availability.record(piece, addr);
             }
         }
         self.interested_or_request(addr)
     }
 
     fn on_message_have(&mut self, addr: SocketAddr, piece_index: usize) -> Vec<Output> {
-        // Update the piece availability at peer
-        self.availability
-            .entry(piece_index)
-            .or_default()
-            .insert(addr);
+        self.availability.record(piece_index, addr);
         self.interested_or_request(addr)
     }
 
@@ -308,13 +298,16 @@ impl Pool {
 
     fn on_message_piece(
         &mut self,
-        _addr: SocketAddr,
+        addr: SocketAddr,
         block_ref: BlockRef,
         data: Vec<u8>,
     ) -> Vec<Output> {
-        if self.block_assignments.remove(&block_ref).is_none() {
+        // Only the peer we actually requested this block from may fulfil it —
+        // otherwise any connected peer could complete blocks assigned to others.
+        if self.block_assignments.assigned_to(block_ref) != Some(addr) {
             return vec![];
         }
+        self.block_assignments.unassign(block_ref);
 
         // Piece management
         match self.pieces.receive_block(block_ref, data) {
@@ -388,8 +381,11 @@ impl Pool {
         let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
         let mut outputs = vec![];
         for block_range in missing {
+            if self.block_assignments.in_flight_for(addr) >= Self::MAX_IN_FLIGHT_PER_PEER {
+                break;
+            }
             let block_ref = BlockRef::from(&block_range);
-            self.block_assignments.insert(block_ref, addr);
+            self.block_assignments.assign(block_ref, addr);
             let _ = self.pieces.request_block(block_ref);
             outputs.push(Output::SendToPeer {
                 addr,
@@ -409,7 +405,6 @@ impl Pool {
         &self,
         peer_addrs: &'a [SocketAddr],
         piece_index: usize,
-        in_flight: &HashMap<SocketAddr, usize>,
         rng: &mut impl rand::Rng,
     ) -> Option<&'a SocketAddr> {
         peer_addrs
@@ -417,49 +412,37 @@ impl Pool {
             .filter(|addr| {
                 self.peers.get(addr).map_or(false, |s| {
                     (!s.peer_choking || s.allowed_fast.contains(&piece_index))
-                        && in_flight.get(addr).copied().unwrap_or(0) < Self::MAX_IN_FLIGHT_PER_PEER
+                        && self.block_assignments.in_flight_for(**addr)
+                            < Self::MAX_IN_FLIGHT_PER_PEER
                 })
             })
             .choose(rng)
     }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
-        // Build in_flight counts once
-        let mut in_flight: HashMap<SocketAddr, usize> = HashMap::new();
-        for &peer in self.block_assignments.values() {
-            *in_flight.entry(peer).or_default() += 1;
-        }
-
         let mut rng = rand::rng();
         let mut peer_addrs: Vec<SocketAddr> = Vec::new();
         let mut outputs = vec![];
 
         // Needed pieces sorted by rarest first
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
-        needed.sort_by_key(|&piece| {
-            self.availability
-                .get(&piece)
-                .map_or(usize::MAX, |peers| peers.len())
-        });
+        needed.sort_by_key(|&piece| self.availability.rarity(piece));
 
         for piece_index in needed {
             // Collect owned addrs — releases the borrow on self.availability before
             // the inner loop mutates self.peers.
             peer_addrs.clear(); // keep allocated capacity
-            match self.availability.get(&piece_index) {
-                Some(peers) => peer_addrs.extend(peers.iter().copied()),
-                None => continue,
+            peer_addrs.extend(self.availability.peers_for(piece_index).copied());
+            if peer_addrs.is_empty() {
+                continue;
             }
 
             let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
             for block_range in missing {
                 let block_ref = BlockRef::from(&block_range);
 
-                if let Some(&addr) =
-                    self.pick_peer(&peer_addrs, block_ref.piece_index, &in_flight, &mut rng)
-                {
-                    *in_flight.entry(addr).or_default() += 1;
-                    self.block_assignments.insert(block_ref, addr);
+                if let Some(&addr) = self.pick_peer(&peer_addrs, block_ref.piece_index, &mut rng) {
+                    self.block_assignments.assign(block_ref, addr);
                     let _ = self.pieces.request_block(block_ref);
 
                     outputs.push(Output::SendToPeer {
@@ -475,6 +458,97 @@ impl Pool {
         }
 
         outputs
+    }
+}
+
+struct BlockAssignments {
+    by_block: HashMap<BlockRef, SocketAddr>,
+    in_flight: HashMap<SocketAddr, usize>,
+}
+
+impl BlockAssignments {
+    fn new() -> Self {
+        Self {
+            by_block: HashMap::new(),
+            in_flight: HashMap::new(),
+        }
+    }
+
+    fn assign(&mut self, block_ref: BlockRef, addr: SocketAddr) {
+        self.by_block.insert(block_ref, addr);
+        *self.in_flight.entry(addr).or_default() += 1;
+    }
+
+    fn unassign(&mut self, block_ref: BlockRef) -> Option<SocketAddr> {
+        let addr = self.by_block.remove(&block_ref)?;
+        if let Some(count) = self.in_flight.get_mut(&addr) {
+            *count -= 1;
+            if *count == 0 {
+                self.in_flight.remove(&addr);
+            }
+        }
+        Some(addr)
+    }
+
+    fn in_flight_for(&self, addr: SocketAddr) -> usize {
+        self.in_flight.get(&addr).copied().unwrap_or(0)
+    }
+
+    fn assigned_to(&self, block_ref: BlockRef) -> Option<SocketAddr> {
+        self.by_block.get(&block_ref).copied()
+    }
+
+    fn len(&self) -> usize {
+        self.by_block.len()
+    }
+
+    /// Removes and returns every block currently assigned to `addr`.
+    fn release_peer(&mut self, addr: SocketAddr) -> Vec<BlockRef> {
+        let orphaned: Vec<BlockRef> = self
+            .by_block
+            .iter()
+            .filter(|(_, p)| **p == addr)
+            .map(|(k, _)| *k)
+            .collect();
+        for block_ref in &orphaned {
+            self.unassign(*block_ref);
+        }
+        orphaned
+    }
+}
+
+struct PieceAvailability {
+    by_piece: HashMap<PieceIndex, HashSet<SocketAddr>>,
+}
+
+impl PieceAvailability {
+    fn new() -> Self {
+        Self {
+            by_piece: HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, piece_index: PieceIndex, addr: SocketAddr) {
+        self.by_piece.entry(piece_index).or_default().insert(addr);
+    }
+
+    fn remove_peer(&mut self, addr: SocketAddr) {
+        self.by_piece.retain(|_, peers| {
+            peers.remove(&addr);
+            !peers.is_empty()
+        });
+    }
+
+    /// Peers known to have `piece_index` (empty iterator if none known).
+    fn peers_for(&self, piece_index: PieceIndex) -> impl Iterator<Item = &SocketAddr> {
+        self.by_piece.get(&piece_index).into_iter().flatten()
+    }
+
+    /// Rarity for sorting: fewer known peers = rarer. Unknown pieces sort last.
+    fn rarity(&self, piece_index: PieceIndex) -> usize {
+        self.by_piece
+            .get(&piece_index)
+            .map_or(usize::MAX, |peers| peers.len())
     }
 }
 

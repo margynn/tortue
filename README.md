@@ -33,3 +33,10 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 | BEP 6  | https://www.bittorrent.org/beps/bep_0006.html | Fast Extension            | 🟠                    |
 | BEP 11 | https://www.bittorrent.org/beps/bep_0011.html | PEX                       | 🔴                    |
 | BEP 5  | https://www.bittorrent.org/beps/bep_0005.html | DHT                       | 🔴                    |
+
+Todo:
+
+- support endgame
+- send multi requests for blocks
+- support cancel requests
+- support connecting peers
