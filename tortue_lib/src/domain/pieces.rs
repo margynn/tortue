@@ -23,6 +23,9 @@ pub enum Error {
 
     #[error("invalid block index: {0}")]
     InvalidBlockIndex(usize),
+
+    #[error("invalid piece index: {0}")]
+    InvalidPieceIndex(usize),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -92,17 +95,24 @@ impl PieceManager {
     }
 
     pub fn missing_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
-        let piece = &self.pieces[piece_index];
-        piece.missing_blocks().map(move |block_index| BlockRange {
-            piece_index,
-            piece_offset: block_index * BLOCK_SIZE,
-            piece_len: piece.block_length(block_index).expect("iter on blocks"),
-        })
+        self.pieces
+            .get(piece_index)
+            .into_iter()
+            .flat_map(move |piece| {
+                piece.missing_blocks().map(move |block_index| BlockRange {
+                    piece_index,
+                    piece_offset: block_index * BLOCK_SIZE,
+                    piece_len: piece.block_length(block_index).expect("iter on blocks"),
+                })
+            })
     }
 
     pub fn request_block(&mut self, block_ref: BlockRef) -> Result<()> {
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
-        self.pieces[block_ref.piece_index].request_block(block_index)
+        self.pieces
+            .get_mut(block_ref.piece_index)
+            .ok_or(Error::InvalidPieceIndex(block_ref.piece_index))?
+            .request_block(block_index)
     }
 
     pub fn needed_pieces(&self) -> impl Iterator<Item = usize> + '_ {
@@ -140,9 +150,7 @@ impl PieceManager {
         if piece_len > MAX_BLOCK_SIZE {
             return None;
         }
-        let piece = self.pieces.get(piece_index)?;
-        let block_index = piece_offset / BLOCK_SIZE;
-        piece.read(block_index, piece_len)
+        self.pieces.get(piece_index)?.read(piece_offset, piece_len)
     }
 
     pub fn blocks_total(&self) -> usize {
@@ -156,7 +164,10 @@ impl PieceManager {
     pub fn receive_block(&mut self, block_ref: BlockRef, data: Vec<u8>) -> Result<PieceEvent> {
         let piece_index = block_ref.piece_index;
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
-        let p = &mut self.pieces[piece_index];
+        let p = self
+            .pieces
+            .get_mut(piece_index)
+            .ok_or(Error::InvalidPieceIndex(piece_index))?;
 
         p.receive_block(block_index, data)?;
 
@@ -276,24 +287,23 @@ impl Piece {
         Some(buffer)
     }
 
-    fn read(&self, block_index: usize, len: usize) -> Option<Vec<u8>> {
-        if block_index >= self.blocks.len() {
+    fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        if offset.checked_add(len)? > self.length {
             return None;
         }
-        let mut out: Vec<u8> = Vec::with_capacity(len);
-        for block in &self.blocks[block_index..] {
-            match block {
-                BlockState::Received { buffer } => {
-                    out.extend(buffer);
-                    if out.len() >= len {
-                        out.truncate(len);
-                        return Some(out);
-                    }
-                },
-                _ => return None,
-            }
+        let mut out = Vec::with_capacity(len);
+        let mut pos = offset;
+        while out.len() < len {
+            let block_index = pos / BLOCK_SIZE;
+            let within_block = pos % BLOCK_SIZE;
+            let BlockState::Received { buffer } = self.blocks.get(block_index)? else {
+                return None;
+            };
+            let take = (len - out.len()).min(buffer.len() - within_block);
+            out.extend_from_slice(&buffer[within_block..within_block + take]);
+            pos += take;
         }
-        None
+        Some(out)
     }
 
     fn reset(&mut self) {
