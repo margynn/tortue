@@ -4,151 +4,193 @@ Source: https://wiki.theory.org/BitTorrentSpecification#End_Game (no formal BEP 
 
 ## The problem
 
-Near the end of a download, the remaining blocks are all in flight on a handful of peers. If one of those peers is slow, dead, or silently stalling, the download sits at 99.8% until the 30s request timeout expires (`REQUEST_TIMEOUT`, `pieces.rs:34`) — and then possibly re-picks the same slow peer.
+Near the end of a download, every remaining block is in flight on a handful of peers. If one of them is slow, dead, or silently stalling, the download sits at 99.8% until the 30s request timeout expires (`REQUEST_TIMEOUT`, `pieces.rs:34`) — and may then re-pick the same slow peer.
 
-At that point the swarm has spare capacity we are not using: we have, say, 20 unchoked peers × 16 slots = 320 request slots, and only 12 blocks left to fetch. 308 slots idle.
+Meanwhile the swarm has spare capacity we are not using: 20 unchoked peers × 16 slots = 320 request slots, 12 blocks left to fetch, 308 slots idle.
 
-**Endgame mode**: once the remaining block count drops below available capacity, request each remaining block from _several_ peers at once, and `Cancel` the redundant requests as soon as the first copy lands.
-
----
-
-## Two distinct quantities
-
-The trigger condition needs to separate what the current code conflates:
-
-| Quantity     | Definition                             | Decides                       |
-| ------------ | -------------------------------------- | ----------------------------- |
-| **capacity** | `16 × nb_unchoked_peers`               | _whether_ we enter endgame    |
-| **budget**   | `Σ free_slots_for(peer)` over unchoked | _how many_ requests this tick |
-
-`budget` already exists as `Pool::request_budget` (`pool.rs:492`). Capacity is the structural ceiling — it does not shrink as requests go in flight, so it is the right thing to compare against the remaining work.
-
-```rust
-const ENDGAME_MAX_BLOCKS: usize = 64;
-const ENDGAME_DUPLICATES: usize = 3;
-
-fn request_capacity(&self) -> usize {
-    self.peers.values().filter(|s| !s.peer_choking).count()
-        * BlockAssignments::MAX_IN_FLIGHT_PER_PEER
-}
-
-fn update_endgame(&mut self) -> bool {
-    let missing = self.pieces.blocks_missing();
-    let threshold = self.request_capacity().min(ENDGAME_MAX_BLOCKS);
-    // Hysteresis: capacity moves every time a peer chokes or joins, and we do
-    // not want to toggle the strategy on each tick.
-    self.endgame = if self.endgame {
-        missing <= threshold * 2
-    } else {
-        missing > 0 && missing <= threshold
-    };
-    self.endgame
-}
-```
-
-`ENDGAME_MAX_BLOCKS` is not optional. In a large swarm `capacity` can reach 16 000; `missing <= capacity` would then fire with 240 MiB still to download and we would duplicate the whole torrent.
-
-`blocks_missing()` on `PieceManager` is `blocks_total() - blocks_received()`.
+**Endgame mode**: once there is nothing left to request normally, request the remaining blocks from a second peer as well, and take whichever copy lands first.
 
 ---
 
-## Prerequisite: 1:N block assignments
+## Trigger
 
-`BlockAssignments.by_block` is currently `HashMap<BlockRef, SocketAddr>` — one holder per block. Endgame cannot work on top of it:
+No constant, no threshold, no state. The condition is:
 
-- `assign` (`pool.rs:520`) decrements the previous holder and overwrites, so duplicate requests are never tracked.
-- `on_message_piece` (`pool.rs:297`) checks `assigned_to(block_ref) != Some(addr)` and therefore **discards the payload from every peer except the last one assigned**.
+> There is budget left after the normal pass, and the download is not complete.
 
-```rust
-struct BlockAssignments {
-    by_block: HashMap<BlockRef, HashSet<SocketAddr>>,
-    in_flight: HashMap<SocketAddr, usize>,
-}
-
-fn assign(&mut self, b: BlockRef, addr: SocketAddr) -> bool {
-    if self.by_block.entry(b).or_default().insert(addr) {
-        *self.in_flight.entry(addr).or_default() += 1;
-        return true;
-    }
-    false // already assigned to this peer — do not re-request
-}
-
-fn holders(&self, b: BlockRef) -> &HashSet<SocketAddr>;   // empty set if absent
-fn holder_count(&self, b: BlockRef) -> usize;
-fn is_holder(&self, b: BlockRef, addr: SocketAddr) -> bool;
-fn unassign_one(&mut self, b: BlockRef, addr: SocketAddr) -> bool; // true if no holder left
-fn unassign_all(&mut self, b: BlockRef) -> Vec<SocketAddr>;
-```
-
-### The invariant this creates
-
-> `pieces.reset_block()` may only be called when the block has **no remaining holder**.
-
-Otherwise one peer choking resets to `Missing` a block that two other peers are actively sending. Call sites to fix:
-
-- `release_peer_blocks` (`pool.rs:109`) — used by `on_connected`, `on_disconnected`, `on_message_choke`
-- `RejectRequest` (`pool.rs:223`)
-- the malformed-block path of `on_message_piece` (`pool.rs:307`)
-
-`snapshot().blocks_in_flight` keeps its meaning: `by_block.len()` is still the number of distinct blocks in flight, not the number of requests.
-
----
-
-## Scheduling in two passes
-
-Cleaner than an inline `if is_endgame` inside the block loop, and it falls out correctly by construction: the duplicate pass only ever spends _leftover_ budget, which is precisely the "capacity exceeds remaining work" condition.
+Leftover budget means every requestable block is already in flight — which is exactly the endgame situation. `request_budget` (`pool.rs:492`) already computes it.
 
 ```rust
 fn schedule_requests(&mut self) -> Vec<Output> {
     let mut budget = self.request_budget();
     if budget == 0 { return vec![]; }
 
-    let mut outputs = self.schedule_rarest_first(&mut budget); // current loop, unchanged
-    if self.update_endgame() && budget > 0 {
-        outputs.extend(self.schedule_duplicates(&mut budget));
+    let mut outputs = self.request_pass(&mut budget, false);
+    // Budget left over while the download is unfinished means everything
+    // requestable is already in flight: spend the rest on duplicates.
+    if budget > 0 && !self.pieces.is_complete() {
+        outputs.extend(self.request_pass(&mut budget, true));
     }
     outputs
 }
+```
 
-fn schedule_duplicates(&mut self, budget: &mut usize) -> Vec<Output> {
-    let mut targets: Vec<BlockRange> = self.pieces.needed_pieces()
-        .flat_map(|p| self.pieces.unreceived_blocks(p))
-        .collect();
-    // Least-covered blocks first: those are the ones holding up the tail.
-    targets.sort_by_key(|b| self.block_assignments.holder_count(BlockRef::from(b)));
+A tick that does not trigger the duplicate pass simply does nothing extra, so there is no cost to the condition flipping between ticks — no hysteresis and no persistent `endgame` flag are needed.
 
-    let mut rng = rand::rng();
-    let mut outputs = vec![];
-    for range in targets {
+---
+
+## Prerequisite: assignments indexed by peer
+
+`BlockAssignments` currently holds two structures kept in sync by hand:
+
+```rust
+by_block: HashMap<BlockRef, SocketAddr>,   // one holder per block
+in_flight: HashMap<SocketAddr, usize>,     // manual counter
+```
+
+`by_block` is 1:1, so endgame cannot work on top of it: `assign` (`pool.rs:520`) overwrites and decrements the previous holder, and `on_message_piece` (`pool.rs:297`) checks `assigned_to(block_ref) != Some(addr)` — which **discards the payload of every peer except the last one assigned**.
+
+Replace both fields with a single index, keyed by peer:
+
+```rust
+struct BlockAssignments {
+    by_peer: HashMap<SocketAddr, HashSet<BlockRef>>,
+}
+
+fn assign(&mut self, b: BlockRef, addr: SocketAddr) -> bool {
+    self.by_peer.entry(addr).or_default().insert(b)
+}
+
+fn unassign(&mut self, b: BlockRef, addr: SocketAddr) {
+    if let Some(blocks) = self.by_peer.get_mut(&addr) {
+        blocks.remove(&b);
+    }
+}
+
+fn is_holder(&self, b: BlockRef, addr: SocketAddr) -> bool {
+    self.by_peer.get(&addr).is_some_and(|blocks| blocks.contains(&b))
+}
+
+fn in_flight_for(&self, addr: SocketAddr) -> usize {
+    self.by_peer.get(&addr).map_or(0, |blocks| blocks.len())
+}
+
+fn release_peer(&mut self, addr: SocketAddr) -> HashSet<BlockRef> {
+    self.by_peer.remove(&addr).unwrap_or_default()
+}
+
+/// Short-circuits on the first holder — used by the `reset_block` guard.
+fn has_holder(&self, b: BlockRef) -> bool {
+    self.by_peer.values().any(|blocks| blocks.contains(&b))
+}
+
+fn holder_count(&self, b: BlockRef) -> usize {
+    self.by_peer.values().filter(|blocks| blocks.contains(&b)).count()
+}
+```
+
+`by_block` was private to `impl BlockAssignments` (lines 502-566) — `Pool` only ever reached it through methods, and every one of those call sites already has the peer address in hand:
+
+| Line | Current call                       | Becomes                              |
+| ---- | ---------------------------------- | ------------------------------------ |
+| 80   | `len()`                            | sum of set lengths                   |
+| 110  | `release_peer(addr)`               | `remove(&addr)` — O(1)               |
+| 223  | `unassign(block_ref)`              | `addr` is `on_message`'s parameter   |
+| 297  | `assigned_to(b) != Some(addr)`     | `is_holder(b, addr)`                 |
+| 300  | `unassign(block_ref)`              | `addr` is the parameter              |
+| 386  | `has_capacity(addr)`               | derived from the set length          |
+| 463  | `assign(b, addr)`                  | unchanged signature                  |
+| 487  | `has_capacity(**addr)`             | derived from the set length          |
+| 496  | `free_slots_for(s.addr)`           | derived from the set length          |
+
+So the only `Pool` line that changes shape is 297.
+
+### What this removes
+
+- **`in_flight` and `decrement()`** (`pool.rs:503,534`): the count becomes derived (`HashSet::len`), therefore exact by construction. The defensive `saturating_sub` and the "phantom count" comment at `pool.rs:517-519` both lose their purpose — the desync class of bug they guard against can no longer be expressed.
+- **the scan in `release_peer`** (`pool.rs:565`): a full walk of `by_block` plus a `Vec` allocation becomes one `remove`.
+
+---
+
+## Performance
+
+The requirement is no regression. Per operation, with `P` = connected peers (tens) and `N` = total blocks in flight (`16 × P`, so hundreds to low thousands):
+
+| Operation                | Called on                    | Now                        | With `by_peer`             |
+| ------------------------ | ---------------------------- | -------------------------- | -------------------------- |
+| `is_holder` / `assigned_to` | every `Piece` message     | 1 hash lookup              | 2 hash lookups             |
+| `in_flight_for`          | `pick_peer`, `request_budget`| 1 lookup + copy            | 1 lookup + `len()`         |
+| `assign`                 | every request sent           | 2-3 hash ops               | 2 hash ops                 |
+| `unassign`               | every block received         | 2 hash ops                 | 2 hash ops                 |
+| `release_peer`           | every choke / disconnect     | **O(N) scan + Vec alloc**  | **O(1)**                   |
+| `blocks_in_flight`       | UI refresh                   | O(1)                       | O(P) adds                  |
+| `has_holder`             | new, `reset_block` guard     | —                          | O(P) short-circuited       |
+| `holder_count`           | new, duplicate pass only     | —                          | O(P)                       |
+
+The one hot-path operation that gets more expensive is `is_holder`: one extra hash, on the path of a message that also carries a 15 KiB memcpy and eventually a SHA-1 over the whole piece. It is not measurable there.
+
+`release_peer` is the operation that actually improves, and it matters: BitTorrent rechokes every 10 seconds, so chokes are frequent, and today each one walks the entire in-flight map.
+
+The two new scans are both O(P), not O(N), and neither is on a hot path:
+
+- `has_holder` runs in `release_peer_blocks`, once per released block. Worst case a peer with 16 blocks disconnects: 16 × P ≈ 800 `contains` calls. It short-circuits on the first holder found.
+- `holder_count` runs only in the duplicate pass, which by its trigger condition only runs when the unreceived-block set is small.
+
+Allocations: `by_peer` holds `P` long-lived `HashSet`s that grow to their steady-state capacity and stay there, against today's two maps whose `by_block` entries churn on every block. Fewer allocations over the life of a download, not more.
+
+---
+
+## Scheduling
+
+`schedule_requests`'s current loop (`pool.rs:408-473`) becomes `request_pass`, parameterised by one bool. Two lines differ between the passes:
+
+```rust
+const MAX_HOLDERS_PER_BLOCK: usize = 2;
+
+fn request_pass(&mut self, budget: &mut usize, duplicates: bool) -> Vec<Output> {
+    // ... unchanged: rng, peer_addrs buffer, rarest-first `needed` sort ...
+
+    for piece_index in needed {
         if *budget == 0 { break; }
-        let block_ref = BlockRef::from(&range);
-        let held = self.block_assignments.holders(block_ref).clone();
-        let extra = ENDGAME_DUPLICATES.saturating_sub(held.len());
-        let candidates: Vec<SocketAddr> = self.availability
-            .peers_for(range.piece_index)
-            .filter(|a| !held.contains(a))
-            .copied()
-            .collect();
-        for addr in self.pick_peers(&candidates, range.piece_index, extra, &mut rng) {
-            *budget -= 1;
-            outputs.push(self.send_request(addr, range));
+        peer_addrs.clear();
+        peer_addrs.extend(self.availability.peers_for(piece_index).copied());
+        if peer_addrs.is_empty() { continue; }
+
+        let blocks: Vec<BlockRange> = if duplicates {
+            self.pieces.unreceived_blocks(piece_index).collect()
+        } else {
+            self.pieces.missing_blocks(piece_index).collect()
+        };
+
+        for block_range in blocks {
             if *budget == 0 { break; }
+            let block_ref = BlockRef::from(&block_range);
+            if duplicates
+                && self.block_assignments.holder_count(block_ref) >= MAX_HOLDERS_PER_BLOCK
+            {
+                continue;
+            }
+            if let Some(addr) = self.pick_peer(&peer_addrs, block_ref, duplicates, &mut rng) {
+                *budget -= 1;
+                outputs.push(self.send_request(addr, block_range));
+            }
         }
     }
     outputs
 }
 ```
 
-### `pick_peers` vs `pick_peer`
+`pick_peer` gains one filter clause, active only in the duplicate pass:
 
-Two changes over `pool.rs:475`:
+```rust
+&& (!duplicates || !self.block_assignments.is_holder(block_ref, **addr))
+```
 
-1. **Exclude peers that already hold the block.** Sending the same request twice to one peer is pure waste and gets connections dropped by strict clients.
-2. **Pick _n_ distinct peers** — `choose_multiple(rng, n)`, not `n` successive `choose(rng)` calls (which can return the same peer every time).
+It must stay gated. In the normal pass, `missing_blocks` yields blocks whose request has timed out and whose holder is still recorded; if that holder were excluded and it is the only peer advertising the piece, the block would become permanently unrequestable. Keeping the filter off in pass 1 preserves today's behaviour exactly.
 
 ### `unreceived_blocks` vs `missing_blocks`
 
-`missing_blocks` filters on the request timeout (`pieces.rs:233`): a block requested 5s ago is not yielded. Endgame needs the opposite — re-request blocks that are `Requested` and recent. Same `BlockRange` mapping, different predicate, so factor the `flat_map` of `missing_blocks` (`pieces.rs:98`) into a helper taking an index iterator:
+`missing_blocks` filters on the request timeout (`pieces.rs:233`), so a block requested 5s ago is not yielded. The duplicate pass needs the opposite: re-request blocks that are `Requested` and recent. Same `BlockRange` mapping, different predicate — factor the `flat_map` of `missing_blocks` (`pieces.rs:98`) into a helper taking an index iterator.
 
 ```rust
 impl Piece {
@@ -162,92 +204,74 @@ impl Piece {
 
 ---
 
-## Cancel
+## The invariant to hold
 
-This is half the point of endgame. Without it, duplication multiplies wasted download bandwidth by `ENDGAME_DUPLICATES`.
+> `pieces.reset_block()` may only be called when the block has no remaining holder.
 
-Cancels are emitted **after** the block validates — if `receive_block` fails on a malformed payload, we want the other copies still in flight.
+Otherwise one peer choking resets to `Missing` a block another peer is actively sending. Three call sites:
 
-```rust
-if !self.block_assignments.is_holder(block_ref, addr) {
-    return vec![]; // unsolicited, or a duplicate that lost the race
-}
+- `release_peer_blocks` (`pool.rs:109`) — reached from `on_connected`, `on_disconnected`, `on_message_choke`
+- `RejectRequest` (`pool.rs:223`)
+- the malformed-block path of `on_message_piece` (`pool.rs:307`)
 
-match self.pieces.receive_block(block_ref, data) {
-    Err(_) => {
-        if self.block_assignments.unassign_one(block_ref, addr) {
-            self.pieces.reset_block(block_ref);
-        }
-        vec![]
-    },
-    Ok(event) => {
-        let cancels: Vec<Output> = self.block_assignments
-            .unassign_all(block_ref)
-            .into_iter()
-            .filter(|p| *p != addr)
-            .map(|p| Output::SendToPeer {
-                addr: p,
-                message: Message::Cancel { piece_index, piece_offset, piece_len },
-            })
-            .collect();
-        // ... existing match on event, with `cancels` prepended to the outputs
-    },
-}
-```
+Each becomes `if !self.block_assignments.has_holder(block_ref) { self.pieces.reset_block(block_ref); }`.
 
-`Message::Cancel` needs `piece_len`, which `BlockRef` does not carry. Either expose `PieceManager::block_len(block_ref)` or store the full `BlockRange` in the assignment — the former keeps `BlockAssignments` keyed on `BlockRef`.
+The second copy of a block that arrives after the first has been accepted needs no special handling: `Piece::receive_block` short-circuits on an already-`Received` block (`pieces.rs:257`) and returns `Ok`.
 
-A duplicate arriving after the cancel is already handled: `unassign_all` cleared the holders, so `is_holder` returns `false` and the payload is dropped. `Piece::receive_block` also short-circuits on an already-`Received` block (`pieces.rs:257`), which is a second line of defence.
+---
 
-On the serving side, `Message::Cancel => vec![]` (`pool.rs:195`) stays correct: we answer `Request` synchronously in `on_message_request`, so there is no outbound queue to purge.
+## Deliberately left out
+
+**`Cancel` on the redundant requests.** The textbook endgame cancels the duplicates as soon as one copy lands. At `MAX_HOLDERS_PER_BLOCK = 2`, with the duplicate pass only active once the unreceived set is small, the wasted download is on the order of a megabyte per torrent — not worth the extra plumbing (`Message::Cancel` needs a `piece_len` that `BlockRef` does not carry). Revisit if it shows up in the transfer stats.
+
+**Ranking duplicate targets by peer throughput.** Sending the duplicate to the fastest available peer is the natural refinement, but we collect no per-peer speed stats yet. Random selection among eligible peers is good enough to start.
+
+**Freeing the slot of a timed-out request.** Today a request that times out leaves its assignment in place, so the peer's pipeline slot stays occupied indefinitely while the block is handed to someone else. This is a pre-existing issue, orthogonal to endgame; folding a fix into this change would confuse the two.
 
 ---
 
 ## Bugs in the current WIP
 
-For reference, the three reasons the in-progress version at `pool.rs:440-468` does not work:
+Why the in-progress version at `pool.rs:440-468` does not work, for the record:
 
-1. `budget` is never decremented in the endgame branch (`pool.rs:456`, commented out), so the outer `if budget == 0 { break }` never fires and 5 requests are emitted per block across _every_ remaining piece.
+1. `budget` is never decremented in the endgame branch (`pool.rs:456`, commented out), so the outer `if budget == 0 { break }` never fires: 5 requests are emitted per block across _every_ remaining piece.
 2. `is_endgame = budget > missing.len()` compares the global budget against the blocks missing **in the current piece only** (~17 for a 256 KiB piece). With 20 unchoked peers, `budget ≈ 320`, so endgame is on from the first block of the download.
-3. `pick_peer` is called 5 times in a row and can return the same peer each time; and the 1:1 `by_block` map means only the last assignment survives, so 4 of the 5 responses are discarded by the `assigned_to` check.
+3. `pick_peer` is called 5 times in a row and can return the same peer each time; and with the 1:1 `by_block` map only the last assignment survives, so 4 of the 5 responses are dropped by the `assigned_to` check.
 
 ---
 
 ## Tests
 
-Split by unit, then merge what overlaps:
-
 **`BlockAssignments`**
 
-- multiple holders for one block; `in_flight` per peer stays accurate across `unassign_one` / `unassign_all`
-- `release_peer` removes only that peer's holdings, leaving other holders intact
-
-**`update_endgame`**
-
-- no endgame at 50% completion even with 100 peers (`ENDGAME_MAX_BLOCKS` clamp)
-- endgame triggers once `missing` drops under the threshold
-- no flapping when a single peer chokes (hysteresis)
+- two peers holding the same block; `in_flight_for` stays exact across `unassign`
+- `release_peer` removes only that peer's blocks, leaving the other holder intact
+- `has_holder` is false only once the last holder is gone
 
 **`Pool`**
 
-- one block requested from 3 peers → 2 `Cancel` outputs when the first copy arrives
+- no duplicate request while the normal pass still has blocks to hand out
+- leftover budget on an incomplete download → the remaining blocks get a second holder, capped at `MAX_HOLDERS_PER_BLOCK`
+- the duplicate never goes to a peer already holding the block
+- a timed-out block whose only advertising peer is its current holder is still re-requested (the gated filter)
 - a `Piece` from a non-holder is ignored
-- a `Choke` from one of 2 holders does **not** reset the block
-- a malformed block from one of 2 holders does **not** reset the block
+- a `Choke` from one of two holders does **not** reset the block
+- a malformed block from one of two holders does **not** reset the block
 
 ---
 
 ## Summary
 
-| Change                                          | Where                        | Priority |
-| ----------------------------------------------- | ---------------------------- | -------- |
-| `by_block` → `HashMap<BlockRef, HashSet<Addr>>` | `pool.rs` `BlockAssignments` | Blocking |
-| `reset_block` only when no holder left          | 4 call sites in `pool.rs`    | Blocking |
-| Global `update_endgame` + hysteresis            | `pool.rs` `Pool`             | High     |
-| Two-pass `schedule_requests`                    | `pool.rs:408`                | High     |
-| `Cancel` on first copy received                 | `pool.rs:289`                | High     |
-| `unreceived_blocks` (ignores request timeout)   | `pieces.rs`                  | High     |
-| `pick_peers`: distinct, non-holder peers        | `pool.rs:475`                | High     |
-| Rank duplicate targets by upload speed          | `pool.rs`                    | Later    |
+| Change                                        | Where                        | Priority |
+| --------------------------------------------- | ---------------------------- | -------- |
+| `by_block` + `in_flight` → `by_peer`          | `pool.rs:501-576`            | Blocking |
+| `assigned_to` → `is_holder`                   | `pool.rs:297`                | Blocking |
+| `reset_block` guarded by `has_holder`         | 3 call sites in `pool.rs`    | Blocking |
+| `request_pass(duplicates: bool)`              | `pool.rs:408`                | High     |
+| Leftover-budget trigger                       | `pool.rs:408`                | High     |
+| `unreceived_blocks`                           | `pieces.rs:98`               | High     |
+| `pick_peer`: gated non-holder filter          | `pool.rs:475`                | High     |
+| `Cancel` the redundant requests               | `pool.rs:289`                | Later    |
+| Rank duplicate targets by throughput          | `pool.rs:475`                | Later    |
 
-The last one needs per-peer throughput stats we do not collect yet; random distinct selection is good enough to start.
+One new constant: `MAX_HOLDERS_PER_BLOCK = 2`.
