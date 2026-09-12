@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     net::SocketAddr,
     sync::Arc,
+    time::{Duration, Instant},
     vec,
 };
 
@@ -77,7 +78,7 @@ impl Pool {
         PoolSnapshot {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
-            blocks_in_flight: self.block_assignments.len(),
+            blocks_in_flight: self.block_assignments.requests_in_flight(),
             peers: self.peers.keys().map(|addr| *addr).collect(),
         }
     }
@@ -92,8 +93,18 @@ impl Pool {
             } => self.on_connected(addr, peer_id, peer_extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            Input::Tick => self.schedule_requests(),
+            Input::Tick => self.on_tick(),
         }
+    }
+
+    fn on_tick(&mut self) -> Vec<Output> {
+        // Sweeping here rather than in `schedule_requests` keeps the per-message
+        // path free of a walk over every request in flight; a 30s timeout does
+        // not need finer granularity than a tick.
+        for block_ref in self.block_assignments.release_expired() {
+            self.reset_if_orphaned(block_ref);
+        }
+        self.schedule_requests()
     }
 
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
@@ -108,6 +119,14 @@ impl Pool {
 
     fn release_peer_blocks(&mut self, addr: SocketAddr) {
         for block_ref in self.block_assignments.release_peer(addr) {
+            self.reset_if_orphaned(block_ref);
+        }
+    }
+
+    /// Endgame leaves several peers holding the same block, so a single one
+    /// dropping out must not make it `Missing` again.
+    fn reset_if_orphaned(&mut self, block_ref: BlockRef) {
+        if !self.block_assignments.has_holder(block_ref) {
             self.pieces.reset_block(block_ref);
         }
     }
@@ -220,8 +239,8 @@ impl Pool {
                     piece_index,
                     piece_offset,
                 };
-                self.block_assignments.unassign(block_ref);
-                self.pieces.reset_block(block_ref);
+                self.block_assignments.unassign(block_ref, addr);
+                self.reset_if_orphaned(block_ref);
                 self.interested_or_request(addr)
             },
             Message::AllowedFast(_) => self.interested_or_request(addr),
@@ -292,19 +311,18 @@ impl Pool {
         block_ref: BlockRef,
         data: Vec<u8>,
     ) -> Vec<Output> {
-        // Only the peer we actually requested this block from may fulfil it —
+        // Only a peer we actually requested this block from may fulfil it —
         // otherwise any connected peer could complete blocks assigned to others.
-        if self.block_assignments.assigned_to(block_ref) != Some(addr) {
+        if !self.block_assignments.is_holder(block_ref, addr) {
             return vec![];
         }
-        self.block_assignments.unassign(block_ref);
+        self.block_assignments.unassign(block_ref, addr);
 
-        // Piece management
         match self.pieces.receive_block(block_ref, data) {
             Err(_) => {
                 // Malformed block: make it requestable again instead of leaving
                 // it Requested until the timeout expires.
-                self.pieces.reset_block(block_ref);
+                self.reset_if_orphaned(block_ref);
                 vec![]
             },
             Ok(piece_event) => match piece_event {
@@ -380,11 +398,17 @@ impl Pool {
             return vec![]; // peer chokes us and hasn't allow-fasted this piece
         }
 
-        let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
+        let blocks: Vec<BlockRange> = self.pieces.unreceived_blocks(piece_index).collect();
         let mut outputs = vec![];
-        for block_range in missing {
+        for block_range in blocks {
             if !self.block_assignments.has_capacity(addr) {
                 break;
+            }
+            if self
+                .block_assignments
+                .is_holder(BlockRef::from(&block_range), addr)
+            {
+                continue;
             }
             outputs.push(self.send_request(addr, block_range));
         }
@@ -392,9 +416,6 @@ impl Pool {
     }
 
     fn schedule_requests(&mut self) -> Vec<Output> {
-        // Each emitted request consumes exactly one free slot, so once the budget
-        // is spent `pick_peer` would return None for every remaining block: the
-        // breaks below stop useless work, they do not truncate the schedule.
         let mut budget = self.request_budget();
         if budget == 0 {
             return vec![];
@@ -409,49 +430,48 @@ impl Pool {
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
         needed.sort_by_cached_key(|&piece| self.availability.rarity(piece));
 
-        for piece_index in needed {
-            if budget == 0 {
-                break;
-            }
+        // One sweep per holder count, so no block gets a second peer while
+        // another still has none. Sweeping again while budget remains is what
+        // spends the tail of the download on duplicates instead of idle slots,
+        // and it is self-limiting: a sweep only reaches depth 1 once every
+        // unreceived block has a holder, which caps their number at the requests
+        // in flight. A block can be held by at most every peer.
+        for depth in 0..self.peers.len() {
+            let mut assigned = 0;
 
-            // Collect owned addrs — releases the borrow on self.availability before
-            // the inner loop mutates self.peers.
-            peer_addrs.clear(); // keep allocated capacity
-            peer_addrs.extend(self.availability.peers_for(piece_index).copied());
-            if peer_addrs.is_empty() {
-                continue;
-            }
-
-            let missing: Vec<BlockRange> = self.pieces.missing_blocks(piece_index).collect();
-            let is_endgame = budget > missing.len();
-            for block_range in missing {
+            for &piece_index in &needed {
                 if budget == 0 {
                     break;
                 }
 
-                // if let Some(&addr) = self.pick_peer(&peer_addrs, block_range.piece_index, &mut rng)
-                // {
-                //     budget -= 1;
-                //     outputs.push(self.send_request(addr, block_range));
-                // }
+                // Collect owned addrs — releases the borrow on self.availability
+                // before the inner loop mutates self.peers.
+                peer_addrs.clear(); // keep allocated capacity
+                peer_addrs.extend(self.availability.peers_for(piece_index).copied());
+                if peer_addrs.is_empty() {
+                    continue;
+                }
 
-                if is_endgame {
-                    for _ in 0..5 {
-                        if let Some(&addr) =
-                            self.pick_peer(&peer_addrs, block_range.clone().piece_index, &mut rng)
-                        {
-                            // budget -= 1;
-                            outputs.push(self.send_request(addr, block_range));
-                        }
+                let blocks: Vec<BlockRange> = self.pieces.unreceived_blocks(piece_index).collect();
+
+                for block_range in blocks {
+                    if budget == 0 {
+                        break;
                     }
-                } else {
-                    if let Some(&addr) =
-                        self.pick_peer(&peer_addrs, block_range.piece_index, &mut rng)
-                    {
+                    let block_ref = BlockRef::from(&block_range);
+                    if self.block_assignments.holder_count(block_ref) != depth {
+                        continue;
+                    }
+                    if let Some(&addr) = self.pick_peer(&peer_addrs, block_ref, &mut rng) {
                         budget -= 1;
+                        assigned += 1;
                         outputs.push(self.send_request(addr, block_range));
                     }
                 }
+            }
+
+            if budget == 0 || assigned == 0 {
+                break;
             }
         }
 
@@ -475,7 +495,7 @@ impl Pool {
     fn pick_peer<'a>(
         &self,
         peer_addrs: &'a [SocketAddr],
-        piece_index: usize,
+        block_ref: BlockRef,
         rng: &mut impl rand::Rng,
     ) -> Option<&'a SocketAddr> {
         peer_addrs
@@ -483,8 +503,9 @@ impl Pool {
             .filter(|addr| {
                 self.peers
                     .get(addr)
-                    .is_some_and(|s| s.can_serve(piece_index))
+                    .is_some_and(|s| s.can_serve(block_ref.piece_index))
                     && self.block_assignments.has_capacity(**addr)
+                    && !self.block_assignments.is_holder(block_ref, **addr)
             })
             .choose(rng)
     }
@@ -499,49 +520,75 @@ impl Pool {
 }
 
 struct BlockAssignments {
-    by_block: HashMap<BlockRef, SocketAddr>,
-    in_flight: HashMap<SocketAddr, usize>,
+    by_peer: HashMap<SocketAddr, HashMap<BlockRef, Instant>>,
 }
 
 impl BlockAssignments {
     const MAX_IN_FLIGHT_PER_PEER: usize = 16;
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     fn new() -> Self {
         Self {
-            by_block: HashMap::new(),
-            in_flight: HashMap::new(),
+            by_peer: HashMap::new(),
         }
     }
 
-    fn assign(&mut self, block_ref: BlockRef, addr: SocketAddr) {
-        // A still-in-flight block can be reassigned after a request timeout
-        // (see `missing_blocks`) — decrement the previous holder so `in_flight`
-        // stays accurate instead of leaking a phantom count on them.
-        match self.by_block.insert(block_ref, addr) {
-            Some(prev) if prev == addr => return, // already assigned to this peer
-            Some(prev) => self.decrement(prev),
-            None => {},
-        }
-        *self.in_flight.entry(addr).or_default() += 1;
+    fn assign(&mut self, b: BlockRef, addr: SocketAddr) {
+        self.by_peer
+            .entry(addr)
+            .or_default()
+            .insert(b, Instant::now());
     }
 
-    fn unassign(&mut self, block_ref: BlockRef) -> Option<SocketAddr> {
-        let addr = self.by_block.remove(&block_ref)?;
-        self.decrement(addr);
-        Some(addr)
+    fn unassign(&mut self, b: BlockRef, addr: SocketAddr) {
+        if let Some(blocks) = self.by_peer.get_mut(&addr) {
+            blocks.remove(&b);
+        }
     }
 
-    fn decrement(&mut self, addr: SocketAddr) {
-        if let Some(count) = self.in_flight.get_mut(&addr) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.in_flight.remove(&addr);
-            }
-        }
+    fn is_holder(&self, b: BlockRef, addr: SocketAddr) -> bool {
+        self.by_peer
+            .get(&addr)
+            .is_some_and(|blocks| blocks.contains_key(&b))
+    }
+
+    fn holder_count(&self, b: BlockRef) -> usize {
+        self.by_peer
+            .values()
+            .filter(|blocks| blocks.contains_key(&b))
+            .count()
+    }
+
+    fn has_holder(&self, b: BlockRef) -> bool {
+        self.by_peer.values().any(|blocks| blocks.contains_key(&b))
     }
 
     fn in_flight_for(&self, addr: SocketAddr) -> usize {
-        self.in_flight.get(&addr).copied().unwrap_or(0)
+        self.by_peer.get(&addr).map_or(0, |blocks| blocks.len())
+    }
+
+    fn release_peer(&mut self, addr: SocketAddr) -> Vec<BlockRef> {
+        self.by_peer
+            .remove(&addr)
+            .map(|blocks| blocks.into_keys().collect())
+            .unwrap_or_default()
+    }
+
+    /// Drops requests we have waited too long for, freeing the peer's slot and
+    /// letting the block be offered around again — including back to that peer.
+    fn release_expired(&mut self) -> Vec<BlockRef> {
+        let now = Instant::now();
+        let mut expired = vec![];
+        for blocks in self.by_peer.values_mut() {
+            blocks.retain(|block_ref, at| {
+                let alive = now < *at + Self::REQUEST_TIMEOUT;
+                if !alive {
+                    expired.push(*block_ref);
+                }
+                alive
+            });
+        }
+        expired
     }
 
     fn free_slots_for(&self, addr: SocketAddr) -> usize {
@@ -552,26 +599,10 @@ impl BlockAssignments {
         self.free_slots_for(addr) > 0
     }
 
-    fn assigned_to(&self, block_ref: BlockRef) -> Option<SocketAddr> {
-        self.by_block.get(&block_ref).copied()
-    }
-
-    fn len(&self) -> usize {
-        self.by_block.len()
-    }
-
-    /// Removes and returns every block currently assigned to `addr`.
-    fn release_peer(&mut self, addr: SocketAddr) -> Vec<BlockRef> {
-        let orphaned: Vec<BlockRef> = self
-            .by_block
-            .iter()
-            .filter(|(_, p)| **p == addr)
-            .map(|(k, _)| *k)
-            .collect();
-        for block_ref in &orphaned {
-            self.unassign(*block_ref);
-        }
-        orphaned
+    /// Counts requests, not distinct blocks: endgame duplicates make the two
+    /// differ.
+    fn requests_in_flight(&self) -> usize {
+        self.by_peer.values().map(|blocks| blocks.len()).sum()
     }
 }
 

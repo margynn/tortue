@@ -1,7 +1,4 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 use sha1::{Digest, Sha1};
 
@@ -31,7 +28,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 const BLOCK_SIZE: usize = 15 * 1024; // 15 KiB
 const MAX_BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum PieceEvent {
@@ -95,16 +91,18 @@ impl PieceManager {
         }
     }
 
-    pub fn missing_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
+    pub fn unreceived_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
         self.pieces
             .get(piece_index)
             .into_iter()
             .flat_map(move |piece| {
-                piece.missing_blocks().map(move |block_index| BlockRange {
-                    piece_index,
-                    piece_offset: block_index * BLOCK_SIZE,
-                    piece_len: piece.block_length(block_index).expect("iter on blocks"),
-                })
+                piece
+                    .unreceived_blocks()
+                    .map(move |block_index| BlockRange {
+                        piece_index,
+                        piece_offset: block_index * BLOCK_SIZE,
+                        piece_len: piece.block_length(block_index).expect("iter on blocks"),
+                    })
             })
     }
 
@@ -170,7 +168,11 @@ impl PieceManager {
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
 
-        p.receive_block(block_index, data)?;
+        // An endgame duplicate must not re-emit `PieceCompleted`: that would
+        // write the piece and broadcast `Have` twice.
+        if !p.receive_block(block_index, data)? {
+            return Ok(PieceEvent::BlockReceived);
+        }
 
         if !p.is_complete() {
             return Ok(PieceEvent::BlockReceived);
@@ -202,7 +204,7 @@ fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
 #[derive(Clone)]
 pub enum BlockState {
     Missing,
-    Requested { at: Instant },
+    Requested,
     Received { buffer: Vec<u8> },
 }
 
@@ -222,30 +224,22 @@ impl Piece {
         }
     }
 
-    fn missing_blocks(&self) -> impl Iterator<Item = usize> + '_ {
-        let now = Instant::now();
-        self.blocks
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, state)| {
-                let requestable = match state {
-                    BlockState::Missing => true,
-                    BlockState::Requested { at } => now >= *at + REQUEST_TIMEOUT,
-                    BlockState::Received { .. } => false,
-                };
-                requestable.then_some(index)
-            })
+    fn unreceived_blocks(&self) -> impl Iterator<Item = usize> + '_ {
+        self.blocks.iter().enumerate().filter_map(|(index, state)| {
+            (!matches!(state, BlockState::Received { .. })).then_some(index)
+        })
     }
 
     fn request_block(&mut self, block_index: usize) -> Result<()> {
         if block_index >= self.blocks.len() {
             return Err(Error::InvalidBlockIndex(block_index));
         }
-        self.blocks[block_index] = BlockState::Requested { at: Instant::now() };
+        self.blocks[block_index] = BlockState::Requested;
         Ok(())
     }
 
-    fn receive_block(&mut self, block_index: usize, data: Vec<u8>) -> Result<()> {
+    /// `false` when the block was already received, i.e. nothing changed.
+    fn receive_block(&mut self, block_index: usize, data: Vec<u8>) -> Result<bool> {
         let expected_length = self.block_length(block_index)?;
         if data.len() != expected_length {
             return Err(Error::InvalidBlockSize {
@@ -253,13 +247,12 @@ impl Piece {
                 actual: data.len(),
             });
         }
-        // Prevent duplicated blocks
         if matches!(self.blocks[block_index], BlockState::Received { .. }) {
-            return Ok(());
+            return Ok(false);
         }
         self.blocks[block_index] = BlockState::Received { buffer: data };
         self.received += 1;
-        Ok(())
+        Ok(true)
     }
 
     fn block_length(&self, block_index: usize) -> Result<usize> {
