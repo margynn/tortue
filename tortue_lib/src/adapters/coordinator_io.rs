@@ -9,9 +9,9 @@ use tracing::info;
 use crate::{
     application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
+        coordinator::{Coordinator, CoordinatorSnapshot, Input, Output},
         message::Message,
         peer::PeerEvent,
-        pool::{Input, Output, Pool, PoolSnapshot},
         torrent::Metainfo,
     },
 };
@@ -24,7 +24,7 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct PoolIO<S, C> {
+pub struct CoordinatorIO<S, C> {
     metainfo: Arc<Metainfo>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
@@ -32,16 +32,16 @@ pub struct PoolIO<S, C> {
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     piece_store: S,
     peer_connector: C,
-    progress_tx: watch::Sender<PoolSnapshot>,
+    progress_tx: watch::Sender<CoordinatorSnapshot>,
 }
 
-impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
+impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
     pub fn new(
         metainfo: Arc<Metainfo>,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
         peer_connector: C,
         piece_store: S,
-        progress_tx: watch::Sender<PoolSnapshot>,
+        progress_tx: watch::Sender<CoordinatorSnapshot>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
@@ -57,7 +57,7 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut pool = Pool::new(Arc::clone(&self.metainfo));
+        let mut coordinator = Coordinator::new(Arc::clone(&self.metainfo));
         let mut tick = time::interval(Duration::from_secs(5));
 
         loop {
@@ -86,11 +86,11 @@ impl<S: PieceStore, C: PeerConnector> PoolIO<S, C> {
                 },
             };
 
-            for out in pool.step(input) {
+            for out in coordinator.step(input) {
                 self.handle_output(out);
             }
 
-            let _ = self.progress_tx.send(pool.snapshot());
+            let _ = self.progress_tx.send(coordinator.snapshot());
         }
 
         Ok(())

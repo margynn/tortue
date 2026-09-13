@@ -11,17 +11,18 @@ use super::{
 };
 use crate::{
     adapters::{
-        disk_storage::DiskStorage, peer_io::TcpPeerConnector, pool_io::PoolIO,
+        coordinator_io::CoordinatorIO, disk_storage::DiskStorage, peer_io::TcpPeerConnector,
         tracker_io::TrackerIO,
     },
     application::magnet::fetch_metadata,
     domain::{
-        magnet::MagnetLink, peer::PeerId, pool::PoolSnapshot, torrent::Metainfo, tracker::Node,
+        coordinator::CoordinatorSnapshot, magnet::MagnetLink, peer::PeerId, torrent::Metainfo,
+        tracker::Node,
     },
 };
 
 pub struct Download {
-    pub progress: watch::Receiver<PoolSnapshot>,
+    pub progress: watch::Receiver<CoordinatorSnapshot>,
     pub task: JoinHandle<Result<()>>,
 }
 
@@ -54,7 +55,7 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         }
     }
 
-    let initial = PoolSnapshot {
+    let initial = CoordinatorSnapshot {
         blocks_total: 0,
         blocks_done: 0,
         blocks_in_flight: 0,
@@ -65,15 +66,19 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
     let connector =
         TcpPeerConnector::new(node.id, metainfo.info_hash, Some(metainfo.info_bytes.len()));
     let storage = DiskStorage::new(&metainfo, output_dir).await?;
-    let mut pool = PoolIO::new(
+    let mut coordinator = CoordinatorIO::new(
         Arc::clone(&metainfo),
         peers_rx,
         connector,
         storage,
         progress_tx,
     );
-    let task =
-        tokio::spawn(async move { pool.run().await.map_err(|e| Error::Failed(e.to_string())) });
+    let task = tokio::spawn(async move {
+        coordinator
+            .run()
+            .await
+            .map_err(|e| Error::Failed(e.to_string()))
+    });
 
     Ok(Download {
         progress: progress_rx,

@@ -183,7 +183,7 @@ impl TcpPeerIO {
             read_task.abort()
         }
 
-        // Sentinel: ensures Pool always receives Disconnected even on clean exit.
+        // Sentinel: ensures Coordinator always receives Disconnected even on clean exit.
         let _ = evt_tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
         Ok(())
     }

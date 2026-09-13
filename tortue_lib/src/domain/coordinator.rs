@@ -1,25 +1,29 @@
+mod block_assignment;
+mod peer_state;
+mod piece_availability;
+
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, hash_map::Entry},
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, Instant},
     vec,
 };
 
 use rand::seq::IteratorRandom;
 
-use crate::domain::{
-    message::{UT_METADATA_EXT_ID, UtMetadataMessage},
-    peer::PeerExtensions,
-};
+use block_assignment::BlockAssignments;
+use peer_state::PeerState;
+use piece_availability::PieceAvailability;
 
 use super::{
     bitfield::Bitfield,
-    message::{ExtensionHandshake, Message},
-    peer::PeerId,
+    message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
+    peer::{PeerExtensions, PeerId},
     pieces::{BlockRange, BlockRef, PieceEvent, PieceManager},
     torrent::Metainfo,
 };
+
+pub(super) type PieceIndex = usize;
 
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
@@ -45,9 +49,7 @@ pub enum Output {
     Completed,
 }
 
-type PieceIndex = usize;
-
-pub struct Pool {
+pub struct Coordinator {
     metainfo: Arc<Metainfo>,
     peers: HashMap<SocketAddr, PeerState>,
     availability: PieceAvailability,
@@ -55,14 +57,14 @@ pub struct Pool {
     pieces: PieceManager,
 }
 
-pub struct PoolSnapshot {
+pub struct CoordinatorSnapshot {
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
     pub peers: Vec<SocketAddr>,
 }
 
-impl Pool {
+impl Coordinator {
     pub fn new(metainfo: Arc<Metainfo>) -> Self {
         let pieces = PieceManager::new(Arc::clone(&metainfo));
         Self {
@@ -74,8 +76,8 @@ impl Pool {
         }
     }
 
-    pub fn snapshot(&self) -> PoolSnapshot {
-        PoolSnapshot {
+    pub fn snapshot(&self) -> CoordinatorSnapshot {
+        CoordinatorSnapshot {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
@@ -516,199 +518,5 @@ impl Pool {
             .filter(|s| !s.peer_choking)
             .map(|s| self.block_assignments.free_slots_for(s.addr))
             .sum()
-    }
-}
-
-struct BlockAssignments {
-    by_peer: HashMap<SocketAddr, HashMap<BlockRef, Instant>>,
-}
-
-impl BlockAssignments {
-    const MAX_IN_FLIGHT_PER_PEER: usize = 16;
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-    fn new() -> Self {
-        Self {
-            by_peer: HashMap::new(),
-        }
-    }
-
-    fn assign(&mut self, b: BlockRef, addr: SocketAddr) {
-        self.by_peer
-            .entry(addr)
-            .or_default()
-            .insert(b, Instant::now());
-    }
-
-    fn unassign(&mut self, b: BlockRef, addr: SocketAddr) {
-        if let Some(blocks) = self.by_peer.get_mut(&addr) {
-            blocks.remove(&b);
-        }
-    }
-
-    fn is_holder(&self, b: BlockRef, addr: SocketAddr) -> bool {
-        self.by_peer
-            .get(&addr)
-            .is_some_and(|blocks| blocks.contains_key(&b))
-    }
-
-    fn holder_count(&self, b: BlockRef) -> usize {
-        self.by_peer
-            .values()
-            .filter(|blocks| blocks.contains_key(&b))
-            .count()
-    }
-
-    fn has_holder(&self, b: BlockRef) -> bool {
-        self.by_peer.values().any(|blocks| blocks.contains_key(&b))
-    }
-
-    fn in_flight_for(&self, addr: SocketAddr) -> usize {
-        self.by_peer.get(&addr).map_or(0, |blocks| blocks.len())
-    }
-
-    fn release_peer(&mut self, addr: SocketAddr) -> Vec<BlockRef> {
-        self.by_peer
-            .remove(&addr)
-            .map(|blocks| blocks.into_keys().collect())
-            .unwrap_or_default()
-    }
-
-    /// Drops requests we have waited too long for, freeing the peer's slot and
-    /// letting the block be offered around again — including back to that peer.
-    fn release_expired(&mut self) -> Vec<BlockRef> {
-        let now = Instant::now();
-        let mut expired = vec![];
-        for blocks in self.by_peer.values_mut() {
-            blocks.retain(|block_ref, at| {
-                let alive = now < *at + Self::REQUEST_TIMEOUT;
-                if !alive {
-                    expired.push(*block_ref);
-                }
-                alive
-            });
-        }
-        expired
-    }
-
-    fn free_slots_for(&self, addr: SocketAddr) -> usize {
-        Self::MAX_IN_FLIGHT_PER_PEER.saturating_sub(self.in_flight_for(addr))
-    }
-
-    fn has_capacity(&self, addr: SocketAddr) -> bool {
-        self.free_slots_for(addr) > 0
-    }
-
-    /// Counts requests, not distinct blocks: endgame duplicates make the two
-    /// differ.
-    fn requests_in_flight(&self) -> usize {
-        self.by_peer.values().map(|blocks| blocks.len()).sum()
-    }
-}
-
-struct PieceAvailability {
-    by_piece: HashMap<PieceIndex, HashSet<SocketAddr>>,
-}
-
-impl PieceAvailability {
-    fn new() -> Self {
-        Self {
-            by_piece: HashMap::new(),
-        }
-    }
-
-    fn record(&mut self, piece_index: PieceIndex, addr: SocketAddr) {
-        self.by_piece.entry(piece_index).or_default().insert(addr);
-    }
-
-    fn remove_peer(&mut self, addr: SocketAddr) {
-        self.by_piece.retain(|_, peers| {
-            peers.remove(&addr);
-            !peers.is_empty()
-        });
-    }
-
-    /// Peers known to have `piece_index` (empty iterator if none known).
-    fn peers_for(&self, piece_index: PieceIndex) -> impl Iterator<Item = &SocketAddr> {
-        self.by_piece.get(&piece_index).into_iter().flatten()
-    }
-
-    /// Rarity for sorting: fewer known peers = rarer. Unknown pieces sort last.
-    fn rarity(&self, piece_index: PieceIndex) -> usize {
-        self.by_piece
-            .get(&piece_index)
-            .map_or(usize::MAX, |peers| peers.len())
-    }
-}
-
-#[derive(Clone)]
-struct PeerState {
-    addr: SocketAddr,
-    peer_id: PeerId,
-    am_choking: bool,
-    am_interested: bool,
-    peer_choking: bool,
-    peer_interested: bool,
-    bitfield: Bitfield,
-    allowed_fast: HashSet<usize>,
-    dht: bool,
-    fast: bool,
-    extensions: Option<ExtensionHandshake>, // BEP 10
-}
-
-impl PeerState {
-    fn new(addr: SocketAddr, peer_id: PeerId, pieces: usize, extensions: PeerExtensions) -> Self {
-        Self {
-            addr,
-            peer_id,
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            bitfield: Bitfield::new(pieces),
-            allowed_fast: HashSet::new(),
-            dht: extensions.dht,
-            fast: extensions.fast,
-            extensions: None,
-        }
-    }
-
-    fn apply(&mut self, msg: &Message) {
-        match msg {
-            Message::Choke => self.peer_choking = true,
-            Message::Unchoke => self.peer_choking = false,
-            Message::Interested => self.peer_interested = true,
-            Message::NotInterested => self.peer_interested = false,
-            Message::Bitfield(bits) => {
-                if let Ok(bf) = Bitfield::try_from(bits.as_ref()) {
-                    self.bitfield = bf;
-                }
-            },
-            Message::Have(piece) => {
-                let _ = self.bitfield.set_bit(*piece as usize);
-            },
-            Message::KeepAlive => {},
-            Message::Request { .. } => {},
-            Message::Piece { .. } => {},
-            Message::Cancel { .. } => {},
-            Message::ExtensionHandshake(hs) => self.extensions = Some(hs.clone()),
-            Message::Extension { .. } => {},
-            Message::SuggestPiece(_) => {},
-            Message::HaveAll => {
-                self.bitfield.set_all();
-            },
-            Message::HaveNone => {
-                self.bitfield.unset_all();
-            },
-            Message::RejectRequest { .. } => {},
-            Message::AllowedFast(piece) => {
-                self.allowed_fast.insert(*piece);
-            },
-            Message::Unimplemented => {},
-        }
-    }
-
-    fn can_serve(&self, piece_index: usize) -> bool {
-        !self.peer_choking || self.allowed_fast.contains(&piece_index)
     }
 }
