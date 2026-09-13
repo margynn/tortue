@@ -110,7 +110,10 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
                     let _ = tx.try_send(message);
                 }
             },
-            Output::Completed => info!("download completed"),
+            Output::Completed => {
+                info!("download completed");
+                // todo: hook
+            },
             Output::WritePiece { offset, data } => {
                 if let Err(e) = self.piece_store.write(offset, &data) {
                     tracing::error!(error = %e, "failed to write piece");
@@ -125,6 +128,9 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {
+        if self.peer_cmds.contains_key(&addr) {
+            return;
+        }
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         self.peer_cmds.insert(addr, cmd_tx);
         self.peer_connector

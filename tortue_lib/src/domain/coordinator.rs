@@ -52,7 +52,8 @@ pub struct CoordinatorSnapshot {
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
-    pub peers: Vec<SocketAddr>,
+    pub seeders: Vec<SocketAddr>,
+    pub leechers: Vec<SocketAddr>,
 }
 
 impl Coordinator {
@@ -71,7 +72,8 @@ impl Coordinator {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
-            peers: self.peer_registry.addrs().collect(),
+            seeders: vec![],  //self.peer_registry.seeders().collect(),
+            leechers: vec![], //self.peer_registry.leechers().collect(),
         }
     }
 
@@ -99,10 +101,13 @@ impl Coordinator {
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.peer_registry.disconnected(addr);
         self.block_assignments.release_peer(addr);
-        vec![]
+        self.plan()
     }
 
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
+        if self.pieces.is_complete() {
+            return vec![];
+        }
         let mut output = vec![];
         for addr in socket_addrs {
             if !self.peer_registry.contains(addr) {
@@ -271,6 +276,7 @@ impl Coordinator {
         ];
         if self.pieces.is_complete() {
             outputs.push(Output::Completed);
+            outputs.extend(self.peer_registry.seeders().map(Output::DisconnectPeer));
         }
         outputs
     }

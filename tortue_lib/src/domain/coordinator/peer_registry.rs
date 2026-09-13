@@ -47,6 +47,20 @@ impl PeerRegistry {
         self.peers.keys().copied()
     }
 
+    pub(super) fn seeders(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.peers
+            .keys()
+            .copied()
+            .filter(|&addr| self.availability.is_seeder(addr))
+    }
+
+    pub(super) fn leechers(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.peers
+            .keys()
+            .copied()
+            .filter(|&addr| !self.availability.is_seeder(addr))
+    }
+
     /// `Some(Message::Interested)` the first time we become interested in
     /// `addr` — the caller relays it. `None` on every later call.
     pub(super) fn declare_interest(&mut self, addr: SocketAddr) -> Option<Message> {
@@ -151,6 +165,16 @@ impl PieceAvailability {
             peers.remove(&addr);
             !peers.is_empty()
         });
+    }
+
+    fn has(&self, piece: PieceIndex, addr: SocketAddr) -> bool {
+        self.by_piece
+            .get(&piece)
+            .is_some_and(|peers| peers.contains(&addr))
+    }
+
+    fn is_seeder(&self, addr: SocketAddr) -> bool {
+        (0..self.total_pieces).all(|piece| self.has(piece, addr))
     }
 
     /// Peers known to have `piece_index` (empty iterator if none known).

@@ -59,7 +59,8 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         blocks_total: 0,
         blocks_done: 0,
         blocks_in_flight: 0,
-        peers: Vec::new(),
+        seeders: Vec::new(),
+        leechers: Vec::new(),
     };
     let (progress_tx, progress_rx) = watch::channel(initial);
 

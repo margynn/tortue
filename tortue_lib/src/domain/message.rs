@@ -68,6 +68,8 @@ pub enum Message {
 pub struct ExtensionHandshake {
     pub extensions: HashMap<String, u8>,
     pub metadata_size: Option<usize>, // BEP 9
+
+    // All these ones seems optionnal an not really used
     pub listen_port: Option<u16>,
     pub client: Option<String>,
     pub your_ip: Option<Vec<u8>>,
