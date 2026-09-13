@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::domain::pieces::BlockRef;
+use super::pieces::BlockRef;
 
 pub(super) struct BlockAssignments {
     by_peer: HashMap<SocketAddr, HashMap<BlockRef, Instant>>,
@@ -12,7 +12,7 @@ pub(super) struct BlockAssignments {
 
 impl BlockAssignments {
     const MAX_IN_FLIGHT_PER_PEER: usize = 32;
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     pub(super) fn new() -> Self {
         Self {

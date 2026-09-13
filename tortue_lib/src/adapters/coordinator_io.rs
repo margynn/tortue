@@ -73,7 +73,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
                     None => break,
                     Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
                         info!(addr = %addr, peer_id = %peer_id, "peer connected");
-                        Input::PeerConnected { addr, peer_id, peer_extensions }
+                        Input::PeerConnected { addr, peer_extensions }
                     },
                     Some((addr, PeerEvent::Disconnected)) => {
                         info!(addr = %addr, "peer disconnected");

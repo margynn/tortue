@@ -1,4 +1,4 @@
-# `coordinator/` / `pieces.rs` — diagnostic et réarchitecture
+# `coordinator/` — diagnostic et réarchitecture
 
 ## Le diagnostic en une phrase
 
@@ -6,9 +6,9 @@ Trois faits sont chacun stockés à deux endroits, et la cohérence entre les de
 
 | Fait                       | Copie A                                     | Copie B                                             | Qui synchronise                                                   |
 | -------------------------- | ------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------- |
-| « ce bloc est demandé »    | `BlockState::Requested` (`pieces.rs:207`)   | `BlockAssignments.by_peer` (`coordinator.rs:523`)   | `send_request` écrit les deux, `reset_if_orphaned` les réconcilie |
+| « ce bloc est demandé »    | `BlockState::Requested` (`coordinator/pieces.rs:207`)   | `BlockAssignments.by_peer` (`coordinator.rs:523`)   | `send_request` écrit les deux, `reset_if_orphaned` les réconcilie |
 | « le peer X a la pièce P » | `PeerState.bitfield` (`coordinator.rs:652`) | `PieceAvailability.by_piece` (`coordinator.rs:610`) | personne — les deux divergent                                     |
-| « longueur du bloc »       | `BlockRange.piece_len` (`pieces.rs:53`)     | `Piece::block_length` (`pieces.rs:261`)             | recalculé à chaque itération                                      |
+| « longueur du bloc »       | `BlockRange.piece_len` (`coordinator/pieces.rs:53`)     | `Piece::block_length` (`coordinator/pieces.rs:261`)             | recalculé à chaque itération                                      |
 
 Tant que ces doublons existent, chaque nouvelle fonctionnalité doit apprendre à maintenir les deux copies — c'est exactement ce qui s'est passé en ajoutant l'endgame.
 
@@ -19,7 +19,7 @@ Tant que ces doublons existent, chaque nouvelle fonctionnalité doit apprendre �
 `BlockState` a trois variantes, mais `Missing` et `Requested` sont **indistinguables** :
 
 ```rust
-// pieces.rs:227 — le seul endroit qui lit l'état pour décider quoi demander
+// coordinator/pieces.rs:227 — le seul endroit qui lit l'état pour décider quoi demander
 fn unreceived_blocks(&self) -> impl Iterator<Item = usize> + '_ {
     self.blocks.iter().enumerate().filter_map(|(index, state)| {
         (!matches!(state, BlockState::Received { .. })).then_some(index)
@@ -27,7 +27,7 @@ fn unreceived_blocks(&self) -> impl Iterator<Item = usize> + '_ {
 }
 ```
 
-`Missing` et `Requested` passent tous les deux le filtre. Et `reset_block` (`pieces.rs:132`) ne fait que transformer non-`Received` en `Missing`, c'est-à-dire rien d'observable. L'enum est déclaré `pub` mais n'est utilisé nulle part hors de `pieces.rs`.
+`Missing` et `Requested` passent tous les deux le filtre. Et `reset_block` (`coordinator/pieces.rs:132`) ne fait que transformer non-`Received` en `Missing`, c'est-à-dire rien d'observable. L'enum est déclaré `pub` mais n'est utilisé nulle part hors de `coordinator/pieces.rs`.
 
 Pourquoi c'est arrivé : avant l'endgame, `BlockState::Requested { at }` portait le timeout et répondait donc à « faut-il redemander ce bloc ». Depuis que `BlockAssignments.is_holder` répond à « qui doit livrer ce bloc », cette responsabilité a changé de couche mais l'ancien état est resté.
 
@@ -64,8 +64,8 @@ pub struct Piece {
 Disparaissent en conséquence directe :
 
 - la variante `BlockState::Requested`
-- `PieceManager::request_block` (`pieces.rs:109`) et `Piece::request_block` (`pieces.rs:236`) — un seul appelant, `coordinator.rs:484`, qui jette déjà le résultat avec `let _ =`
-- `PieceManager::reset_block` (`pieces.rs:132`)
+- `PieceManager::request_block` (`coordinator/pieces.rs:109`) et `Piece::request_block` (`coordinator/pieces.rs:236`) — un seul appelant, `coordinator.rs:484`, qui jette déjà le résultat avec `let _ =`
+- `PieceManager::reset_block` (`coordinator/pieces.rs:132`)
 - `Coordinator::reset_if_orphaned` et `Coordinator::release_peer_blocks` — libérer l'assignation devient toute l'opération
 - `BlockAssignments::has_holder`
 
@@ -155,7 +155,7 @@ La règle réelle est simple — _servir toujours le bloc le moins couvert_ — 
 
 ### Solution
 
-Sortir la politique dans une méthode dédiée sur `BlockAssignments` — c'est elle qui mute les assignations, donc c'est elle qui pilote la décision — où la règle est lisible dans la clé de priorité :
+Sortir la politique dans une méthode dédiée — mais pas sur `BlockAssignments`. La politique *lit* `pieces` et `peer_registry` en plus de *muter* `block_assignments` ; l'attacher à l'un des trois le forcerait à dépendre des deux autres, alors qu'aucune de ces couches ne doit connaître les autres (cf. « Les couches cibles » plus bas). `Coordinator` est la seule couche déjà autorisée à toutes les connaître — elle en possède les champs. `plan()` y vit donc en méthode privée, où la règle reste lisible dans la clé de priorité :
 
 ```rust
 struct PlannedRequest {
@@ -164,15 +164,14 @@ struct PlannedRequest {
     peer: SocketAddr,
 }
 
-impl BlockAssignments {
-    fn plan(
-        &mut self,
-        pieces: &PieceManager,
-        peer_registry: &PeerRegistry,
-        rng: &mut impl Rng,
-    ) -> Vec<PlannedRequest>
+impl Coordinator {
+    fn budget(&self) -> usize;
+
+    fn plan(&mut self) -> Vec<PlannedRequest>;
 }
 ```
+
+`budget()` remplace `request_budget` à l'identique (les slots libres des peers qui nous ont débloqués) ; `plan()` le lit en premier et retourne tôt s'il est nul.
 
 Une seule boucle, avec un tas de priorité :
 
@@ -191,7 +190,7 @@ En conséquence, `BlockAssignments` se réduit aux opérations qui ont un sens p
 | `in_flight_for` (`coordinator.rs:566`) | un seul appelant : `free_slots_for`            |
 | `has_capacity` (`coordinator.rs:598`)  | c'est `free_slots_for(a) > 0` au point d'appel |
 
-Il reste `assign`, `unassign`, `is_holder`, `free_slots_for`, `release_peer`, `release_expired`, `requests_in_flight`, `plan`.
+Il reste `assign`, `unassign`, `is_holder`, `free_slots_for`, `release_peer`, `release_expired`, `requests_in_flight` — appelées depuis `Coordinator::plan()` et `Coordinator::budget()`, sans que `BlockAssignments` ait besoin de connaître `PieceManager` ni `PeerRegistry`.
 
 ---
 
@@ -228,7 +227,7 @@ Le tas du scheduler biaise sa clé pour faire remonter les pièces suggérées. 
 
 ## Problème 5 — Indirections résiduelles
 
-**`BlockRange` duplique `BlockRef`.** Deux types décrivent le même bloc, avec un `From` (`pieces.rs:62`) et quatre conversions `BlockRef::from(&..)` dans `coordinator.rs`. La composition dit mieux ce que c'est :
+**`BlockRange` duplique `BlockRef`.** Deux types décrivent le même bloc, avec un `From` (`coordinator/pieces.rs:62`) et quatre conversions `BlockRef::from(&..)` dans `coordinator.rs`. La composition dit mieux ce que c'est :
 
 ```rust
 pub struct BlockRange {
@@ -263,23 +262,24 @@ impl Message {
 }
 ```
 
-**`is_empty` induit en erreur.** `pieces.rs:128` retourne « aucune pièce n'est complète », ce qui est correct pour `HaveNone`, mais le nom se lit comme `Vec::is_empty`. `has_no_piece` dit ce que ça fait.
+**`is_empty` induit en erreur.** `coordinator/pieces.rs:128` retourne « aucune pièce n'est complète », ce qui est correct pour `HaveNone`, mais le nom se lit comme `Vec::is_empty`. `has_no_piece` dit ce que ça fait.
 
-**`PieceManager.bitfield` est un champ public** (`pieces.rs:46`) muté en interne et lu de l'extérieur (`coordinator.rs:154`). Un accesseur `fn bitfield(&self) -> &Bitfield` suffit.
+**`PieceManager.bitfield` est un champ public** (`coordinator/pieces.rs:46`) muté en interne et lu de l'extérieur (`coordinator.rs:154`). Un accesseur `fn bitfield(&self) -> &Bitfield` suffit.
 
 ---
 
 ## Les couches cibles
 
 ```
-PieceManager             ce qu'on assemble       blocs reçus, hash, relecture pour le seeding
-PeerRegistry             qui est là, qui a quoi  peers + index d'availability, une seule mutation
-BlockAssignments         qui nous doit quoi      (peer, bloc) -> Instant
-BlockAssignments::plan() la politique            pieces + peer_registry -> Vec<PlannedRequest>
-Coordinator              le plumbing             Input -> mutations -> Output
+PieceManager        ce qu'on assemble       blocs reçus, hash, relecture pour le seeding
+PeerRegistry        qui est là, qui a quoi  peers + index d'availability, une seule mutation
+BlockAssignments     qui nous doit quoi      (peer, bloc) -> Instant
+Coordinator          le plumbing             Input -> mutations -> Output
 ```
 
-Aucune couche ne connaît celle du dessus. `PieceManager` ne sait plus ce qu'est une requête, un peer ou le temps — donc plus rien à synchroniser avec `coordinator.rs`.
+Aucune des trois premières couches ne connaît les autres. `PieceManager` ne sait plus ce qu'est une requête, un peer ou le temps — donc plus rien à synchroniser avec `coordinator.rs`. `Coordinator` est la seule à les connaître toutes : `plan()` et `budget()` y vivent en méthodes privées précisément pour ça, pas parce que « le plumbing » aurait besoin de politique.
+
+Le découpage en fichiers suit ces couches à l'identique : `PieceManager` (`pieces.rs`), `PeerRegistry` (`peer_registry.rs`) et `BlockAssignments` (`block_assignment.rs`) vivent en sous-modules privés de `coordinator/` — rien en dehors de `Coordinator` ne les utilise, donc rien en dehors ne doit pouvoir les nommer. Seul `coordinator.rs` (le module `coordinator` lui-même, qui porte `Coordinator`) est `pub`.
 
 ## Ordre d'exécution proposé
 
@@ -289,16 +289,16 @@ Chaque étape est indépendamment livrable, et les deux premières sont des retr
 | ----- | ------------------------------------------------------------------------------------------------------ | -------------------------- |
 | 1     | `BlockState` perd sa variante `Requested`, suppression de `request_block` / `reset_block` / `reset_if_orphaned` | retrait net                |
 | 2     | `PeerRegistry`, suppression de `PeerState.bitfield`, correctif du retrait d'availability               | retrait net + correctif    |
-| 3     | `BlockAssignments::plan()` remplace `schedule_requests`                                                | réécriture de la politique |
+| 3     | `Coordinator::plan()` (et `Coordinator::budget()`) remplacent `schedule_requests`                      | réécriture de la politique |
 | 4     | `SuggestPiece` en indice, `BlockRange` composé, `PieceEvent` aplati, `needs_fast`                      | nettoyage                  |
 
-L'étape 3 est la seule qui réécrit un comportement. Comme le projet n'a aucun test (`cargo test` → 0 tests), les tests de `BlockAssignments::plan()` valent d'être écrits **avant** l'étape 3, pas après.
+L'étape 3 est la seule qui réécrit un comportement. Comme le projet n'a aucun test (`cargo test` → 0 tests), les tests de `Coordinator::plan()` valent d'être écrits **avant** l'étape 3, pas après.
 
 ## Bilan
 
 Supprimés : la variante `BlockState::Requested`, l'enum `PieceEvent`, `PieceManager::request_block`, `Piece::request_block`, `PieceManager::reset_block`, `Coordinator::reset_if_orphaned`, `Coordinator::release_peer_blocks`, `BlockAssignments::{has_holder, holder_count, in_flight_for, has_capacity}`, `PeerState::{bitfield, peer_id, am_choking, dht}`, `From<&BlockRange> for BlockRef`, la boucle de `on_message_suggest_piece`, le balayage par profondeur.
 
-Ajoutés : `PeerRegistry` (regroupe deux champs existants), `BlockAssignments::plan()` (remplace `schedule_requests`), `CompletedPiece`, `Message::needs_fast`.
+Ajoutés : `PeerRegistry` (regroupe deux champs existants), `Coordinator::{plan, budget}` (remplacent `schedule_requests` et `request_budget`), `CompletedPiece`, `Message::needs_fast`.
 
 Corrigé au passage : l'index d'availability qui ne décroissait jamais, donc le scheduler qui demandait des pièces à des peers ayant envoyé `HaveNone`.
 
@@ -317,7 +317,7 @@ Dans l'ordre des étapes, en commençant par ceux qui protègent l'étape 3 :
 - `release_peer` n'affecte pas l'autre porteur
 - `release_expired` ne rend que les entrées périmées
 
-**`BlockAssignments::plan()`**
+**`Coordinator::plan()`**
 
 - budget abondant et beaucoup de blocs manquants → aucun duplicata
 - budget supérieur au nombre de blocs non reçus → le surplus part en duplicatas, sur des peers distincts

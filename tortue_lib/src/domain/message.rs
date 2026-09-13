@@ -77,6 +77,18 @@ pub struct ExtensionHandshake {
 }
 
 impl Message {
+    /// BEP 6 messages a peer may only send after negotiating the Fast Extension.
+    pub fn needs_fast(&self) -> bool {
+        matches!(
+            self,
+            Message::HaveAll
+                | Message::HaveNone
+                | Message::SuggestPiece(_)
+                | Message::RejectRequest { .. }
+                | Message::AllowedFast(_)
+        )
+    }
+
     /// Encodes the message as [msg_id][data...].
     /// Does NOT include the 4-byte TCP length prefix — framing is the transport layer's
     /// responsibility. See `frame()` in peer_io, which is the symmetric counterpart of

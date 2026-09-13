@@ -1,19 +1,18 @@
 mod block_assignment;
 mod peer_registry;
+mod pieces;
 
-use std::{collections::hash_map::Entry, net::SocketAddr, sync::Arc, vec};
+use std::{net::SocketAddr, sync::Arc, vec};
 
 use rand::seq::IteratorRandom;
 
 use block_assignment::BlockAssignments;
-
-use crate::domain::coordinator::peer_registry::PeerRegistry;
+use peer_registry::{PeerRegistry, RejectReason};
+use pieces::{BlockRange, BlockRef, PieceEvent, PieceManager};
 
 use super::{
-    bitfield::Bitfield,
     message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
-    peer::{PeerExtensions, PeerId},
-    pieces::{BlockRange, BlockRef, PieceEvent, PieceManager},
+    peer::PeerExtensions,
     torrent::Metainfo,
 };
 
@@ -23,7 +22,6 @@ pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
     PeerConnected {
         addr: SocketAddr,
-        peer_id: PeerId,
         peer_extensions: PeerExtensions,
     },
     PeerDisconnected(SocketAddr),
@@ -59,12 +57,12 @@ pub struct CoordinatorSnapshot {
 
 impl Coordinator {
     pub fn new(metainfo: Arc<Metainfo>) -> Self {
-        let pieces = PieceManager::new(Arc::clone(&metainfo));
+        let total_pieces = metainfo.pieces.len();
         Self {
-            metainfo,
-            peer_registry: PeerRegistry::new(),
+            metainfo: Arc::clone(&metainfo),
+            peer_registry: PeerRegistry::new(total_pieces),
             block_assignments: BlockAssignments::new(),
-            pieces,
+            pieces: PieceManager::new(Arc::clone(&metainfo)),
         }
     }
 
@@ -73,7 +71,7 @@ impl Coordinator {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
-            peers: self.peers.keys().map(|addr| *addr).collect(),
+            peers: self.peer_registry.addrs().collect(),
         }
     }
 
@@ -82,9 +80,8 @@ impl Coordinator {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
             Input::PeerConnected {
                 addr,
-                peer_id,
                 peer_extensions,
-            } => self.on_connected(addr, peer_id, peer_extensions),
+            } => self.on_connected(addr, peer_extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
             Input::Tick => self.on_tick(),
@@ -92,19 +89,19 @@ impl Coordinator {
     }
 
     fn on_tick(&mut self) -> Vec<Output> {
-        // Sweeping here rather than in `schedule_requests` keeps the per-message
+        // Sweeping here rather than in `plan` keeps the per-message
         // path free of a walk over every request in flight; a 30s timeout does
         // not need finer granularity than a tick.
         for block_ref in self.block_assignments.release_expired() {
             self.reset_if_orphaned(block_ref);
         }
-        self.schedule_requests()
+        self.plan()
     }
 
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
         let mut output = vec![];
         for addr in socket_addrs {
-            if let Entry::Vacant(..) = self.peers.entry(addr) {
+            if !self.peer_registry.contains(addr) {
                 output.push(Output::ConnectPeer(addr));
             }
         }
@@ -125,18 +122,9 @@ impl Coordinator {
         }
     }
 
-    fn on_connected(
-        &mut self,
-        addr: SocketAddr,
-        peer_id: PeerId,
-        extensions: PeerExtensions,
-    ) -> Vec<Output> {
+    fn on_connected(&mut self, addr: SocketAddr, extensions: PeerExtensions) -> Vec<Output> {
         self.release_peer_blocks(addr);
-
-        let pieces = self.metainfo.pieces.len();
-        self.peers
-            .entry(addr)
-            .insert_entry(PeerState::new(addr, peer_id, pieces, extensions));
+        self.peer_registry.connected(addr, extensions);
 
         // Communicate the pieces we have — BEP 6 allows exactly one of
         // HaveAll/HaveNone/Bitfield, never a Bitfield on top of the other two.
@@ -153,36 +141,22 @@ impl Coordinator {
     }
 
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
-        self.peers.remove(&addr);
-        self.availability.remove_peer(addr);
+        self.peer_registry.disconnected(addr);
         self.release_peer_blocks(addr);
-        self.schedule_requests()
+        self.plan()
     }
 
     fn on_message(&mut self, addr: SocketAddr, message: Message) -> Vec<Output> {
-        let Some(state) = self.peers.get_mut(&addr) else {
-            return vec![];
-        };
-        state.apply(&message);
-
-        // BEP 6 Safety
-        match message {
-            Message::HaveAll
-            | Message::HaveNone
-            | Message::SuggestPiece(_)
-            | Message::RejectRequest { .. }
-            | Message::AllowedFast(_)
-                if !state.fast =>
-            {
-                return vec![Output::DisconnectPeer(addr)];
-            },
-            _ => {},
-        };
+        match self.peer_registry.apply(addr, &message) {
+            Err(RejectReason::UnknownPeer) => return vec![],
+            Err(RejectReason::ProtocolViolation) => return vec![Output::DisconnectPeer(addr)],
+            Ok(()) => {},
+        }
 
         match message {
             Message::Bitfield(bits) => self.on_message_bitfield(addr, bits),
             Message::Have(piece_index) => self.on_message_have(addr, piece_index),
-            Message::Unchoke => self.schedule_requests(),
+            Message::Unchoke => self.plan(),
             Message::Choke => self.on_message_choke(addr),
             Message::Piece {
                 piece_index,
@@ -215,13 +189,8 @@ impl Coordinator {
                 self.on_extension_message(addr, ext_id, &payload)
             },
 
-            // BEP 6
-            Message::HaveAll => {
-                for piece_index in 0..self.metainfo.pieces.len() {
-                    self.availability.record(piece_index, addr);
-                }
-                self.interested_or_request(addr)
-            },
+            // BEP 6 — availability already updated by `peer_registry.apply` above.
+            Message::HaveAll => self.interested_or_request(addr),
             Message::HaveNone => vec![],
             Message::SuggestPiece(piece_index) => self.on_message_suggest_piece(addr, piece_index),
             Message::RejectRequest {
@@ -244,33 +213,20 @@ impl Coordinator {
     /// Ask the peer to unchoke us (Send Interrested), or send block requests if
     /// already unchocked
     fn interested_or_request(&mut self, addr: SocketAddr) -> Vec<Output> {
-        let peer = self.peers.get_mut(&addr).expect("peer must be available");
-        if !peer.am_interested {
-            peer.am_interested = true;
-            // Signal interest unconditionally — peer will unchoke us if they agree.
-            return vec![Output::SendToPeer {
-                addr,
-                message: Message::Interested,
-            }];
+        if let Some(message) = self.peer_registry.declare_interest(addr) {
+            return vec![Output::SendToPeer { addr, message }];
         }
-        if peer.peer_choking && peer.allowed_fast.is_empty() {
+        if !self.peer_registry.is_requestable(addr) {
             return vec![]; // Already interested, waiting for unchoke.
         }
-        self.schedule_requests()
+        self.plan()
     }
 
-    fn on_message_bitfield(&mut self, addr: SocketAddr, bits: Vec<u8>) -> Vec<Output> {
-        // Record the pieces available at peer
-        if let Ok(bf) = Bitfield::try_from(bits.as_ref()) {
-            for piece in &bf {
-                self.availability.record(piece, addr);
-            }
-        }
+    fn on_message_bitfield(&mut self, addr: SocketAddr, _bits: Vec<u8>) -> Vec<Output> {
         self.interested_or_request(addr)
     }
 
-    fn on_message_have(&mut self, addr: SocketAddr, piece_index: usize) -> Vec<Output> {
-        self.availability.record(piece_index, addr);
+    fn on_message_have(&mut self, addr: SocketAddr, _piece_index: usize) -> Vec<Output> {
         self.interested_or_request(addr)
     }
 
@@ -320,8 +276,8 @@ impl Coordinator {
                 vec![]
             },
             Ok(piece_event) => match piece_event {
-                PieceEvent::BlockReceived => self.schedule_requests(),
-                PieceEvent::PieceInvalid { .. } => self.schedule_requests(),
+                PieceEvent::BlockReceived => self.plan(),
+                PieceEvent::PieceInvalid { .. } => self.plan(),
                 PieceEvent::PieceCompleted {
                     piece_index,
                     piece_offset,
@@ -338,7 +294,7 @@ impl Coordinator {
                         outputs.push(Output::Completed);
                         return outputs;
                     }
-                    outputs.extend(self.schedule_requests());
+                    outputs.extend(self.plan());
                     outputs
                 },
             },
@@ -346,12 +302,7 @@ impl Coordinator {
     }
 
     fn on_extension_message(&self, addr: SocketAddr, ext_id: u8, payload: &[u8]) -> Vec<Output> {
-        let state = self.peers.get(&addr).expect("expect peer");
-        let peer_ext_id = state
-            .extensions
-            .as_ref()
-            .and_then(|hs| hs.extensions.get("ut_metadata").copied());
-        let Some(peer_ext_id) = peer_ext_id else {
+        let Some(peer_ext_id) = self.peer_registry.peer_extension_id(addr, "ut_metadata") else {
             return vec![];
         };
 
@@ -384,11 +335,7 @@ impl Coordinator {
         if !self.pieces.needed_pieces().any(|p| p == piece_index) {
             return vec![]; // already have it
         }
-        if !self
-            .peers
-            .get(&addr)
-            .is_some_and(|s| s.can_serve(piece_index))
-        {
+        if !self.peer_registry.can_serve(addr, piece_index) {
             return vec![]; // peer chokes us and hasn't allow-fasted this piece
         }
 
@@ -409,8 +356,8 @@ impl Coordinator {
         outputs
     }
 
-    fn schedule_requests(&mut self) -> Vec<Output> {
-        let mut budget = self.request_budget();
+    fn plan(&mut self) -> Vec<Output> {
+        let mut budget = self.budget();
         if budget == 0 {
             return vec![];
         }
@@ -422,7 +369,7 @@ impl Coordinator {
         // Needed pieces sorted by rarest first. Cached key: `rarity` hits a
         // HashMap, and `sort_by_key` would re-evaluate it on every comparison.
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
-        needed.sort_by_cached_key(|&piece| self.availability.rarity(piece));
+        needed.sort_by_cached_key(|&piece| self.peer_registry.rarity(piece));
 
         // One sweep per holder count, so no block gets a second peer while
         // another still has none. Sweeping again while budget remains is what
@@ -430,7 +377,7 @@ impl Coordinator {
         // and it is self-limiting: a sweep only reaches depth 1 once every
         // unreceived block has a holder, which caps their number at the requests
         // in flight. A block can be held by at most every peer.
-        for depth in 0..self.peers.len() {
+        for depth in 0..self.peer_registry.len() {
             let mut assigned = 0;
 
             for &piece_index in &needed {
@@ -438,10 +385,10 @@ impl Coordinator {
                     break;
                 }
 
-                // Collect owned addrs — releases the borrow on self.availability
-                // before the inner loop mutates self.peers.
+                // Collect owned addrs — releases the borrow on self.peer_registry
+                // before the inner loop mutates it.
                 peer_addrs.clear(); // keep allocated capacity
-                peer_addrs.extend(self.availability.peers_for(piece_index).copied());
+                peer_addrs.extend(self.peer_registry.peers_with(piece_index));
                 if peer_addrs.is_empty() {
                     continue;
                 }
@@ -495,20 +442,14 @@ impl Coordinator {
         peer_addrs
             .iter()
             .filter(|addr| {
-                self.peers
-                    .get(addr)
-                    .is_some_and(|s| s.can_serve(block_ref.piece_index))
+                self.peer_registry.can_serve(**addr, block_ref.piece_index)
                     && self.block_assignments.has_capacity(**addr)
                     && !self.block_assignments.is_holder(block_ref, **addr)
             })
             .choose(rng)
     }
 
-    fn request_budget(&self) -> usize {
-        self.peers
-            .values()
-            .filter(|s| !s.peer_choking)
-            .map(|s| self.block_assignments.free_slots_for(s.addr))
-            .sum()
+    fn budget(&self) -> usize {
+        self.peer_registry.budget(&self.block_assignments)
     }
 }

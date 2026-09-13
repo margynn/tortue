@@ -8,7 +8,7 @@ use crate::domain::{
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub(super) enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -24,13 +24,12 @@ pub enum Error {
     #[error("invalid piece index: {0}")]
     InvalidPieceIndex(usize),
 }
-pub type Result<T> = std::result::Result<T, Error>;
+pub(super) type Result<T> = std::result::Result<T, Error>;
 
-const BLOCK_SIZE: usize = 15 * 1024; // 15 KiB
-const MAX_BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
+const BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
 
 #[derive(Debug)]
-pub enum PieceEvent {
+pub(super) enum PieceEvent {
     BlockReceived,
     PieceCompleted {
         piece_index: usize,
@@ -40,23 +39,23 @@ pub enum PieceEvent {
     PieceInvalid,
 }
 
-pub struct PieceManager {
+pub(super) struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
-    pub bitfield: Bitfield,
+    pub(super) bitfield: Bitfield,
 }
 
 #[derive(Clone, Copy)]
-pub struct BlockRange {
-    pub piece_index: usize,
-    pub piece_offset: usize,
-    pub piece_len: usize,
+pub(super) struct BlockRange {
+    pub(super) piece_index: usize,
+    pub(super) piece_offset: usize,
+    pub(super) piece_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockRef {
-    pub piece_index: usize,
-    pub piece_offset: usize,
+pub(super) struct BlockRef {
+    pub(super) piece_index: usize,
+    pub(super) piece_offset: usize,
 }
 
 impl From<&BlockRange> for BlockRef {
@@ -70,7 +69,7 @@ impl From<&BlockRange> for BlockRef {
 
 impl PieceManager {
     // TODO: should initialize with existing content when available
-    pub fn new(metainfo: Arc<Metainfo>) -> Self {
+    pub(super) fn new(metainfo: Arc<Metainfo>) -> Self {
         let piece_count = metainfo.pieces.len();
         let mut pieces = Vec::with_capacity(piece_count);
         let bitfield = Bitfield::new(piece_count);
@@ -91,7 +90,10 @@ impl PieceManager {
         }
     }
 
-    pub fn unreceived_blocks(&self, piece_index: usize) -> impl Iterator<Item = BlockRange> + '_ {
+    pub(super) fn unreceived_blocks(
+        &self,
+        piece_index: usize,
+    ) -> impl Iterator<Item = BlockRange> + '_ {
         self.pieces
             .get(piece_index)
             .into_iter()
@@ -106,7 +108,7 @@ impl PieceManager {
             })
     }
 
-    pub fn request_block(&mut self, block_ref: BlockRef) -> Result<()> {
+    pub(super) fn request_block(&mut self, block_ref: BlockRef) -> Result<()> {
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
         self.pieces
             .get_mut(block_ref.piece_index)
@@ -114,22 +116,22 @@ impl PieceManager {
             .request_block(block_index)
     }
 
-    pub fn needed_pieces(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(super) fn needed_pieces(&self) -> impl Iterator<Item = usize> + '_ {
         self.pieces
             .iter()
             .enumerate()
             .filter_map(|(i, p)| (!p.is_complete()).then_some(i))
     }
 
-    pub fn is_complete(&self) -> bool {
+    pub(super) fn is_complete(&self) -> bool {
         self.pieces.iter().all(|p| p.is_complete())
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.pieces.iter().all(|p| !p.is_complete())
     }
 
-    pub fn reset_block(&mut self, block_ref: BlockRef) {
+    pub(super) fn reset_block(&mut self, block_ref: BlockRef) {
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
         if let Some(piece) = self.pieces.get_mut(block_ref.piece_index) {
             if let Some(block) = piece.blocks.get_mut(block_index) {
@@ -140,27 +142,31 @@ impl PieceManager {
         }
     }
 
-    pub fn read_block(
+    pub(super) fn read_block(
         &self,
         piece_index: usize,
         piece_offset: usize,
         piece_len: usize,
     ) -> Option<Vec<u8>> {
-        if piece_len > MAX_BLOCK_SIZE {
+        if piece_len > BLOCK_SIZE {
             return None;
         }
         self.pieces.get(piece_index)?.read(piece_offset, piece_len)
     }
 
-    pub fn blocks_total(&self) -> usize {
+    pub(super) fn blocks_total(&self) -> usize {
         self.pieces.iter().map(|p| p.blocks.len()).sum()
     }
 
-    pub fn blocks_received(&self) -> usize {
+    pub(super) fn blocks_received(&self) -> usize {
         self.pieces.iter().map(|p| p.received).sum()
     }
 
-    pub fn receive_block(&mut self, block_ref: BlockRef, data: Vec<u8>) -> Result<PieceEvent> {
+    pub(super) fn receive_block(
+        &mut self,
+        block_ref: BlockRef,
+        data: Vec<u8>,
+    ) -> Result<PieceEvent> {
         let piece_index = block_ref.piece_index;
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
         let p = self
@@ -202,13 +208,13 @@ fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
 }
 
 #[derive(Clone)]
-pub enum BlockState {
+pub(super) enum BlockState {
     Missing,
     Requested,
     Received { buffer: Vec<u8> },
 }
 
-pub struct Piece {
+struct Piece {
     blocks: Vec<BlockState>,
     length: usize,
     received: usize,

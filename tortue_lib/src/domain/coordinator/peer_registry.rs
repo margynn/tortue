@@ -15,6 +15,12 @@ pub(super) struct PeerRegistry {
     availability: PieceAvailability,
 }
 
+pub(super) enum RejectReason {
+    UnknownPeer,
+    /// A BEP6 message from a peer that never negotiated the Fast Extension.
+    ProtocolViolation,
+}
+
 impl PeerRegistry {
     pub(super) fn new(total_pieces: usize) -> Self {
         Self {
@@ -32,10 +38,56 @@ impl PeerRegistry {
         self.availability.remove_peer(addr);
     }
 
-    pub(super) fn apply(&mut self, addr: SocketAddr, msg: &Message) {
+    pub(super) fn contains(&self, addr: SocketAddr) -> bool {
+        self.peers.contains_key(&addr)
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    pub(super) fn addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.peers.keys().copied()
+    }
+
+    /// `Some(Message::Interested)` the first time we become interested in
+    /// `addr` — the caller relays it. `None` on every later call.
+    pub(super) fn declare_interest(&mut self, addr: SocketAddr) -> Option<Message> {
+        let peer = self.peers.get_mut(&addr)?;
+        if peer.am_interested {
+            return None;
+        }
+        peer.am_interested = true;
+        Some(Message::Interested)
+    }
+
+    /// Can we currently ask `addr` for blocks — i.e. not choked, or choked
+    /// but holding a piece it allow-fasted us.
+    pub(super) fn is_requestable(&self, addr: SocketAddr) -> bool {
+        self.peers
+            .get(&addr)
+            .is_some_and(|p| !p.peer_choking || !p.allowed_fast.is_empty())
+    }
+
+    pub(super) fn peer_extension_id(&self, addr: SocketAddr, name: &str) -> Option<u8> {
+        self.peers
+            .get(&addr)?
+            .extensions
+            .as_ref()?
+            .extensions
+            .get(name)
+            .copied()
+    }
+
+    /// Applies `msg` to `addr`'s state, rejecting it before any mutation
+    /// happens if the peer is unknown or the message violates BEP6.
+    pub(super) fn apply(&mut self, addr: SocketAddr, msg: &Message) -> Result<(), RejectReason> {
         let Some(peer) = self.peers.get_mut(&addr) else {
-            return;
+            return Err(RejectReason::UnknownPeer);
         };
+        if msg.needs_fast() && !peer.fast {
+            return Err(RejectReason::ProtocolViolation);
+        }
         peer.apply(msg);
 
         match msg {
@@ -53,6 +105,7 @@ impl PeerRegistry {
             Message::HaveNone => self.availability.remove_peer(addr),
             _ => {},
         }
+        Ok(())
     }
 
     pub(super) fn peers_with(&self, piece: usize) -> impl Iterator<Item = SocketAddr> + '_ {
@@ -67,7 +120,7 @@ impl PeerRegistry {
         self.peers.get(&addr).is_some_and(|s| s.can_serve(piece))
     }
 
-    pub(super) fn unchoked(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    fn unchoked(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.peers
             .iter()
             .filter(|(_, s)| !s.peer_choking)
