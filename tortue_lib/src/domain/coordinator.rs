@@ -96,6 +96,12 @@ impl Coordinator {
         self.plan()
     }
 
+    fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
+        self.peer_registry.disconnected(addr);
+        self.block_assignments.release_peer(addr);
+        vec![]
+    }
+
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
         let mut output = vec![];
         for addr in socket_addrs {
@@ -120,14 +126,8 @@ impl Coordinator {
             Message::Bitfield(self.pieces.bitfield().clone().into())
         };
         let mut out = vec![Output::SendToPeer { addr, message }];
-        out.extend(self.interested_or_request(addr));
+        out.extend(self.declare_interest(addr));
         out
-    }
-
-    fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
-        self.peer_registry.disconnected(addr);
-        self.block_assignments.release_peer(addr);
-        self.plan()
     }
 
     fn on_message(&mut self, addr: SocketAddr, message: Message) -> Vec<Output> {
@@ -137,16 +137,21 @@ impl Coordinator {
             Ok(()) => {},
         }
 
-        match message {
+        // Decided once, up front: does this message type ever change what
+        // `plan()` can accomplish? See `Message::affects_scheduling`.
+        let should_plan = message.affects_scheduling();
+
+        let mut outputs = match message {
+            // Availability-only: recorded by `peer_registry.apply` above,
+            // scheduled at the next tick rather than replanning right away.
             Message::Bitfield(_) | Message::Have(_) | Message::HaveAll => {
-                // Availability already updated by `peer_registry.apply` above.
-                self.interested_or_request(addr)
+                self.declare_interest(addr)
             },
             Message::HaveNone => vec![],
-            Message::Unchoke => self.plan(),
+            Message::Unchoke => vec![],
             Message::Choke => {
                 self.block_assignments.release_peer(addr);
-                self.interested_or_request(addr)
+                vec![]
             },
             Message::Piece {
                 piece_index,
@@ -180,8 +185,8 @@ impl Coordinator {
             },
 
             // BEP 6 — the hint is already recorded on the peer by
-            // `peer_registry.apply`; `plan()` is what acts on it.
-            Message::SuggestPiece(_) => self.interested_or_request(addr),
+            // `peer_registry.apply`; deferred to the next tick like Have.
+            Message::SuggestPiece(_) => self.declare_interest(addr),
             Message::RejectRequest {
                 piece_index,
                 piece_offset,
@@ -192,22 +197,24 @@ impl Coordinator {
                     piece_offset,
                 };
                 self.block_assignments.unassign(block_ref, addr);
-                self.interested_or_request(addr)
+                vec![]
             },
-            Message::AllowedFast(_) => self.interested_or_request(addr),
+            Message::AllowedFast(_) => self.declare_interest(addr),
+        };
+
+        if should_plan {
+            outputs.extend(self.plan());
         }
+        outputs
     }
 
-    /// Ask the peer to unchoke us (send Interested), or request blocks if
-    /// already unchoked.
-    fn interested_or_request(&mut self, addr: SocketAddr) -> Vec<Output> {
-        if let Some(message) = self.peer_registry.declare_interest(addr) {
-            return vec![Output::SendToPeer { addr, message }];
+    /// Tell the peer we're interested, but only the first time — a no-op
+    /// once `am_interested` is already set.
+    fn declare_interest(&mut self, addr: SocketAddr) -> Vec<Output> {
+        match self.peer_registry.declare_interest(addr) {
+            Some(message) => vec![Output::SendToPeer { addr, message }],
+            None => vec![],
         }
-        if !self.peer_registry.is_requestable(addr) {
-            return vec![]; // Already interested, waiting for unchoke.
-        }
-        self.plan()
     }
 
     fn on_message_request(
@@ -252,7 +259,7 @@ impl Coordinator {
             data,
         }) = completed
         else {
-            return self.plan();
+            return vec![];
         };
 
         let mut outputs = vec![
@@ -264,9 +271,7 @@ impl Coordinator {
         ];
         if self.pieces.is_complete() {
             outputs.push(Output::Completed);
-            return outputs;
         }
-        outputs.extend(self.plan());
         outputs
     }
 

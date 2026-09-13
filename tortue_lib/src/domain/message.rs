@@ -89,6 +89,23 @@ impl Message {
         )
     }
 
+    /// Whether handling this message could change what a scheduler can
+    /// accomplish — i.e. it may free/gain a request slot, or unlock a peer's
+    /// eligibility for a specific block. Pure availability/hint messages
+    /// (`Bitfield`/`Have`/`HaveAll`/`SuggestPiece`) don't: they add
+    /// candidates but never change budget, so rescheduling after them can
+    /// wait for the next periodic tick instead of running on every one.
+    pub fn affects_scheduling(&self) -> bool {
+        matches!(
+            self,
+            Message::Unchoke
+                | Message::Choke
+                | Message::AllowedFast(_)
+                | Message::RejectRequest { .. }
+                | Message::Piece { .. }
+        )
+    }
+
     /// Encodes the message as [msg_id][data...].
     /// Does NOT include the 4-byte TCP length prefix — framing is the transport layer's
     /// responsibility. See `frame()` in peer_io, which is the symmetric counterpart of

@@ -58,14 +58,6 @@ impl PeerRegistry {
         Some(Message::Interested)
     }
 
-    /// Can we currently ask `addr` for blocks — i.e. not choked, or choked
-    /// but holding a piece it allow-fasted us.
-    pub(super) fn is_requestable(&self, addr: SocketAddr) -> bool {
-        self.peers
-            .get(&addr)
-            .is_some_and(|p| !p.peer_choking || !p.allowed_fast.is_empty())
-    }
-
     pub(super) fn peer_extension_id(&self, addr: SocketAddr, name: &str) -> Option<u8> {
         self.peers
             .get(&addr)?

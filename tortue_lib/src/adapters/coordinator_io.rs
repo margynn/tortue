@@ -36,6 +36,8 @@ pub struct CoordinatorIO<S, C> {
 }
 
 impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
+    const TICK_INTERVAL: Duration = Duration::from_secs(20);
+
     pub fn new(
         metainfo: Arc<Metainfo>,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
@@ -58,7 +60,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
 
     pub async fn run(&mut self) -> Result<()> {
         let mut coordinator = Coordinator::new(Arc::clone(&self.metainfo));
-        let mut tick = time::interval(Duration::from_secs(5));
+        let mut tick = time::interval(Self::TICK_INTERVAL);
 
         loop {
             let input = tokio::select! {
