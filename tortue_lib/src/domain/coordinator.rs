@@ -1,19 +1,13 @@
 mod block_assignment;
-mod peer_state;
-mod piece_availability;
+mod peer_registry;
 
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    net::SocketAddr,
-    sync::Arc,
-    vec,
-};
+use std::{collections::hash_map::Entry, net::SocketAddr, sync::Arc, vec};
 
 use rand::seq::IteratorRandom;
 
 use block_assignment::BlockAssignments;
-use peer_state::PeerState;
-use piece_availability::PieceAvailability;
+
+use crate::domain::coordinator::peer_registry::PeerRegistry;
 
 use super::{
     bitfield::Bitfield,
@@ -51,8 +45,7 @@ pub enum Output {
 
 pub struct Coordinator {
     metainfo: Arc<Metainfo>,
-    peers: HashMap<SocketAddr, PeerState>,
-    availability: PieceAvailability,
+    peer_registry: PeerRegistry,
     block_assignments: BlockAssignments,
     pieces: PieceManager,
 }
@@ -69,8 +62,7 @@ impl Coordinator {
         let pieces = PieceManager::new(Arc::clone(&metainfo));
         Self {
             metainfo,
-            peers: HashMap::new(),
-            availability: PieceAvailability::new(),
+            peer_registry: PeerRegistry::new(),
             block_assignments: BlockAssignments::new(),
             pieces,
         }

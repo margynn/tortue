@@ -4,11 +4,11 @@
 
 Trois faits sont chacun stockés à deux endroits, et la cohérence entre les deux copies est maintenue à la main par le scheduler. Ce n'est pas un problème de nombre de fonctions : c'est un problème de frontières entre couches.
 
-| Fait | Copie A | Copie B | Qui synchronise |
-| --- | --- | --- | --- |
-| « ce bloc est demandé » | `BlockState::Requested` (`pieces.rs:207`) | `BlockAssignments.by_peer` (`coordinator.rs:523`) | `send_request` écrit les deux, `reset_if_orphaned` les réconcilie |
-| « le peer X a la pièce P » | `PeerState.bitfield` (`coordinator.rs:652`) | `PieceAvailability.by_piece` (`coordinator.rs:610`) | personne — les deux divergent |
-| « longueur du bloc » | `BlockRange.piece_len` (`pieces.rs:53`) | `Piece::block_length` (`pieces.rs:261`) | recalculé à chaque itération |
+| Fait                       | Copie A                                     | Copie B                                             | Qui synchronise                                                   |
+| -------------------------- | ------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------- |
+| « ce bloc est demandé »    | `BlockState::Requested` (`pieces.rs:207`)   | `BlockAssignments.by_peer` (`coordinator.rs:523`)   | `send_request` écrit les deux, `reset_if_orphaned` les réconcilie |
+| « le peer X a la pièce P » | `PeerState.bitfield` (`coordinator.rs:652`) | `PieceAvailability.by_piece` (`coordinator.rs:610`) | personne — les deux divergent                                     |
+| « longueur du bloc »       | `BlockRange.piece_len` (`pieces.rs:53`)     | `Piece::block_length` (`pieces.rs:261`)             | recalculé à chaque itération                                      |
 
 Tant que ces doublons existent, chaque nouvelle fonctionnalité doit apprendre à maintenir les deux copies — c'est exactement ce qui s'est passé en ajoutant l'endgame.
 
@@ -46,11 +46,16 @@ Elle est appelée depuis trois chemins (`release_peer_blocks`, `RejectRequest`, 
 
 ### Solution
 
-`PieceManager` ne doit rien savoir des requêtes. Son métier c'est « le fichier qu'on assemble » : stocker les blocs reçus, vérifier les hash, relire pour le seeding.
+`PieceManager` ne doit rien savoir des requêtes. Son métier c'est « le fichier qu'on assemble » : stocker les blocs reçus, vérifier les hash, relire pour le seeding. `BlockState` reste, mais perd la variante que personne ne peut distinguer de `Missing` :
 
 ```rust
+pub enum BlockState {
+    Missing,
+    Received(Vec<u8>),
+}
+
 pub struct Piece {
-    blocks: Vec<Option<Vec<u8>>>,   // reçu, ou pas
+    blocks: Vec<BlockState>,
     length: usize,
     received: usize,
 }
@@ -58,13 +63,13 @@ pub struct Piece {
 
 Disparaissent en conséquence directe :
 
-- l'enum `BlockState`
+- la variante `BlockState::Requested`
 - `PieceManager::request_block` (`pieces.rs:109`) et `Piece::request_block` (`pieces.rs:236`) — un seul appelant, `coordinator.rs:484`, qui jette déjà le résultat avec `let _ =`
 - `PieceManager::reset_block` (`pieces.rs:132`)
 - `Coordinator::reset_if_orphaned` et `Coordinator::release_peer_blocks` — libérer l'assignation devient toute l'opération
 - `BlockAssignments::has_holder`
 
-L'invariant disparaît avec l'état qu'il protégeait. C'est un retrait net, vérifiable au compilateur.
+L'invariant disparaît avec l'état qu'il protégeait ; l'enum survit, réduite aux deux variantes qu'on peut effectivement distinguer. C'est un retrait net, vérifiable au compilateur.
 
 ---
 
@@ -72,23 +77,23 @@ L'invariant disparaît avec l'état qu'il protégeait. C'est un retrait net, vé
 
 `PeerState.bitfield` est écrit à quatre endroits, tous dans `PeerState::apply` :
 
-| Ligne | Écriture |
-| --- | --- |
-| `coordinator.rs:684` | `self.bitfield = bf` (message `Bitfield`) |
+| Ligne                | Écriture                                     |
+| -------------------- | -------------------------------------------- |
+| `coordinator.rs:684` | `self.bitfield = bf` (message `Bitfield`)    |
 | `coordinator.rs:688` | `self.bitfield.set_bit(..)` (message `Have`) |
-| `coordinator.rs:698` | `self.bitfield.set_all()` (`HaveAll`) |
-| `coordinator.rs:701` | `self.bitfield.unset_all()` (`HaveNone`) |
+| `coordinator.rs:698` | `self.bitfield.set_all()` (`HaveAll`)        |
+| `coordinator.rs:701` | `self.bitfield.unset_all()` (`HaveNone`)     |
 
 **Il n'est jamais lu.** Le scheduler interroge `PieceAvailability` (`coordinator.rs:431` pour `rarity`, `coordinator.rs:450` pour `peers_for`), pas le bitfield du peer. C'est de l'état mort qui coûte une allocation par peer et qui donne l'illusion que l'information est là.
 
 Le vrai problème est dans l'autre copie. Les mutations de `availability` sont dispersées sur quatre sites d'appel, et **aucun ne retire** :
 
-| Ligne | Appel | Retire ? |
-| --- | --- | --- |
-| `coordinator.rs:163` | `remove_peer` sur déconnexion | oui |
-| `coordinator.rs:227` | `record` pour chaque pièce (`HaveAll`) | non |
-| `coordinator.rs:272` | `record` pour chaque bit (`Bitfield`) | non |
-| `coordinator.rs:279` | `record` (`Have`) | non |
+| Ligne                | Appel                                  | Retire ? |
+| -------------------- | -------------------------------------- | -------- |
+| `coordinator.rs:163` | `remove_peer` sur déconnexion          | oui      |
+| `coordinator.rs:227` | `record` pour chaque pièce (`HaveAll`) | non      |
+| `coordinator.rs:272` | `record` pour chaque bit (`Bitfield`)  | non      |
+| `coordinator.rs:279` | `record` (`Have`)                      | non      |
 
 Deux conséquences réelles :
 
@@ -144,13 +149,13 @@ for depth in 0..self.peers.len() {              // profondeur de duplication
 }
 ```
 
-La règle réelle est simple — *servir toujours le bloc le moins couvert* — mais elle n'est écrite nulle part. Elle émerge de l'imbrication : le balayage par profondeur existe uniquement parce que la clé de tri (`holder_count`) change pendant l'allocation. Résultat, pour comprendre la politique il faut simuler les boucles dans sa tête.
+La règle réelle est simple — _servir toujours le bloc le moins couvert_ — mais elle n'est écrite nulle part. Elle émerge de l'imbrication : le balayage par profondeur existe uniquement parce que la clé de tri (`holder_count`) change pendant l'allocation. Résultat, pour comprendre la politique il faut simuler les boucles dans sa tête.
 
 Ça coûte aussi en performance : `holder_count` (`coordinator.rs:555`) est un scan O(nb_peers), appelé **par bloc candidat et par profondeur**.
 
 ### Solution
 
-Sortir la politique dans une fonction dédiée, où la règle est lisible dans la clé de priorité :
+Sortir la politique dans une méthode dédiée sur `BlockAssignments` — c'est elle qui mute les assignations, donc c'est elle qui pilote la décision — où la règle est lisible dans la clé de priorité :
 
 ```rust
 struct PlannedRequest {
@@ -159,12 +164,14 @@ struct PlannedRequest {
     peer: SocketAddr,
 }
 
-fn plan(
-    pieces: &PieceManager,
-    peer_registry: &PeerRegistry,
-    assignments: &mut BlockAssignments,
-    rng: &mut impl Rng,
-) -> Vec<PlannedRequest>
+impl BlockAssignments {
+    fn plan(
+        &mut self,
+        pieces: &PieceManager,
+        peer_registry: &PeerRegistry,
+        rng: &mut impl Rng,
+    ) -> Vec<PlannedRequest>
+}
 ```
 
 Une seule boucle, avec un tas de priorité :
@@ -177,14 +184,14 @@ La terminaison est évidente : chaque tour dépile, et on ne réempile qu'après
 
 En conséquence, `BlockAssignments` se réduit aux opérations qui ont un sens pour ses appelants :
 
-| Supprimé | Pourquoi |
-| --- | --- |
-| `holder_count` (`coordinator.rs:555`) | remplacé par la passe unique du scheduler |
-| `has_holder` (`coordinator.rs:562`) | disparaît avec `reset_if_orphaned` |
-| `in_flight_for` (`coordinator.rs:566`) | un seul appelant : `free_slots_for` |
-| `has_capacity` (`coordinator.rs:598`) | c'est `free_slots_for(a) > 0` au point d'appel |
+| Supprimé                               | Pourquoi                                       |
+| -------------------------------------- | ---------------------------------------------- |
+| `holder_count` (`coordinator.rs:555`)  | remplacé par la passe unique du scheduler      |
+| `has_holder` (`coordinator.rs:562`)    | disparaît avec `reset_if_orphaned`             |
+| `in_flight_for` (`coordinator.rs:566`) | un seul appelant : `free_slots_for`            |
+| `has_capacity` (`coordinator.rs:598`)  | c'est `free_slots_for(a) > 0` au point d'appel |
 
-Il reste `assign`, `unassign`, `is_holder`, `free_slots_for`, `release_peer`, `release_expired`, `requests_in_flight`.
+Il reste `assign`, `unassign`, `is_holder`, `free_slots_for`, `release_peer`, `release_expired`, `requests_in_flight`, `plan`.
 
 ---
 
@@ -241,15 +248,19 @@ pub struct CompletedPiece {
     pub data: Vec<u8>,
 }
 
-pub fn receive_block(..) -> Result<Option<CompletedPiece>>
+impl PieceManager {
+    pub fn receive_block(&mut self, ..) -> Result<Option<CompletedPiece>>
+}
 ```
 
 Le match s'aplatit en trois bras : `Err`, `Ok(None)`, `Ok(Some(piece))`. On perd l'information « hash invalide » ; rien ne la consomme aujourd'hui, et un scoring de peer la réintroduirait explicitement au moment d'en avoir besoin.
 
-**La garde BEP 6 est un `match` de plus.** `on_message` (`coordinator.rs:168`) enchaîne deux `match message` : le premier (`coordinator.rs:175-186`) déconnecte les peers qui utilisent le Fast Extension sans l'avoir négocié, le second dispatche. Le premier se lit mieux en prédicat :
+**La garde BEP 6 est un `match` de plus.** `on_message` (`coordinator.rs:168`) enchaîne deux `match message` : le premier (`coordinator.rs:175-186`) déconnecte les peers qui utilisent le Fast Extension sans l'avoir négocié, le second dispatche. Le premier se lit mieux en prédicat, porté par `Message` lui-même :
 
 ```rust
-fn needs_fast(msg: &Message) -> bool
+impl Message {
+    fn needs_fast(&self) -> bool
+}
 ```
 
 **`is_empty` induit en erreur.** `pieces.rs:128` retourne « aucune pièce n'est complète », ce qui est correct pour `HaveNone`, mais le nom se lit comme `Vec::is_empty`. `has_no_piece` dit ce que ça fait.
@@ -261,11 +272,11 @@ fn needs_fast(msg: &Message) -> bool
 ## Les couches cibles
 
 ```
-PieceManager        ce qu'on assemble       blocs reçus, hash, relecture pour le seeding
-PeerRegistry        qui est là, qui a quoi  peers + index d'availability, une seule mutation
-BlockAssignments    qui nous doit quoi      (peer, bloc) -> Instant
-plan()              la politique            les trois ci-dessus -> Vec<PlannedRequest>
-Coordinator         le plumbing             Input -> mutations -> Output
+PieceManager             ce qu'on assemble       blocs reçus, hash, relecture pour le seeding
+PeerRegistry             qui est là, qui a quoi  peers + index d'availability, une seule mutation
+BlockAssignments         qui nous doit quoi      (peer, bloc) -> Instant
+BlockAssignments::plan() la politique            pieces + peer_registry -> Vec<PlannedRequest>
+Coordinator              le plumbing             Input -> mutations -> Output
 ```
 
 Aucune couche ne connaît celle du dessus. `PieceManager` ne sait plus ce qu'est une requête, un peer ou le temps — donc plus rien à synchroniser avec `coordinator.rs`.
@@ -274,20 +285,20 @@ Aucune couche ne connaît celle du dessus. `PieceManager` ne sait plus ce qu'est
 
 Chaque étape est indépendamment livrable, et les deux premières sont des retraits nets que le compilateur valide.
 
-| Étape | Contenu | Nature |
-| --- | --- | --- |
-| 1 | `BlockState` → `Option<Vec<u8>>`, suppression de `request_block` / `reset_block` / `reset_if_orphaned` | retrait net |
-| 2 | `PeerRegistry`, suppression de `PeerState.bitfield`, correctif du retrait d'availability | retrait net + correctif |
-| 3 | `plan()` remplace `schedule_requests` | réécriture de la politique |
-| 4 | `SuggestPiece` en indice, `BlockRange` composé, `PieceEvent` aplati, `needs_fast` | nettoyage |
+| Étape | Contenu                                                                                                | Nature                     |
+| ----- | ------------------------------------------------------------------------------------------------------ | -------------------------- |
+| 1     | `BlockState` perd sa variante `Requested`, suppression de `request_block` / `reset_block` / `reset_if_orphaned` | retrait net                |
+| 2     | `PeerRegistry`, suppression de `PeerState.bitfield`, correctif du retrait d'availability               | retrait net + correctif    |
+| 3     | `BlockAssignments::plan()` remplace `schedule_requests`                                                | réécriture de la politique |
+| 4     | `SuggestPiece` en indice, `BlockRange` composé, `PieceEvent` aplati, `needs_fast`                      | nettoyage                  |
 
-L'étape 3 est la seule qui réécrit un comportement. Comme le projet n'a aucun test (`cargo test` → 0 tests), les tests de `plan()` valent d'être écrits **avant** l'étape 3, pas après.
+L'étape 3 est la seule qui réécrit un comportement. Comme le projet n'a aucun test (`cargo test` → 0 tests), les tests de `BlockAssignments::plan()` valent d'être écrits **avant** l'étape 3, pas après.
 
 ## Bilan
 
-Supprimés : les enums `BlockState` et `PieceEvent`, `PieceManager::request_block`, `Piece::request_block`, `PieceManager::reset_block`, `Coordinator::reset_if_orphaned`, `Coordinator::release_peer_blocks`, `BlockAssignments::{has_holder, holder_count, in_flight_for, has_capacity}`, `PeerState::{bitfield, peer_id, am_choking, dht}`, `From<&BlockRange> for BlockRef`, la boucle de `on_message_suggest_piece`, le balayage par profondeur.
+Supprimés : la variante `BlockState::Requested`, l'enum `PieceEvent`, `PieceManager::request_block`, `Piece::request_block`, `PieceManager::reset_block`, `Coordinator::reset_if_orphaned`, `Coordinator::release_peer_blocks`, `BlockAssignments::{has_holder, holder_count, in_flight_for, has_capacity}`, `PeerState::{bitfield, peer_id, am_choking, dht}`, `From<&BlockRange> for BlockRef`, la boucle de `on_message_suggest_piece`, le balayage par profondeur.
 
-Ajoutés : `PeerRegistry` (regroupe deux champs existants), `plan()` (remplace `schedule_requests`), `CompletedPiece`, `needs_fast`.
+Ajoutés : `PeerRegistry` (regroupe deux champs existants), `BlockAssignments::plan()` (remplace `schedule_requests`), `CompletedPiece`, `Message::needs_fast`.
 
 Corrigé au passage : l'index d'availability qui ne décroissait jamais, donc le scheduler qui demandait des pièces à des peers ayant envoyé `HaveNone`.
 
@@ -296,21 +307,25 @@ Corrigé au passage : l'index d'availability qui ne décroissait jamais, donc le
 Dans l'ordre des étapes, en commençant par ceux qui protègent l'étape 3 :
 
 **`PeerRegistry`**
+
 - `HaveNone` après `HaveAll` vide l'availability du peer
 - un `Bitfield` de remplacement n'accumule pas les bits de l'ancien
 
 **`BlockAssignments`**
+
 - deux porteurs pour un même bloc ; `free_slots_for` reste exact après `unassign`
 - `release_peer` n'affecte pas l'autre porteur
 - `release_expired` ne rend que les entrées périmées
 
-**`plan()`**
+**`BlockAssignments::plan()`**
+
 - budget abondant et beaucoup de blocs manquants → aucun duplicata
 - budget supérieur au nombre de blocs non reçus → le surplus part en duplicatas, sur des peers distincts
 - l'ordre de rareté est respecté
 - un bloc que personne ne peut servir n'empêche pas les autres d'être planifiés
 
 **`Coordinator`**
+
 - un `Piece` venant d'un non-porteur est ignoré
 - un second exemplaire d'une pièce déjà complète n'émet ni `WritePiece`, ni `Have`, ni `Completed`
 

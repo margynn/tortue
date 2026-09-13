@@ -12,7 +12,7 @@ pub(super) struct BlockAssignments {
 
 impl BlockAssignments {
     const MAX_IN_FLIGHT_PER_PEER: usize = 32;
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
     pub(super) fn new() -> Self {
         Self {
