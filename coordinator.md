@@ -285,20 +285,22 @@ Le découpage en fichiers suit ces couches à l'identique : `PieceManager` (`pie
 
 Chaque étape est indépendamment livrable, et les deux premières sont des retraits nets que le compilateur valide.
 
-| Étape | Contenu                                                                                                | Nature                     |
-| ----- | ------------------------------------------------------------------------------------------------------ | -------------------------- |
-| 1     | `BlockState` perd sa variante `Requested`, suppression de `request_block` / `reset_block` / `reset_if_orphaned` | retrait net                |
-| 2     | `PeerRegistry`, suppression de `PeerState.bitfield`, correctif du retrait d'availability               | retrait net + correctif    |
-| 3     | `Coordinator::plan()` (et `Coordinator::budget()`) remplacent `schedule_requests`                      | réécriture de la politique |
-| 4     | `SuggestPiece` en indice, `BlockRange` composé, `PieceEvent` aplati, `needs_fast`                      | nettoyage                  |
+| Étape | Contenu                                                                                                          | Nature                      | Statut |
+| ----- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------- | ------ |
+| 1     | `BlockState` perd sa variante `Requested`, suppression de `request_block` / `reset_block` / `reset_if_orphaned`   | retrait net                  | fait   |
+| 2     | `PeerRegistry`, suppression de `PeerState.bitfield`, correctif du retrait d'availability                          | retrait net + correctif      | fait   |
+| 3     | `Coordinator::plan()` (et `Coordinator::budget()`) remplacent `schedule_requests`                                 | réécriture de la politique   | fait   |
+| 4     | `SuggestPiece` en indice, `BlockRange` composé, `PieceEvent` aplati, `needs_fast`                                  | nettoyage                    | fait   |
 
-L'étape 3 est la seule qui réécrit un comportement. Comme le projet n'a aucun test (`cargo test` → 0 tests), les tests de `Coordinator::plan()` valent d'être écrits **avant** l'étape 3, pas après.
+L'étape 3 est la seule qui réécrit un comportement. Comme le projet n'a aucun test (`cargo test` → 0 tests), les tests de `Coordinator::plan()` valent d'être écrits **avant** l'étape 3, pas après — c'est l'ordre suivi : tous les tests de la section « Tests à écrire » ci-dessous accompagnent la réécriture, pas après coup.
+
+Écart mineur par rapport à la politique décrite au Problème 3 : la clé de priorité du tas y ajoute `suggested` (Problème 4) en tête, avant `(holders, rarity)` — les deux solutions se combinent naturellement dans une seule clé `(!suggested, holders, rarity)`.
 
 ## Bilan
 
 Supprimés : la variante `BlockState::Requested`, l'enum `PieceEvent`, `PieceManager::request_block`, `Piece::request_block`, `PieceManager::reset_block`, `Coordinator::reset_if_orphaned`, `Coordinator::release_peer_blocks`, `BlockAssignments::{has_holder, holder_count, in_flight_for, has_capacity}`, `PeerState::{bitfield, peer_id, am_choking, dht}`, `From<&BlockRange> for BlockRef`, la boucle de `on_message_suggest_piece`, le balayage par profondeur.
 
-Ajoutés : `PeerRegistry` (regroupe deux champs existants), `Coordinator::{plan, budget}` (remplacent `schedule_requests` et `request_budget`), `CompletedPiece`, `Message::needs_fast`.
+Ajoutés : `PeerRegistry` (regroupe deux champs existants), `Coordinator::{plan, budget}` (remplacent `schedule_requests` et `request_budget`), `CompletedPiece`, `Message::needs_fast`, `PieceManager::bitfield()`/`has_no_piece()` (remplacent le champ public et `is_empty`), `PeerState.suggested` + `PeerRegistry::is_suggested`.
 
 Corrigé au passage : l'index d'availability qui ne décroissait jamais, donc le scheduler qui demandait des pièces à des peers ayant envoyé `HaveNone`.
 

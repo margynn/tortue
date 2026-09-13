@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
 };
 
-use super::{PieceIndex, block_assignment::BlockAssignments};
+use super::PieceIndex;
 use crate::domain::{
     bitfield::Bitfield,
     message::{ExtensionHandshake, Message},
@@ -15,6 +15,7 @@ pub(super) struct PeerRegistry {
     availability: PieceAvailability,
 }
 
+#[derive(Debug)]
 pub(super) enum RejectReason {
     UnknownPeer,
     /// A BEP6 message from a peer that never negotiated the Fast Extension.
@@ -40,10 +41,6 @@ impl PeerRegistry {
 
     pub(super) fn contains(&self, addr: SocketAddr) -> bool {
         self.peers.contains_key(&addr)
-    }
-
-    pub(super) fn len(&self) -> usize {
-        self.peers.len()
     }
 
     pub(super) fn addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
@@ -120,17 +117,17 @@ impl PeerRegistry {
         self.peers.get(&addr).is_some_and(|s| s.can_serve(piece))
     }
 
-    fn unchoked(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    /// `true` if any known peer has ever hinted (BEP6 `SuggestPiece`) that it
+    /// would serve `piece` well — advisory, biases scheduling but never gates it.
+    pub(super) fn is_suggested(&self, piece: usize) -> bool {
+        self.peers.values().any(|p| p.suggested.contains(&piece))
+    }
+
+    pub(super) fn unchoked(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.peers
             .iter()
             .filter(|(_, s)| !s.peer_choking)
             .map(|(&addr, _)| addr)
-    }
-
-    pub(super) fn budget(&self, assignments: &BlockAssignments) -> usize {
-        self.unchoked()
-            .map(|addr| assignments.free_slots_for(addr))
-            .sum()
     }
 }
 
@@ -183,6 +180,7 @@ struct PeerState {
     peer_choking: bool,
     peer_interested: bool,
     allowed_fast: HashSet<usize>,
+    suggested: HashSet<usize>,
     fast: bool,
     extensions: Option<ExtensionHandshake>, // BEP 10
 }
@@ -194,6 +192,7 @@ impl PeerState {
             peer_choking: true,
             peer_interested: false,
             allowed_fast: HashSet::new(),
+            suggested: HashSet::new(),
             fast: extensions.fast,
             extensions: None,
         }
@@ -208,6 +207,9 @@ impl PeerState {
             Message::ExtensionHandshake(hs) => self.extensions = Some(hs.clone()),
             Message::AllowedFast(piece) => {
                 self.allowed_fast.insert(*piece);
+            },
+            Message::SuggestPiece(piece) => {
+                self.suggested.insert(*piece);
             },
             _ => {},
         }

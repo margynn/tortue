@@ -39,51 +39,34 @@ impl BlockAssignments {
             .is_some_and(|blocks| blocks.contains_key(&b))
     }
 
-    pub(super) fn holder_count(&self, b: BlockRef) -> usize {
-        self.by_peer
-            .values()
-            .filter(|blocks| blocks.contains_key(&b))
-            .count()
+    /// One pass over every in-flight request: how many peers currently hold
+    /// each block. Replaces a per-block, per-depth scan.
+    pub(super) fn holder_counts(&self) -> HashMap<BlockRef, usize> {
+        let mut counts = HashMap::new();
+        for blocks in self.by_peer.values() {
+            for block_ref in blocks.keys() {
+                *counts.entry(*block_ref).or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
-    pub(super) fn has_holder(&self, b: BlockRef) -> bool {
-        self.by_peer.values().any(|blocks| blocks.contains_key(&b))
-    }
-
-    fn in_flight_for(&self, addr: SocketAddr) -> usize {
-        self.by_peer.get(&addr).map_or(0, |blocks| blocks.len())
-    }
-
-    pub(super) fn release_peer(&mut self, addr: SocketAddr) -> Vec<BlockRef> {
-        self.by_peer
-            .remove(&addr)
-            .map(|blocks| blocks.into_keys().collect())
-            .unwrap_or_default()
+    pub(super) fn release_peer(&mut self, addr: SocketAddr) {
+        self.by_peer.remove(&addr);
     }
 
     /// Drops requests we have waited too long for, freeing the peer's slot and
     /// letting the block be offered around again — including back to that peer.
-    pub(super) fn release_expired(&mut self) -> Vec<BlockRef> {
+    pub(super) fn release_expired(&mut self) {
         let now = Instant::now();
-        let mut expired = vec![];
         for blocks in self.by_peer.values_mut() {
-            blocks.retain(|block_ref, at| {
-                let alive = now < *at + Self::REQUEST_TIMEOUT;
-                if !alive {
-                    expired.push(*block_ref);
-                }
-                alive
-            });
+            blocks.retain(|_, at| now < *at + Self::REQUEST_TIMEOUT);
         }
-        expired
     }
 
     pub(super) fn free_slots_for(&self, addr: SocketAddr) -> usize {
-        Self::MAX_IN_FLIGHT_PER_PEER.saturating_sub(self.in_flight_for(addr))
-    }
-
-    pub(super) fn has_capacity(&self, addr: SocketAddr) -> bool {
-        self.free_slots_for(addr) > 0
+        let in_flight = self.by_peer.get(&addr).map_or(0, |blocks| blocks.len());
+        Self::MAX_IN_FLIGHT_PER_PEER.saturating_sub(in_flight)
     }
 
     /// Counts requests, not distinct blocks: endgame duplicates make the two

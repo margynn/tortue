@@ -28,43 +28,28 @@ pub(super) type Result<T> = std::result::Result<T, Error>;
 
 const BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
 
-#[derive(Debug)]
-pub(super) enum PieceEvent {
-    BlockReceived,
-    PieceCompleted {
-        piece_index: usize,
-        piece_offset: u64,
-        data: Vec<u8>,
-    },
-    PieceInvalid,
+pub(super) struct CompletedPiece {
+    pub(super) piece_index: usize,
+    pub(super) piece_offset: u64,
+    pub(super) data: Vec<u8>,
 }
 
 pub(super) struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
-    pub(super) bitfield: Bitfield,
+    bitfield: Bitfield,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct BlockRange {
-    pub(super) piece_index: usize,
-    pub(super) piece_offset: usize,
-    pub(super) piece_len: usize,
+    pub(super) block: BlockRef,
+    pub(super) len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct BlockRef {
     pub(super) piece_index: usize,
     pub(super) piece_offset: usize,
-}
-
-impl From<&BlockRange> for BlockRef {
-    fn from(b: &BlockRange) -> Self {
-        Self {
-            piece_index: b.piece_index,
-            piece_offset: b.piece_offset,
-        }
-    }
 }
 
 impl PieceManager {
@@ -90,6 +75,10 @@ impl PieceManager {
         }
     }
 
+    pub(super) fn bitfield(&self) -> &Bitfield {
+        &self.bitfield
+    }
+
     pub(super) fn unreceived_blocks(
         &self,
         piece_index: usize,
@@ -101,19 +90,13 @@ impl PieceManager {
                 piece
                     .unreceived_blocks()
                     .map(move |block_index| BlockRange {
-                        piece_index,
-                        piece_offset: block_index * BLOCK_SIZE,
-                        piece_len: piece.block_length(block_index).expect("iter on blocks"),
+                        block: BlockRef {
+                            piece_index,
+                            piece_offset: block_index * BLOCK_SIZE,
+                        },
+                        len: piece.block_length(block_index).expect("iter on blocks"),
                     })
             })
-    }
-
-    pub(super) fn request_block(&mut self, block_ref: BlockRef) -> Result<()> {
-        let block_index = block_ref.piece_offset / BLOCK_SIZE;
-        self.pieces
-            .get_mut(block_ref.piece_index)
-            .ok_or(Error::InvalidPieceIndex(block_ref.piece_index))?
-            .request_block(block_index)
     }
 
     pub(super) fn needed_pieces(&self) -> impl Iterator<Item = usize> + '_ {
@@ -127,19 +110,8 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.is_complete())
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(super) fn has_no_piece(&self) -> bool {
         self.pieces.iter().all(|p| !p.is_complete())
-    }
-
-    pub(super) fn reset_block(&mut self, block_ref: BlockRef) {
-        let block_index = block_ref.piece_offset / BLOCK_SIZE;
-        if let Some(piece) = self.pieces.get_mut(block_ref.piece_index) {
-            if let Some(block) = piece.blocks.get_mut(block_index) {
-                if !matches!(block, BlockState::Received { .. }) {
-                    *block = BlockState::Missing;
-                }
-            }
-        }
     }
 
     pub(super) fn read_block(
@@ -162,11 +134,14 @@ impl PieceManager {
         self.pieces.iter().map(|p| p.received).sum()
     }
 
+    /// `Ok(None)` covers both "block received, piece still incomplete" and
+    /// "piece completed but failed its hash" (reset internally either way) —
+    /// nothing downstream distinguishes them today.
     pub(super) fn receive_block(
         &mut self,
         block_ref: BlockRef,
         data: Vec<u8>,
-    ) -> Result<PieceEvent> {
+    ) -> Result<Option<CompletedPiece>> {
         let piece_index = block_ref.piece_index;
         let block_index = block_ref.piece_offset / BLOCK_SIZE;
         let p = self
@@ -174,14 +149,10 @@ impl PieceManager {
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
 
-        // An endgame duplicate must not re-emit `PieceCompleted`: that would
+        // An endgame duplicate must not re-emit a completion: that would
         // write the piece and broadcast `Have` twice.
-        if !p.receive_block(block_index, data)? {
-            return Ok(PieceEvent::BlockReceived);
-        }
-
-        if !p.is_complete() {
-            return Ok(PieceEvent::BlockReceived);
+        if !p.receive_block(block_index, data)? || !p.is_complete() {
+            return Ok(None);
         }
 
         let buffer = p.buffer().expect("piece is complete");
@@ -189,16 +160,16 @@ impl PieceManager {
 
         if !verify_piece_hash(expected_hash, &buffer) {
             p.reset();
-            return Ok(PieceEvent::PieceInvalid);
+            return Ok(None);
         }
 
         let torrent_offset = piece_index as u64 * self.metainfo.piece_length as u64;
         self.bitfield.set_bit(piece_index)?;
-        Ok(PieceEvent::PieceCompleted {
+        Ok(Some(CompletedPiece {
             piece_index,
             piece_offset: torrent_offset,
             data: buffer,
-        })
+        }))
     }
 }
 
@@ -208,10 +179,9 @@ fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
 }
 
 #[derive(Clone)]
-pub(super) enum BlockState {
+enum BlockState {
     Missing,
-    Requested,
-    Received { buffer: Vec<u8> },
+    Received(Vec<u8>),
 }
 
 struct Piece {
@@ -231,17 +201,10 @@ impl Piece {
     }
 
     fn unreceived_blocks(&self) -> impl Iterator<Item = usize> + '_ {
-        self.blocks.iter().enumerate().filter_map(|(index, state)| {
-            (!matches!(state, BlockState::Received { .. })).then_some(index)
-        })
-    }
-
-    fn request_block(&mut self, block_index: usize) -> Result<()> {
-        if block_index >= self.blocks.len() {
-            return Err(Error::InvalidBlockIndex(block_index));
-        }
-        self.blocks[block_index] = BlockState::Requested;
-        Ok(())
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, state)| matches!(state, BlockState::Missing).then_some(index))
     }
 
     /// `false` when the block was already received, i.e. nothing changed.
@@ -253,10 +216,10 @@ impl Piece {
                 actual: data.len(),
             });
         }
-        if matches!(self.blocks[block_index], BlockState::Received { .. }) {
+        if matches!(self.blocks[block_index], BlockState::Received(_)) {
             return Ok(false);
         }
-        self.blocks[block_index] = BlockState::Received { buffer: data };
+        self.blocks[block_index] = BlockState::Received(data);
         self.received += 1;
         Ok(true)
     }
@@ -279,7 +242,7 @@ impl Piece {
         }
         let mut buffer = Vec::with_capacity(self.length);
         for block in &self.blocks {
-            let BlockState::Received { buffer: data } = block else {
+            let BlockState::Received(data) = block else {
                 unreachable!("complete piece contains a non-received block");
             };
             buffer.extend_from_slice(data);
@@ -296,7 +259,7 @@ impl Piece {
         while out.len() < len {
             let block_index = pos / BLOCK_SIZE;
             let within_block = pos % BLOCK_SIZE;
-            let BlockState::Received { buffer } = self.blocks.get(block_index)? else {
+            let BlockState::Received(buffer) = self.blocks.get(block_index)? else {
                 return None;
             };
             let take = (len - out.len()).min(buffer.len() - within_block);
