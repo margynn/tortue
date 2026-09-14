@@ -340,6 +340,7 @@ impl Swarm {
 
         let mut holders = self.block_assignments.holder_counts();
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
+        // Sort by suggested and rarest first
         needed.sort_by_cached_key(|&piece| {
             (
                 !self.peer_registry.is_suggested(piece),
@@ -353,18 +354,19 @@ impl Swarm {
 
         let mut rng = rand::rng();
         let mut outputs = vec![];
-        for depth in 0.. {
+        for replication in 0.. {
             let mut assigned = 0;
 
             for &block in &blocks {
                 if budget == 0 {
                     break;
                 }
-                if holders.get(&block.block).copied().unwrap_or(0) != depth {
+                let holders_count = holders.get(&block.block).copied().unwrap_or(0);
+                if holders_count != replication {
                     continue;
                 }
                 let Some(addr) = self.pick_peer(block.block, &mut rng) else {
-                    continue; // Nobody can serve this block right now.
+                    continue;
                 };
 
                 budget -= 1;
