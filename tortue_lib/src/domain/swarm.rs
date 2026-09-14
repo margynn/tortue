@@ -1,6 +1,6 @@
 mod block_assignment;
 mod peer_registry;
-mod pieces;
+mod piece_manager;
 
 use std::{net::SocketAddr, sync::Arc, vec};
 
@@ -8,7 +8,7 @@ use rand::seq::IteratorRandom;
 
 use block_assignment::BlockAssignments;
 use peer_registry::{PeerRegistry, RejectReason};
-use pieces::{BlockRange, BlockRef, CompletedPiece, PieceManager};
+use piece_manager::{BlockRange, BlockRef, CompletedPiece, PieceManager};
 
 use super::{
     message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
@@ -41,14 +41,14 @@ pub enum Output {
     Completed,
 }
 
-pub struct Coordinator {
+pub struct Swarm {
     metainfo: Arc<Metainfo>,
     peer_registry: PeerRegistry,
     block_assignments: BlockAssignments,
     pieces: PieceManager,
 }
 
-pub struct CoordinatorSnapshot {
+pub struct SwarmSnapshot {
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
@@ -56,7 +56,7 @@ pub struct CoordinatorSnapshot {
     pub leechers: Vec<SocketAddr>,
 }
 
-impl Coordinator {
+impl Swarm {
     pub fn new(metainfo: Arc<Metainfo>) -> Self {
         let total_pieces = metainfo.pieces.len();
         Self {
@@ -67,13 +67,13 @@ impl Coordinator {
         }
     }
 
-    pub fn snapshot(&self) -> CoordinatorSnapshot {
-        CoordinatorSnapshot {
+    pub fn snapshot(&self) -> SwarmSnapshot {
+        SwarmSnapshot {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
-            seeders: vec![],  //self.peer_registry.seeders().collect(),
-            leechers: vec![], //self.peer_registry.leechers().collect(),
+            seeders: self.peer_registry.seeders.iter().copied().collect(),
+            leechers: self.peer_registry.leechers.iter().copied().collect(),
         }
     }
 
@@ -276,7 +276,12 @@ impl Coordinator {
         ];
         if self.pieces.is_complete() {
             outputs.push(Output::Completed);
-            outputs.extend(self.peer_registry.seeders().map(Output::DisconnectPeer));
+            outputs.extend(
+                self.peer_registry
+                    .seeders
+                    .iter()
+                    .map(|a| Output::DisconnectPeer(*a)),
+            );
         }
         outputs
     }

@@ -9,9 +9,9 @@ use tracing::info;
 use crate::{
     application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
-        coordinator::{Coordinator, CoordinatorSnapshot, Input, Output},
         message::Message,
         peer::PeerEvent,
+        swarm::{Input, Output, Swarm, SwarmSnapshot},
         torrent::Metainfo,
     },
 };
@@ -32,7 +32,7 @@ pub struct CoordinatorIO<S, C> {
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
     piece_store: S,
     peer_connector: C,
-    progress_tx: watch::Sender<CoordinatorSnapshot>,
+    progress_tx: watch::Sender<SwarmSnapshot>,
 }
 
 impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
@@ -43,7 +43,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
         peer_connector: C,
         piece_store: S,
-        progress_tx: watch::Sender<CoordinatorSnapshot>,
+        progress_tx: watch::Sender<SwarmSnapshot>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
@@ -59,7 +59,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut coordinator = Coordinator::new(Arc::clone(&self.metainfo));
+        let mut coordinator = Swarm::new(Arc::clone(&self.metainfo));
         let mut tick = time::interval(Self::TICK_INTERVAL);
 
         loop {

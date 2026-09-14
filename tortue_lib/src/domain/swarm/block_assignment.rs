@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::pieces::BlockRef;
+use super::piece_manager::BlockRef;
 
 pub(super) struct BlockAssignments {
     by_peer: HashMap<SocketAddr, HashMap<BlockRef, Instant>>,

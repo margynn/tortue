@@ -16,13 +16,12 @@ use crate::{
     },
     application::magnet::fetch_metadata,
     domain::{
-        coordinator::CoordinatorSnapshot, magnet::MagnetLink, peer::PeerId, torrent::Metainfo,
-        tracker::Node,
+        magnet::MagnetLink, peer::PeerId, swarm::SwarmSnapshot, torrent::Metainfo, tracker::Node,
     },
 };
 
 pub struct Download {
-    pub progress: watch::Receiver<CoordinatorSnapshot>,
+    pub progress: watch::Receiver<SwarmSnapshot>,
     pub task: JoinHandle<Result<()>>,
 }
 
@@ -55,7 +54,7 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         }
     }
 
-    let initial = CoordinatorSnapshot {
+    let initial = SwarmSnapshot {
         blocks_total: 0,
         blocks_done: 0,
         blocks_in_flight: 0,

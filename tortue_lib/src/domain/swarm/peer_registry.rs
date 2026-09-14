@@ -13,6 +13,8 @@ use crate::domain::{
 pub(super) struct PeerRegistry {
     peers: HashMap<SocketAddr, PeerState>,
     availability: PieceAvailability,
+    pub seeders: HashSet<SocketAddr>,
+    pub leechers: HashSet<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -27,6 +29,8 @@ impl PeerRegistry {
         Self {
             peers: HashMap::new(),
             availability: PieceAvailability::new(total_pieces),
+            seeders: HashSet::new(),
+            leechers: HashSet::new(),
         }
     }
 
@@ -41,24 +45,6 @@ impl PeerRegistry {
 
     pub(super) fn contains(&self, addr: SocketAddr) -> bool {
         self.peers.contains_key(&addr)
-    }
-
-    pub(super) fn addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
-        self.peers.keys().copied()
-    }
-
-    pub(super) fn seeders(&self) -> impl Iterator<Item = SocketAddr> + '_ {
-        self.peers
-            .keys()
-            .copied()
-            .filter(|&addr| self.availability.is_seeder(addr))
-    }
-
-    pub(super) fn leechers(&self) -> impl Iterator<Item = SocketAddr> + '_ {
-        self.peers
-            .keys()
-            .copied()
-            .filter(|&addr| !self.availability.is_seeder(addr))
     }
 
     /// `Some(Message::Interested)` the first time we become interested in
@@ -108,6 +94,15 @@ impl PeerRegistry {
             Message::HaveNone => self.availability.remove_peer(addr),
             _ => {},
         }
+
+        if self.availability.is_seeder(addr) {
+            self.seeders.insert(addr);
+            self.leechers.remove(&addr);
+        } else {
+            self.leechers.insert(addr);
+            self.seeders.remove(&addr);
+        }
+
         Ok(())
     }
 

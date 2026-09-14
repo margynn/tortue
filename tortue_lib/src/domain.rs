@@ -1,9 +1,9 @@
 pub mod bencode;
 pub mod bitfield;
-pub mod coordinator;
 pub mod magnet;
 pub mod message;
 pub mod metadata;
 pub mod peer;
+pub mod swarm;
 pub mod torrent;
 pub mod tracker;
