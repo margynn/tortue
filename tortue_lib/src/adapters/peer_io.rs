@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
+use rand::RngExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, tcp::OwnedReadHalf},
@@ -36,6 +37,9 @@ pub enum Error {
 
     #[error("message decode: {0}")]
     MessageDecode(#[from] DecodeError),
+
+    #[error("max peer connection attempts")]
+    MaxAttemptsExceeded,
 
     #[error("peer connection cancelled")]
     Cancelled,
@@ -101,7 +105,7 @@ impl TcpPeerIO {
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
     const READ_TIMEOUT: Duration = Duration::from_secs(30);
-    const MAX_RECONNECTION: usize = 10;
+    const MAX_ATTEMPTS: usize = 5;
 
     fn new(
         peer_addr: SocketAddr,
@@ -124,13 +128,8 @@ impl TcpPeerIO {
     ) -> Result<()> {
         let mut keepalive = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
         let mut reconnect_delay = Duration::ZERO;
-        let mut reconnect_cpt = 0;
 
         'run: loop {
-            if reconnect_cpt > Self::MAX_RECONNECTION {
-                break;
-            }
-            reconnect_cpt += 1;
             let (tcp, handshake) = self.connect_with_retry(reconnect_delay).await?;
 
             let _ = evt_tx
@@ -214,16 +213,30 @@ impl TcpPeerIO {
     }
 
     async fn connect_with_retry(&mut self, mut delay: Duration) -> Result<(TcpStream, Handshake)> {
+        let mut attempts = 0;
         loop {
+            if attempts > Self::MAX_ATTEMPTS {
+                return Err(Error::MaxAttemptsExceeded); // Add error variant
+            }
+            attempts += 1;
+
+            let jitter = rand::rng().random_range(0.8..=1.2);
+            let sleep_for = delay.mul_f64(jitter);
+
             tokio::select! {
-                _ = tokio::time::sleep(delay) => {},
+                _ = tokio::time::sleep(sleep_for) => {},
                 _ = self.cancel_rx.changed() => return Err(Error::Cancelled),
             };
 
             match self.connect().await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    tracing::debug!(addr = %self.peer_addr, error = %e, "peer connection failed, retrying");
+                    tracing::debug!(
+                        addr = %self.peer_addr,
+                        error = %e,
+                        "peer connection failed, retrying"
+                    );
+
                     delay = (delay * 2).clamp(Self::RECONNECT_DELAY, Self::MAX_RECONNECT_DELAY);
                 },
             }
@@ -393,19 +406,19 @@ impl Handshake {
     }
 }
 
-// TCP framing for the BitTorrent wire protocol (BEP 3):
-//
-//   send:    msg.encode() → [id][data...]  →  msg.frame() → [len][id][data...]
-//   receive: Message::read_from() strips [len] → [id][data...]  →  Message::decode()
-//
-//   +------------------+-----+------------------+
-//   | length (4 bytes) |  id |  data            |
-//   +------------------+-----+------------------+
-//
-// length = number of bytes after the 4-byte prefix (id + data).
-// KeepAlive is the special case: length = 0, no id, no data.
-
 impl Message {
+    // TCP framing for the BitTorrent wire protocol (BEP 3):
+    //
+    //   send:    msg.encode() → [id][data...]  →  msg.frame() → [len][id][data...]
+    //   receive: Message::read_from() strips [len] → [id][data...]  →  Message::decode()
+    //
+    //   +------------------+-----+------------------+
+    //   | length (4 bytes) |  id |  data            |
+    //   +------------------+-----+------------------+
+    //
+    // length = number of bytes after the 4-byte prefix (id + data).
+    // KeepAlive is the special case: length = 0, no id, no data.
+
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1Mb
 
     fn frame(&self) -> Vec<u8> {
