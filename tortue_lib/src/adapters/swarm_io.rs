@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tokio::{
@@ -30,7 +30,7 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct CoordinatorIO<S, C> {
+pub struct SwarmIO<S, C> {
     metainfo: Arc<Metainfo>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
@@ -40,10 +40,21 @@ pub struct CoordinatorIO<S, C> {
     peer_connector: C,
     progress_tx: watch::Sender<SwarmSnapshot>,
     stats: Arc<Mutex<SessionStats>>,
+    last_sample: RateSample,
 }
 
-impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
+#[derive(Default)]
+struct RateSample {
+    at: Option<Instant>,
+    global_uploaded: u64,
+    global_downloaded: u64,
+    download_rate: f64,
+    upload_rate: f64,
+}
+
+impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     const TICK_INTERVAL: Duration = Duration::from_secs(20);
+    const RATE_INTERVAL: Duration = Duration::from_secs(1);
 
     pub fn new(
         metainfo: Arc<Metainfo>,
@@ -64,6 +75,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
             peer_connector,
             progress_tx,
             stats,
+            last_sample: RateSample::default(),
         }
     }
 
@@ -77,8 +89,6 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
                     Some(addrs) => Input::PeersDiscovered(addrs),
                     None => return Err(Error::TrackerDisconnected),
                 },
-
-                _ = tick.tick() => Input::Tick,
 
                 msg = self.peer_events_rx.recv() => match msg {
                     None => break,
@@ -95,6 +105,13 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
                         Input::MessageReceived { addr, message }
                     },
                 },
+
+                _ = tick.tick() => Input::Tick,
+
+                // _ = rate_tick.tick() => {
+                //     let snapshot = coordinator.snapshot();
+                //     self.publish(snapshot);
+                // },
             };
 
             for out in coordinator.step(input) {
@@ -102,14 +119,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
             }
 
             let snapshot = coordinator.snapshot();
-            *self.stats.lock().unwrap() = SessionStats {
-                uploaded: snapshot.bytes_uploaded,
-                downloaded: snapshot.bytes_downloaded,
-                left: snapshot
-                    .bytes_total
-                    .saturating_sub(snapshot.bytes_downloaded),
-            };
-            let _ = self.progress_tx.send(snapshot);
+            self.publish(snapshot);
         }
 
         Ok(())
@@ -152,5 +162,45 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
         self.peer_cmds.insert(addr, cmd_tx);
         self.peer_connector
             .connect(addr, cmd_rx, self.peer_events_tx.clone());
+    }
+
+    fn publish(&mut self, mut snapshot: SwarmSnapshot) {
+        *self.stats.lock().unwrap() = SessionStats {
+            uploaded: snapshot.bytes_uploaded,
+            downloaded: snapshot.bytes_downloaded,
+            left: snapshot
+                .bytes_total
+                .saturating_sub(snapshot.bytes_downloaded),
+        };
+        self.apply_rates(&mut snapshot);
+        let _ = self.progress_tx.send(snapshot);
+    }
+
+    fn apply_rates(&mut self, snapshot: &mut SwarmSnapshot) {
+        let now = Instant::now();
+        let should_sample = match self.last_sample.at {
+            None => true,
+            Some(prev_at) => now.duration_since(prev_at) >= Self::RATE_INTERVAL,
+        };
+
+        if should_sample {
+            if let Some(prev_at) = self.last_sample.at {
+                let elapsed = now.duration_since(prev_at).as_secs_f64();
+                self.last_sample.download_rate = (snapshot.bytes_downloaded as u64)
+                    .saturating_sub(self.last_sample.global_downloaded)
+                    as f64
+                    / elapsed;
+                self.last_sample.upload_rate = (snapshot.bytes_uploaded as u64)
+                    .saturating_sub(self.last_sample.global_uploaded)
+                    as f64
+                    / elapsed;
+            }
+            self.last_sample.at = Some(now);
+            self.last_sample.global_downloaded = snapshot.bytes_downloaded as u64;
+            self.last_sample.global_uploaded = snapshot.bytes_uploaded as u64;
+        }
+
+        snapshot.download_rate = self.last_sample.download_rate;
+        snapshot.upload_rate = self.last_sample.upload_rate;
     }
 }

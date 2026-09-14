@@ -58,6 +58,17 @@ pub struct SwarmSnapshot {
     pub bytes_uploaded: usize,
     pub seeders: Vec<SocketAddr>,
     pub leechers: Vec<SocketAddr>,
+    pub peers: Vec<PeerStats>,
+    pub download_rate: f64, // bytes/sec, filled in by SwarmIO
+    pub upload_rate: f64,   // bytes/sec, filled in by SwarmIO
+}
+
+pub struct PeerStats {
+    pub addr: SocketAddr,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+    pub download_rate: f64, // bytes/sec, filled in by SwarmIO
+    pub upload_rate: f64,   // bytes/sec, filled in by SwarmIO
 }
 
 impl Swarm {
@@ -81,6 +92,19 @@ impl Swarm {
             bytes_uploaded: self.pieces.uploaded_bytes,
             seeders: self.peer_registry.seeders.iter().copied().collect(),
             leechers: self.peer_registry.leechers.iter().copied().collect(),
+            peers: self
+                .peer_registry
+                .peer_stats()
+                .map(|(addr, bytes_uploaded, bytes_downloaded)| PeerStats {
+                    addr,
+                    bytes_uploaded,
+                    bytes_downloaded,
+                    download_rate: 0.0,
+                    upload_rate: 0.0,
+                })
+                .collect(),
+            download_rate: 0.0,
+            upload_rate: 0.0,
         }
     }
 

@@ -132,6 +132,12 @@ impl PeerRegistry {
             .filter(|(_, s)| !s.peer_choking)
             .map(|(&addr, _)| addr)
     }
+
+    pub(super) fn peer_stats(&self) -> impl Iterator<Item = (SocketAddr, u64, u64)> + '_ {
+        self.peers
+            .iter()
+            .map(|(&addr, s)| (addr, s.bytes_uploaded, s.bytes_downloaded))
+    }
 }
 
 struct PieceAvailability {
@@ -196,6 +202,8 @@ struct PeerState {
     suggested: HashSet<usize>,
     fast: bool,
     extensions: Option<ExtensionHandshake>, // BEP 10
+    bytes_uploaded: u64,
+    bytes_downloaded: u64,
 }
 
 impl PeerState {
@@ -208,6 +216,8 @@ impl PeerState {
             suggested: HashSet::new(),
             fast: extensions.fast,
             extensions: None,
+            bytes_downloaded: 0,
+            bytes_uploaded: 0,
         }
     }
 
@@ -223,6 +233,12 @@ impl PeerState {
             },
             Message::SuggestPiece(piece) => {
                 self.suggested.insert(*piece);
+            },
+            Message::Piece { data, .. } => {
+                self.bytes_downloaded += data.len() as u64;
+            },
+            Message::Request { piece_len, .. } => {
+                self.bytes_uploaded += *piece_len as u64;
             },
             _ => {},
         }

@@ -36,6 +36,7 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 
 Todo:
 
-- send multi requests for blocks
+- swarm control: pause (stop requesting blocks)/resume (begin/continue)/stop (shutdown, send AnnounceEvent:stop to trackers + disconnect all)
+- get peer upload/download rate
 - support cancel requests
 - support connecting peers

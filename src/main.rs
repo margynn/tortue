@@ -74,10 +74,12 @@ async fn main() -> Result<()> {
                     bar.set_length(s.blocks_total as u64);
                     bar.set_position(s.blocks_done as u64);
                     bar.set_message(format!(
-                        "{} seeders, {} leechers {} in flight",
+                        "{} seeders, {} leechers, {} in flight — ↓ {}/s ↑ {}/s",
                         s.seeders.len(),
                         s.leechers.len(),
-                        s.blocks_in_flight
+                        s.blocks_in_flight,
+                        human_size(s.download_rate as u64),
+                        human_size(s.upload_rate as u64),
                     ));
                 }
                 bar.finish_with_message("completed");

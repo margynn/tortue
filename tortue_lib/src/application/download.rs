@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     adapters::{
-        coordinator_io::CoordinatorIO, disk_storage::DiskStorage, peer_io::TcpPeerConnector,
+        disk_storage::DiskStorage, peer_io::TcpPeerConnector, swarm_io::SwarmIO,
         tracker_io::TrackerIO,
     },
     application::magnet::fetch_metadata,
@@ -74,7 +74,7 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         TcpPeerConnector::new(node.id, metainfo.info_hash, Some(metainfo.info_bytes.len()));
     let storage = DiskStorage::new(&metainfo, output_dir).await?;
 
-    let mut coordinator = CoordinatorIO::new(
+    let mut coordinator = SwarmIO::new(
         Arc::clone(&metainfo),
         peers_rx,
         connector,
