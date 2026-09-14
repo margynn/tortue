@@ -85,7 +85,7 @@ Ajouter `#[derive(Clone, Copy)]` sur `SessionStats` (que des `u64`, aucun souci)
 ## Ce qui ne change pas / hors périmètre (à dire explicitement, pas à passer sous silence)
 
 - `AnnounceEvent::Stopped` reste inutilisé : il n'existe aucun chemin d'arrêt propre de l'application aujourd'hui (pas de gestion de shutdown/ctrl-c câblée jusqu'ici) — ajouter `Stopped` sans un tel chemin n'aurait rien à déclencher. Fonctionnalité séparée si besoin plus tard.
-- Fenêtre de course résiduelle très étroite : un peer déjà en cours de handshake au moment exact de `Output::Completed` peut encore atterrir en `Input::PeerConnected` juste après le passage de `is_complete()` à vrai, avant que `on_discovered` ne bloque les *futurs* `ConnectPeer`. Non traité ici (rare, sans conséquence grave — juste une connexion qui ne servira jamais de requête).
+- Fenêtre de course résiduelle très étroite : un peer déjà en cours de handshake au moment exact de `Output::Completed` peut encore atterrir en `Input::PeerConnected` juste après le passage de `is_complete()` à vrai, avant que `on_discovered` ne bloque les _futurs_ `ConnectPeer`. Non traité ici (rare, sans conséquence grave — juste une connexion qui ne servira jamais de requête).
 - Pas de changement dans `peer_registry.rs` / `block_assignment.rs` / le reste du scheduler.
 
 ## Vérification

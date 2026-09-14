@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
@@ -7,7 +7,11 @@ use crate::{
     Metainfo,
     adapters::{metadata_io::MetadataIO, peer_io::TcpPeerConnector, tracker_io::TrackerIO},
     application::ports::peer_source::PeerSource,
-    domain::{magnet::MagnetLink, peer::PeerId, tracker::Node},
+    domain::{
+        magnet::MagnetLink,
+        peer::PeerId,
+        tracker::{Node, SessionStats},
+    },
 };
 
 pub async fn fetch_metadata(magnet: MagnetLink) -> Result<Arc<Metainfo>> {
@@ -15,9 +19,14 @@ pub async fn fetch_metadata(magnet: MagnetLink) -> Result<Arc<Metainfo>> {
         id: PeerId::generate("TT", "0.1.0"),
         port: 1234,
     };
+    let stats = Arc::new(Mutex::new(SessionStats {
+        uploaded: 0,
+        downloaded: 0,
+        left: 1,
+    }));
     let (peers_tx, peers_rx) = mpsc::channel(128);
     for url in &magnet.trackers {
-        if let Ok(source) = TrackerIO::new(url, magnet.info_hash, node) {
+        if let Ok(source) = TrackerIO::new(url, magnet.info_hash, node, Arc::clone(&stats)) {
             let tx = peers_tx.clone();
             tokio::spawn(async move { PeerSource::run(source, tx).await });
         }

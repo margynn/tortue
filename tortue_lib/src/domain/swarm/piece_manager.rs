@@ -38,6 +38,9 @@ pub(super) struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
     bitfield: Bitfield,
+
+    pub(super) uploaded_bytes: usize,
+    pub(super) downloaded_bytes: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +53,12 @@ pub(super) struct BlockRange {
 pub(super) struct BlockRef {
     pub(super) piece_index: usize,
     pub(super) piece_offset: usize,
+}
+
+impl BlockRef {
+    fn block_index(&self) -> usize {
+        self.piece_offset / BLOCK_SIZE
+    }
 }
 
 impl PieceManager {
@@ -72,11 +81,13 @@ impl PieceManager {
             metainfo,
             pieces,
             bitfield,
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
         }
     }
 
-    pub(super) fn bitfield(&self) -> &Bitfield {
-        &self.bitfield
+    pub(super) fn bitfield(&self) -> Vec<u8> {
+        self.bitfield.clone().into()
     }
 
     pub(super) fn unreceived_blocks(
@@ -115,7 +126,7 @@ impl PieceManager {
     }
 
     pub(super) fn read_block(
-        &self,
+        &mut self,
         piece_index: usize,
         piece_offset: usize,
         piece_len: usize,
@@ -123,6 +134,7 @@ impl PieceManager {
         if piece_len > BLOCK_SIZE {
             return None;
         }
+        self.uploaded_bytes += piece_len;
         self.pieces.get(piece_index)?.read(piece_offset, piece_len)
     }
 
@@ -143,15 +155,15 @@ impl PieceManager {
         data: Vec<u8>,
     ) -> Result<Option<CompletedPiece>> {
         let piece_index = block_ref.piece_index;
-        let block_index = block_ref.piece_offset / BLOCK_SIZE;
         let p = self
             .pieces
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
+        self.downloaded_bytes += data.len();
 
         // An endgame duplicate must not re-emit a completion: that would
         // write the piece and broadcast `Have` twice.
-        if !p.receive_block(block_index, data)? || !p.is_complete() {
+        if !p.receive_block(block_ref.block_index(), data)? || !p.is_complete() {
             return Ok(None);
         }
 

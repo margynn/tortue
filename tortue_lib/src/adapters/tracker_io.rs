@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -67,18 +68,25 @@ pub struct TrackerIO {
     client: TrackerClient,
     info_hash: InfoHash,
     node: Node,
+    stats: Arc<Mutex<SessionStats>>,
 }
 
 impl TrackerIO {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub fn new(url: &str, info_hash: InfoHash, node: Node) -> Result<Self> {
+    pub fn new(
+        url: &str,
+        info_hash: InfoHash,
+        node: Node,
+        stats: Arc<Mutex<SessionStats>>,
+    ) -> Result<Self> {
         let client = TrackerClient::new(url)?;
         Ok(Self {
             client,
             info_hash,
             node,
+            stats,
         })
     }
 }
@@ -90,21 +98,28 @@ impl PeerSource for TrackerIO {
         let mut interval = Duration::ZERO;
         let mut backoff = Self::INITIAL_BACKOFF;
         let mut next_event = Some(AnnounceEvent::Started);
+        let mut sent_completed = false;
 
         loop {
             tokio::time::sleep(interval).await;
+
+            let stats = *self.stats.lock().unwrap();
+
+            let event = match next_event.take() {
+                Some(e) => e,
+                None if !sent_completed && stats.left == 0 => {
+                    sent_completed = true;
+                    AnnounceEvent::Completed
+                },
+                None => AnnounceEvent::None,
+            };
 
             let req = AnnounceRequest {
                 info_hash: self.info_hash,
                 peer_id: self.node.id,
                 port: self.node.port,
-                // TODO: Find a way to share session stats
-                stats: SessionStats {
-                    uploaded: 0,
-                    downloaded: 0,
-                    left: 0,
-                },
-                event: next_event.take().unwrap_or(AnnounceEvent::None),
+                stats,
+                event,
                 compact: true,
             };
 

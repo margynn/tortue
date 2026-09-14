@@ -19,10 +19,11 @@ pub enum AnnounceEvent {
     None,
 }
 
+#[derive(Clone, Copy)]
 pub struct SessionStats {
-    pub uploaded: u64,
-    pub downloaded: u64,
-    pub left: u64,
+    pub uploaded: usize,
+    pub downloaded: usize,
+    pub left: usize,
 }
 
 pub struct TrackerResponse {

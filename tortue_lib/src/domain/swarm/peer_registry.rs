@@ -39,6 +39,8 @@ impl PeerRegistry {
     }
 
     pub(super) fn disconnected(&mut self, addr: SocketAddr) {
+        self.seeders.remove(&addr);
+        self.leechers.remove(&addr);
         self.peers.remove(&addr);
         self.availability.remove_peer(addr);
     }

@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use tokio::{
     sync::{mpsc, watch},
@@ -16,7 +19,11 @@ use crate::{
     },
     application::magnet::fetch_metadata,
     domain::{
-        magnet::MagnetLink, peer::PeerId, swarm::SwarmSnapshot, torrent::Metainfo, tracker::Node,
+        magnet::MagnetLink,
+        peer::PeerId,
+        swarm::SwarmSnapshot,
+        torrent::Metainfo,
+        tracker::{Node, SessionStats},
     },
 };
 
@@ -46,32 +53,34 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         port: 1234,
     };
 
+    let stats = Arc::new(Mutex::new(SessionStats {
+        uploaded: 0,
+        downloaded: 0,
+        left: metainfo.total_size() as usize,
+    }));
+
     let (peers_tx, peers_rx) = mpsc::channel(128);
     for url in &metainfo.announce {
-        if let Ok(source) = TrackerIO::new(url, metainfo.info_hash, node) {
+        if let Ok(source) = TrackerIO::new(url, metainfo.info_hash, node, stats.clone()) {
             let tx = peers_tx.clone();
             tokio::spawn(async move { PeerSource::run(source, tx).await });
         }
     }
 
-    let initial = SwarmSnapshot {
-        blocks_total: 0,
-        blocks_done: 0,
-        blocks_in_flight: 0,
-        seeders: Vec::new(),
-        leechers: Vec::new(),
-    };
+    let initial = SwarmSnapshot::default();
     let (progress_tx, progress_rx) = watch::channel(initial);
 
     let connector =
         TcpPeerConnector::new(node.id, metainfo.info_hash, Some(metainfo.info_bytes.len()));
     let storage = DiskStorage::new(&metainfo, output_dir).await?;
+
     let mut coordinator = CoordinatorIO::new(
         Arc::clone(&metainfo),
         peers_rx,
         connector,
         storage,
         progress_tx,
+        stats,
     );
     let task = tokio::spawn(async move {
         coordinator

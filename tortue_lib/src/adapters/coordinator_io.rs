@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{
     sync::{mpsc, watch},
@@ -13,6 +18,7 @@ use crate::{
         peer::PeerEvent,
         swarm::{Input, Output, Swarm, SwarmSnapshot},
         torrent::Metainfo,
+        tracker::SessionStats,
     },
 };
 
@@ -33,6 +39,7 @@ pub struct CoordinatorIO<S, C> {
     piece_store: S,
     peer_connector: C,
     progress_tx: watch::Sender<SwarmSnapshot>,
+    stats: Arc<Mutex<SessionStats>>,
 }
 
 impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
@@ -44,6 +51,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
         peer_connector: C,
         piece_store: S,
         progress_tx: watch::Sender<SwarmSnapshot>,
+        stats: Arc<Mutex<SessionStats>>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
@@ -55,6 +63,7 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
             piece_store,
             peer_connector,
             progress_tx,
+            stats,
         }
     }
 
@@ -92,7 +101,15 @@ impl<S: PieceStore, C: PeerConnector> CoordinatorIO<S, C> {
                 self.handle_output(out);
             }
 
-            let _ = self.progress_tx.send(coordinator.snapshot());
+            let snapshot = coordinator.snapshot();
+            *self.stats.lock().unwrap() = SessionStats {
+                uploaded: snapshot.bytes_uploaded,
+                downloaded: snapshot.bytes_downloaded,
+                left: snapshot
+                    .bytes_total
+                    .saturating_sub(snapshot.bytes_downloaded),
+            };
+            let _ = self.progress_tx.send(snapshot);
         }
 
         Ok(())

@@ -48,10 +48,14 @@ pub struct Swarm {
     pieces: PieceManager,
 }
 
+#[derive(Default)]
 pub struct SwarmSnapshot {
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
+    pub bytes_total: usize,
+    pub bytes_downloaded: usize,
+    pub bytes_uploaded: usize,
     pub seeders: Vec<SocketAddr>,
     pub leechers: Vec<SocketAddr>,
 }
@@ -72,6 +76,9 @@ impl Swarm {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
+            bytes_total: self.metainfo.total_size() as usize,
+            bytes_downloaded: self.pieces.downloaded_bytes,
+            bytes_uploaded: self.pieces.uploaded_bytes,
             seeders: self.peer_registry.seeders.iter().copied().collect(),
             leechers: self.peer_registry.leechers.iter().copied().collect(),
         }
@@ -128,7 +135,7 @@ impl Swarm {
         } else if extensions.fast && self.pieces.has_no_piece() {
             Message::HaveNone
         } else {
-            Message::Bitfield(self.pieces.bitfield().clone().into())
+            Message::Bitfield(self.pieces.bitfield())
         };
         let mut out = vec![Output::SendToPeer { addr, message }];
         out.extend(self.declare_interest(addr));
