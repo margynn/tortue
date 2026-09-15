@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -14,10 +14,10 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::{
-    adapters::bencode::Bencode,
+    InfoHash,
     application::ports::peer_source::PeerSource,
     domain::{
-        torrent::Metainfo,
+        bencode::Bencode,
         tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse},
     },
 };
@@ -36,7 +36,7 @@ pub enum Error {
     UdpRequest(String),
 
     #[error("bencode: {0}")]
-    Bencode(#[from] crate::adapters::bencode::Error),
+    Bencode(#[from] crate::domain::bencode::Error),
 
     #[error("tracker failure: {0}")]
     TrackerFailure(String),
@@ -58,9 +58,6 @@ pub enum Error {
 
     #[error("missing udp port")]
     MissingUdpPort,
-
-    #[error("peers channel closed")]
-    PeersChannelClosed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -69,45 +66,60 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct TrackerIO {
     client: TrackerClient,
-    metainfo: Arc<Metainfo>,
+    info_hash: InfoHash,
     node: Node,
+    stats: Arc<Mutex<SessionStats>>,
 }
 
 impl TrackerIO {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub fn new(url: &str, metainfo: Arc<Metainfo>, node: Node) -> Result<Self> {
+    pub fn new(
+        url: &str,
+        info_hash: InfoHash,
+        node: Node,
+        stats: Arc<Mutex<SessionStats>>,
+    ) -> Result<Self> {
         let client = TrackerClient::new(url)?;
         Ok(Self {
             client,
-            metainfo,
+            info_hash,
             node,
+            stats,
         })
     }
 }
 
 impl PeerSource for TrackerIO {
-    async fn run(mut self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
+    async fn run(self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
         info!("start_tracker");
 
         let mut interval = Duration::ZERO;
         let mut backoff = Self::INITIAL_BACKOFF;
         let mut next_event = Some(AnnounceEvent::Started);
+        let mut sent_completed = false;
 
         loop {
             tokio::time::sleep(interval).await;
 
+            let stats = *self.stats.lock().unwrap();
+
+            let event = match next_event.take() {
+                Some(e) => e,
+                None if !sent_completed && stats.left == 0 => {
+                    sent_completed = true;
+                    AnnounceEvent::Completed
+                },
+                None => AnnounceEvent::None,
+            };
+
             let req = AnnounceRequest {
-                info_hash: self.metainfo.hash,
+                info_hash: self.info_hash,
                 peer_id: self.node.id,
                 port: self.node.port,
-                stats: SessionStats {
-                    uploaded: 0,
-                    downloaded: 0,
-                    left: self.metainfo.total_size(),
-                },
-                event: next_event.take().unwrap_or(AnnounceEvent::None),
+                stats,
+                event,
                 compact: true,
             };
 
@@ -248,12 +260,7 @@ impl HttpTransport {
             _ => return Err(Error::InvalidResponse("missing peers field".to_owned())),
         };
 
-        Ok(TrackerResponse {
-            interval,
-            peers,
-            seeders: None,
-            leechers: None,
-        })
+        Ok(TrackerResponse { interval, peers })
     }
 
     fn parse_peers_list(peer_list: &[Bencode<'_>]) -> Result<Vec<SocketAddr>> {
@@ -399,15 +406,10 @@ impl UdpTransport {
             ));
         }
         let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
-        let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
-        let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        // let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
+        // let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let peers = parse_compact_ipv4_peers(&bytes[20..])?;
-        Ok(TrackerResponse {
-            interval,
-            peers,
-            seeders: Some(seeders),
-            leechers: Some(leechers),
-        })
+        Ok(TrackerResponse { interval, peers })
     }
 }
 

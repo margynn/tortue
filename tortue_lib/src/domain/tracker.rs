@@ -19,17 +19,16 @@ pub enum AnnounceEvent {
     None,
 }
 
+#[derive(Clone, Copy)]
 pub struct SessionStats {
-    pub uploaded: u64,
-    pub downloaded: u64,
-    pub left: u64,
+    pub uploaded: usize,
+    pub downloaded: usize,
+    pub left: usize,
 }
 
 pub struct TrackerResponse {
     pub interval: u32,
     pub peers: Vec<SocketAddr>,
-    pub seeders: Option<u32>,
-    pub leechers: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
