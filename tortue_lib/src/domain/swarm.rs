@@ -29,6 +29,9 @@ pub enum Input {
         addr: SocketAddr,
         message: Message,
     },
+    SwarmCommand {
+        status: SwarmStatus,
+    },
     Tick,
 }
 
@@ -41,15 +44,46 @@ pub enum Output {
     Completed,
 }
 
+#[derive(Default, Copy, Clone)]
+pub enum SwarmStatus {
+    #[default]
+    Active, // upload on,  download on
+    Stopped,      // upload off, download off
+    DownloadOnly, // upload off, download on
+    UploadOnly,   // upload on,  download off
+}
+
+impl SwarmStatus {
+    fn download(&self) -> bool {
+        match self {
+            SwarmStatus::Stopped => false,
+            SwarmStatus::DownloadOnly => true,
+            SwarmStatus::UploadOnly => false,
+            SwarmStatus::Active => true,
+        }
+    }
+
+    fn upload(&self) -> bool {
+        match self {
+            SwarmStatus::Stopped => false,
+            SwarmStatus::DownloadOnly => false,
+            SwarmStatus::UploadOnly => true,
+            SwarmStatus::Active => true,
+        }
+    }
+}
+
 pub struct Swarm {
     metainfo: Arc<Metainfo>,
     peer_registry: PeerRegistry,
     block_assignments: BlockAssignments,
     pieces: PieceManager,
+    status: SwarmStatus,
 }
 
 #[derive(Default)]
 pub struct SwarmSnapshot {
+    pub status: SwarmStatus,
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
@@ -79,11 +113,13 @@ impl Swarm {
             peer_registry: PeerRegistry::new(total_pieces),
             block_assignments: BlockAssignments::new(),
             pieces: PieceManager::new(Arc::clone(&metainfo)),
+            status: SwarmStatus::Active,
         }
     }
 
     pub fn snapshot(&self) -> SwarmSnapshot {
         SwarmSnapshot {
+            status: self.status,
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
@@ -118,6 +154,10 @@ impl Swarm {
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
             Input::Tick => self.on_tick(),
+            Input::SwarmCommand { status } => {
+                self.status = status;
+                vec![]
+            },
         }
     }
 
@@ -260,6 +300,9 @@ impl Swarm {
         piece_len: usize,
         addr: SocketAddr,
     ) -> Vec<Output> {
+        if !self.status.upload() {
+            return vec![];
+        }
         let Some(data) = self.pieces.read_block(piece_index, piece_offset, piece_len) else {
             return vec![];
         };
@@ -357,6 +400,9 @@ impl Swarm {
     /// number of sweeps at the number of peers. A sweep that assigns nothing
     /// means no deeper one can either, so it stops there.
     fn plan(&mut self) -> Vec<Output> {
+        if !self.status.download() {
+            return vec![];
+        }
         let mut budget = self.budget();
         if budget == 0 {
             return vec![];
