@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
+
+use crate::domain::bencode;
 
 use super::bencode::Bencode;
 
@@ -555,11 +557,15 @@ impl UtPexMessage {
             match *key {
                 b"added6" | b"added" => {
                     has_pex_field = true;
-                    added.insert(Self::decode_socket_addr(bytes)?);
+                    for addr in parse_socket_addrs(bytes)? {
+                        added.insert(addr);
+                    }
                 },
                 b"dropped6" | b"dropped" => {
                     has_pex_field = true;
-                    dropped.insert(Self::decode_socket_addr(bytes)?);
+                    for addr in parse_socket_addrs(bytes)? {
+                        dropped.insert(addr);
+                    }
                 },
                 _ => {}, // Includes added.f and added6.f.
             }
@@ -571,26 +577,81 @@ impl UtPexMessage {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut added = Vec::new();
+        let mut added6 = Vec::new();
+
+        for addr in &self.added {
+            match addr {
+                SocketAddr::V4(addr) => {
+                    added.extend_from_slice(&addr.ip().octets());
+                    added.extend_from_slice(&addr.port().to_be_bytes());
+                },
+                SocketAddr::V6(addr) => {
+                    added6.extend_from_slice(&addr.ip().octets());
+                    added6.extend_from_slice(&addr.port().to_be_bytes());
+                },
+            }
+        }
+
+        let mut dropped = Vec::new();
+        let mut dropped6 = Vec::new();
+
+        for addr in &self.dropped {
+            match addr {
+                SocketAddr::V4(addr) => {
+                    dropped.extend_from_slice(&addr.ip().octets());
+                    dropped.extend_from_slice(&addr.port().to_be_bytes());
+                },
+                SocketAddr::V6(addr) => {
+                    dropped6.extend_from_slice(&addr.ip().octets());
+                    dropped6.extend_from_slice(&addr.port().to_be_bytes());
+                },
+            }
+        }
+
+        let mut dict = BTreeMap::new();
+        if !added.is_empty() {
+            dict.insert(b"added".as_slice(), Bencode::Bytes(&added));
+        }
+        if !added6.is_empty() {
+            dict.insert(b"added6".as_slice(), Bencode::Bytes(&added6));
+        }
+        if !dropped.is_empty() {
+            dict.insert(b"dropped".as_slice(), Bencode::Bytes(&dropped));
+        }
+        if !dropped6.is_empty() {
+            dict.insert(b"dropped6".as_slice(), Bencode::Bytes(&dropped6));
+        }
+        Bencode::Dict(dict).encode()
+    }
+}
+
+pub fn parse_socket_addrs(bytes: &[u8]) -> Result<Vec<SocketAddr>> {
+    // IPv4: 4 bytes address + 2 bytes port
+    if bytes.len().is_multiple_of(6) {
+        return Ok(bytes
+            .chunks_exact(6)
+            .map(|c| {
+                let ip = Ipv4Addr::new(c[0], c[1], c[2], c[3]);
+                let port = u16::from_be_bytes([c[4], c[5]]);
+
+                SocketAddr::new(IpAddr::V4(ip), port)
+            })
+            .collect());
     }
 
-    fn decode_socket_addr(bytes: &[u8]) -> Result<SocketAddr> {
-        match bytes.len() {
-            6 => {
-                let ip = Ipv4Addr::from(
-                    <[u8; 4]>::try_from(&bytes[..4]).map_err(|_| Error::InvalidMessage)?,
-                );
-                let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-                Ok(SocketAddr::from((ip, port)))
-            },
-            18 => {
-                let ip = Ipv6Addr::from(
-                    <[u8; 16]>::try_from(&bytes[..16]).map_err(|_| Error::InvalidMessage)?,
-                );
-                let port = u16::from_be_bytes([bytes[16], bytes[17]]);
-                Ok(SocketAddr::from((ip, port)))
-            },
-            _ => Err(Error::InvalidMessage),
-        }
+    // IPv6: 16 bytes address + 2 bytes port
+    if bytes.len().is_multiple_of(18) {
+        return Ok(bytes
+            .chunks_exact(18)
+            .map(|c| {
+                let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&c[..16]).unwrap());
+                let port = u16::from_be_bytes([c[16], c[17]]);
+
+                SocketAddr::new(IpAddr::V6(ip), port)
+            })
+            .collect());
     }
+
+    Err(Error::InvalidMessage)
 }

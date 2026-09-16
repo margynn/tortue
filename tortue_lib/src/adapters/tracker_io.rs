@@ -18,6 +18,7 @@ use crate::{
     application::ports::peer_source::PeerSource,
     domain::{
         bencode::Bencode,
+        message::parse_socket_addrs,
         tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse},
     },
 };
@@ -37,6 +38,9 @@ pub enum Error {
 
     #[error("bencode: {0}")]
     Bencode(#[from] crate::domain::bencode::Error),
+
+    #[error("message: {0}")]
+    Message(#[from] crate::domain::message::Error),
 
     #[error("tracker failure: {0}")]
     TrackerFailure(String),
@@ -251,7 +255,7 @@ impl HttpTransport {
             .map_err(|_| Error::InvalidResponse("interval out of range".to_owned()))?;
 
         let peers = match (decoded.get_bytes(b"peers"), decoded.get_list(b"peers")) {
-            (Ok(compact), _) => parse_compact_ipv4_peers(compact)?,
+            (Ok(compact), _) => parse_socket_addrs(compact)?,
             (_, Ok(list)) => Self::parse_peers_list(list)?,
             _ => return Err(Error::InvalidResponse("missing peers field".to_owned())),
         };
@@ -404,7 +408,7 @@ impl UdpTransport {
         let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
         // let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
         // let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-        let peers = parse_compact_ipv4_peers(&bytes[20..])?;
+        let peers = parse_socket_addrs(&bytes[20..])?;
         Ok(TrackerResponse { interval, peers })
     }
 }
@@ -427,22 +431,4 @@ impl AnnounceEvent {
             Self::Stopped => 3,
         }
     }
-}
-
-// ── Shared wire helpers ───────────────────────────────────────────────────────
-
-fn parse_compact_ipv4_peers(bytes: &[u8]) -> Result<Vec<SocketAddr>> {
-    if !bytes.len().is_multiple_of(6) {
-        return Err(Error::InvalidResponse(
-            "compact ipv4 peers length must be multiple of 6".to_owned(),
-        ));
-    }
-    Ok(bytes
-        .chunks_exact(6)
-        .map(|c| {
-            let ip = IpAddr::V4(Ipv4Addr::new(c[0], c[1], c[2], c[3]));
-            let port = u16::from_be_bytes([c[4], c[5]]);
-            SocketAddr::new(ip, port)
-        })
-        .collect())
 }
