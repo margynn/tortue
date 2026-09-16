@@ -1,6 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 use super::bencode::Bencode;
@@ -63,19 +64,52 @@ pub enum Message {
     Unimplemented,
 }
 
+pub trait WireMessage: Sized {
+    fn decode(payload: &[u8]) -> Result<Self>;
+    fn encode(&self) -> Vec<u8>;
+}
+
+impl WireMessage for Message {
+    fn decode(payload: &[u8]) -> Result<Self> {
+        Message::decode(payload)
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        Message::encode(self)
+    }
+}
+
+impl WireMessage for UtMetadataMessage {
+    fn decode(payload: &[u8]) -> Result<Self> {
+        UtMetadataMessage::decode(payload)
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        UtMetadataMessage::encode(self)
+    }
+}
+
+impl WireMessage for UtPexMessage {
+    fn decode(payload: &[u8]) -> Result<Self> {
+        UtPexMessage::decode(payload)
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        UtPexMessage::encode(self)
+    }
+}
 // BEP 10
 #[derive(Clone)]
 pub struct ExtensionHandshake {
     pub extensions: HashMap<String, u8>,
-    pub metadata_size: Option<usize>, // BEP 9
-
-    // All these ones seems optionnal an not really used
-    pub listen_port: Option<u16>,
-    pub client: Option<String>,
-    pub your_ip: Option<Vec<u8>>,
-    pub ipv4: Option<[u8; 4]>,
-    pub ipv6: Option<[u8; 16]>,
-    pub reqq: Option<u32>,
+    pub metadata_size: Option<usize>,
+    // All bellow are part of BEP-10 but not used
+    // pub listen_port: Option<u16>,
+    // pub client: Option<String>,
+    // pub your_ip: Option<Vec<u8>>,
+    // pub ipv4: Option<[u8; 4]>,
+    // pub ipv6: Option<[u8; 16]>,
+    // pub reqq: Option<u32>,
 }
 
 impl Message {
@@ -394,25 +428,6 @@ impl ExtensionHandshake {
                 .collect(),
             _ => HashMap::new(),
         };
-        let listen_port = payload
-            .get_int(b"p")
-            .ok()
-            .and_then(|v| u16::try_from(v).ok());
-        let your_ip = payload.get_bytes(b"yourip").ok().map(|b| b.to_vec());
-        let client = payload.get_utf8(b"v").ok();
-        let ipv4 = payload
-            .get_bytes(b"ipv4")
-            .ok()
-            .and_then(|b| b.try_into().ok());
-        let ipv6 = payload
-            .get_bytes(b"ipv6")
-            .ok()
-            .and_then(|b| b.try_into().ok());
-        let reqq = payload
-            .get_int(b"reqq")
-            .ok()
-            .and_then(|v| u32::try_from(v).ok());
-
         // BEP 9
         let metadata_size = payload
             .get_int(b"metadata_size")
@@ -421,13 +436,13 @@ impl ExtensionHandshake {
 
         Ok(Self {
             extensions,
-            listen_port,
-            client,
-            your_ip,
-            ipv4,
-            ipv6,
-            reqq,
             metadata_size,
+            // listen_port,
+            // client,
+            // your_ip,
+            // ipv4,
+            // ipv6,
+            // reqq,
         })
     }
 
@@ -441,24 +456,6 @@ impl ExtensionHandshake {
 
         let mut dict: BTreeMap<&[u8], Bencode<'_>> = BTreeMap::new();
         dict.insert(b"m", Bencode::Dict(m));
-        if let Some(port) = self.listen_port {
-            dict.insert(b"p", Bencode::Int(port as i64));
-        }
-        if let Some(ref v) = self.client {
-            dict.insert(b"v", Bencode::Bytes(v.as_bytes()));
-        }
-        if let Some(ref your_ip) = self.your_ip {
-            dict.insert(b"yourip", Bencode::Bytes(your_ip));
-        }
-        if let Some(ref ipv4) = self.ipv4 {
-            dict.insert(b"ipv4", Bencode::Bytes(ipv4));
-        }
-        if let Some(ref ipv6) = self.ipv6 {
-            dict.insert(b"ipv6", Bencode::Bytes(ipv6));
-        }
-        if let Some(reqq) = self.reqq {
-            dict.insert(b"reqq", Bencode::Int(reqq as i64));
-        }
         if let Some(metadata_size) = self.metadata_size {
             dict.insert(b"metadata_size", Bencode::Int(metadata_size as i64));
         }
@@ -467,8 +464,8 @@ impl ExtensionHandshake {
     }
 }
 
-// BEP 9 - Listing our extension ids for Tortue client
-pub const UT_METADATA_EXT_ID: u8 = 1;
+pub const UT_METADATA_EXT_ID: u8 = 1; // BEP 9 - magnet link
+pub const UT_PEX_EXT_ID: u8 = 2; // BEP 11 - Peers exchanges
 
 pub enum UtMetadataMessage {
     Request {
@@ -531,6 +528,69 @@ impl UtMetadataMessage {
                 Bencode::Dict(dict).encode()
             },
             Self::Unimplemented => vec![],
+        }
+    }
+}
+
+pub struct UtPexMessage {
+    pub added: HashSet<SocketAddr>,
+    pub dropped: HashSet<SocketAddr>,
+}
+
+impl UtPexMessage {
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let value = Bencode::decode(payload)?;
+        let Bencode::Dict(dict) = value else {
+            return Err(Error::InvalidMessage);
+        };
+
+        let mut added = HashSet::new();
+        let mut dropped = HashSet::new();
+        let mut has_pex_field = false;
+
+        for (key, value) in &dict {
+            let Bencode::Bytes(bytes) = value else {
+                continue;
+            };
+            match *key {
+                b"added6" | b"added" => {
+                    has_pex_field = true;
+                    added.insert(Self::decode_socket_addr(bytes)?);
+                },
+                b"dropped6" | b"dropped" => {
+                    has_pex_field = true;
+                    dropped.insert(Self::decode_socket_addr(bytes)?);
+                },
+                _ => {}, // Includes added.f and added6.f.
+            }
+        }
+        if !has_pex_field {
+            return Err(Error::InvalidMessage);
+        }
+        Ok(Self { added, dropped })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        todo!()
+    }
+
+    fn decode_socket_addr(bytes: &[u8]) -> Result<SocketAddr> {
+        match bytes.len() {
+            6 => {
+                let ip = Ipv4Addr::from(
+                    <[u8; 4]>::try_from(&bytes[..4]).map_err(|_| Error::InvalidMessage)?,
+                );
+                let port = u16::from_be_bytes([bytes[4], bytes[5]]);
+                Ok(SocketAddr::from((ip, port)))
+            },
+            18 => {
+                let ip = Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&bytes[..16]).map_err(|_| Error::InvalidMessage)?,
+                );
+                let port = u16::from_be_bytes([bytes[16], bytes[17]]);
+                Ok(SocketAddr::from((ip, port)))
+            },
+            _ => Err(Error::InvalidMessage),
         }
     }
 }

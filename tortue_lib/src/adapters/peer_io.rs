@@ -12,7 +12,9 @@ use tokio::{
 use crate::{
     application::ports::peer_connector::PeerConnector,
     domain::{
-        message::{Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID},
+        message::{
+            Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID, UT_PEX_EXT_ID,
+        },
         peer::{PeerEvent, PeerExtensions, PeerId},
         torrent::InfoHash,
     },
@@ -104,7 +106,7 @@ impl TcpPeerIO {
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
-    const READ_TIMEOUT: Duration = Duration::from_secs(30);
+    const READ_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_ATTEMPTS: usize = 5;
 
     fn new(
@@ -284,15 +286,10 @@ impl TcpPeerIO {
             // Upon connection we share our supported extensions via BEP10
             let mut extensions = HashMap::new();
             extensions.insert("ut_metadata".to_string(), UT_METADATA_EXT_ID); // BEP 9
+            extensions.insert("ut_pex".to_string(), UT_PEX_EXT_ID); // BEP 11
 
             let hs = Message::ExtensionHandshake(ExtensionHandshake {
                 extensions,
-                client: Some("TT".to_string()),
-                listen_port: None,
-                your_ip: None,
-                ipv4: None,
-                ipv6: None,
-                reqq: None,
                 metadata_size: self.config.metadata_size,
             });
             timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.frame()))

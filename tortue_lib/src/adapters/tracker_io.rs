@@ -97,22 +97,18 @@ impl PeerSource for TrackerIO {
 
         let mut interval = Duration::ZERO;
         let mut backoff = Self::INITIAL_BACKOFF;
-        let mut next_event = Some(AnnounceEvent::Started);
-        let mut sent_completed = false;
+        let mut event = AnnounceEvent::Started;
 
         loop {
             tokio::time::sleep(interval).await;
 
             let stats = *self.stats.lock().unwrap();
-
-            let event = match next_event.take() {
-                Some(e) => e,
-                None if !sent_completed && stats.left == 0 => {
-                    sent_completed = true;
-                    AnnounceEvent::Completed
-                },
-                None => AnnounceEvent::None,
-            };
+            if !stats.swarm_status.upload() {
+                event = AnnounceEvent::Stopped;
+            }
+            if stats.left == 0 {
+                event = AnnounceEvent::Completed;
+            }
 
             let req = AnnounceRequest {
                 info_hash: self.info_hash,
@@ -421,13 +417,11 @@ impl AnnounceEvent {
             Self::Started => Some("started"),
             Self::Completed => Some("completed"),
             Self::Stopped => Some("stopped"),
-            Self::None => None,
         }
     }
 
     fn as_udp_code(self) -> u32 {
         match self {
-            Self::None => 0,
             Self::Completed => 1,
             Self::Started => 2,
             Self::Stopped => 3,

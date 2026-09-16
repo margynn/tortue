@@ -53,8 +53,8 @@ struct RateSample {
 }
 
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
-    const TICK_INTERVAL: Duration = Duration::from_secs(20);
-    const RATE_INTERVAL: Duration = Duration::from_secs(1);
+    const TICK_INTERVAL: Duration = Duration::from_secs(10);
+    const RATE_INTERVAL: Duration = Duration::from_secs(2);
 
     pub fn new(
         metainfo: Arc<Metainfo>,
@@ -166,6 +166,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
     fn publish(&mut self, mut snapshot: SwarmSnapshot) {
         *self.stats.lock().unwrap() = SessionStats {
+            swarm_status: snapshot.status,
             uploaded: snapshot.bytes_uploaded,
             downloaded: snapshot.bytes_downloaded,
             left: snapshot

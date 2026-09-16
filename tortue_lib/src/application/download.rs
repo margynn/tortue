@@ -20,8 +20,7 @@ use crate::{
     application::magnet::fetch_metadata,
     domain::{
         magnet::MagnetLink,
-        peer::PeerId,
-        swarm::SwarmSnapshot,
+        swarm::{SwarmSnapshot, SwarmStatus},
         torrent::Metainfo,
         tracker::{Node, SessionStats},
     },
@@ -48,12 +47,9 @@ pub async fn download_magnet(magnet: &str, output_dir: PathBuf) -> Result<Downlo
 }
 
 async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<Download> {
-    let node = Node {
-        id: PeerId::generate("TT", "0.1.0"),
-        port: 1234,
-    };
-
+    let node = Node::new();
     let stats = Arc::new(Mutex::new(SessionStats {
+        swarm_status: SwarmStatus::Active,
         uploaded: 0,
         downloaded: 0,
         left: metainfo.total_size() as usize,

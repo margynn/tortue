@@ -54,7 +54,7 @@ pub enum SwarmStatus {
 }
 
 impl SwarmStatus {
-    fn download(&self) -> bool {
+    pub fn download(&self) -> bool {
         match self {
             SwarmStatus::Stopped => false,
             SwarmStatus::DownloadOnly => true,
@@ -63,7 +63,7 @@ impl SwarmStatus {
         }
     }
 
-    fn upload(&self) -> bool {
+    pub fn upload(&self) -> bool {
         match self {
             SwarmStatus::Stopped => false,
             SwarmStatus::DownloadOnly => false,

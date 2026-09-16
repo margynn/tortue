@@ -9,17 +9,15 @@ use crate::{
     application::ports::peer_source::PeerSource,
     domain::{
         magnet::MagnetLink,
-        peer::PeerId,
+        swarm::SwarmStatus,
         tracker::{Node, SessionStats},
     },
 };
 
 pub async fn fetch_metadata(magnet: MagnetLink) -> Result<Arc<Metainfo>> {
-    let node = Node {
-        id: PeerId::generate("TT", "0.1.0"),
-        port: 1234,
-    };
+    let node = Node::new();
     let stats = Arc::new(Mutex::new(SessionStats {
+        swarm_status: SwarmStatus::Stopped,
         uploaded: 0,
         downloaded: 0,
         left: 1,
