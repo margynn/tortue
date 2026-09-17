@@ -2,13 +2,15 @@ mod block_assignment;
 mod peer_registry;
 mod piece_manager;
 
-use std::{net::SocketAddr, sync::Arc, vec};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc, vec};
 
 use rand::seq::IteratorRandom;
 
 use block_assignment::BlockAssignments;
 use peer_registry::{PeerRegistry, RejectReason};
 use piece_manager::{BlockRange, BlockRef, CompletedPiece, PieceManager};
+
+use crate::domain::message::{UT_PEX_EXT_ID, UtPexMessage};
 
 use super::{
     message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
@@ -32,7 +34,12 @@ pub enum Input {
     SwarmCommand {
         status: SwarmStatus,
     },
-    Tick,
+    Tick(Tick),
+}
+
+pub enum Tick {
+    Block,
+    Pex,
 }
 
 pub enum Output {
@@ -153,20 +160,54 @@ impl Swarm {
             } => self.on_connected(addr, peer_extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            Input::Tick => self.on_tick(),
             Input::SwarmCommand { status } => {
                 self.status = status;
                 vec![]
             },
+            Input::Tick(tick) => self.on_tick(tick),
         }
     }
 
-    fn on_tick(&mut self) -> Vec<Output> {
-        // Sweeping here rather than in `plan` keeps the per-message path free
-        // of a walk over every request in flight; a few seconds of extra
-        // latency on a timeout does not need finer granularity than a tick.
-        self.block_assignments.release_expired();
-        self.plan()
+    fn on_tick(&mut self, tick: Tick) -> Vec<Output> {
+        match tick {
+            Tick::Block => {
+                // Sweeping here rather than in `plan` keeps the per-message path free
+                // of a walk over every request in flight; a few seconds of extra
+                // latency on a timeout does not need finer granularity than a tick.
+                self.block_assignments.release_expired();
+                self.plan()
+            },
+            Tick::Pex => {
+                let addrs: HashSet<SocketAddr> = self
+                    .peer_registry
+                    .seeders
+                    .union(&self.peer_registry.leechers)
+                    .cloned()
+                    .collect();
+
+                let mut out = vec![];
+                let payload = UtPexMessage {
+                    addrs: addrs.clone(),
+                }
+                .encode();
+
+                for addr in addrs {
+                    let Some(peer_ext_id) = self.peer_registry.peer_extension_id(addr, "ut_pex")
+                    else {
+                        continue;
+                    };
+                    out.push(Output::SendToPeer {
+                        addr,
+                        message: Message::Extension {
+                            ext_id: peer_ext_id,
+                            payload: payload.clone(),
+                        },
+                    });
+                }
+
+                out
+            },
+        }
     }
 
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
@@ -360,14 +401,20 @@ impl Swarm {
         outputs
     }
 
-    fn on_extension_message(&self, addr: SocketAddr, ext_id: u8, payload: &[u8]) -> Vec<Output> {
-        let Some(peer_ext_id) = self.peer_registry.peer_extension_id(addr, "ut_metadata") else {
-            return vec![];
-        };
-
+    fn on_extension_message(
+        &mut self,
+        addr: SocketAddr,
+        ext_id: u8,
+        payload: &[u8],
+    ) -> Vec<Output> {
         match ext_id {
             UT_METADATA_EXT_ID => match UtMetadataMessage::decode(payload) {
                 Ok(UtMetadataMessage::Request { piece }) => {
+                    let Some(peer_ext_id) =
+                        self.peer_registry.peer_extension_id(addr, "ut_metadata")
+                    else {
+                        return vec![];
+                    };
                     let data = self.metainfo.info_bytes_block(piece);
                     let response = UtMetadataMessage::Data {
                         piece,
@@ -381,6 +428,14 @@ impl Swarm {
                             payload: response.encode(),
                         },
                     }]
+                },
+                _ => vec![],
+            },
+
+            UT_PEX_EXT_ID => match UtPexMessage::decode(payload) {
+                Ok(msg) => {
+                    let addrs = msg.addrs.into_iter().collect();
+                    self.on_discovered(addrs)
                 },
                 _ => vec![],
             },

@@ -45,6 +45,9 @@ pub enum Error {
 
     #[error("peer connection cancelled")]
     Cancelled,
+
+    #[error("connection to myself")]
+    SelfConnection,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -278,6 +281,9 @@ impl TcpPeerIO {
 
         let inbound = Handshake::decode(&buf)?;
 
+        if inbound.peer_id == peer_id {
+            return Err(Error::SelfConnection);
+        }
         if inbound.info_hash != self.config.info_hash {
             return Err(Error::InfoHashMismatch);
         }

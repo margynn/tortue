@@ -534,9 +534,9 @@ impl UtMetadataMessage {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct UtPexMessage {
-    pub added: HashSet<SocketAddr>,
-    pub dropped: HashSet<SocketAddr>,
+    pub addrs: HashSet<SocketAddr>,
 }
 
 impl UtPexMessage {
@@ -573,14 +573,19 @@ impl UtPexMessage {
         if !has_pex_field {
             return Err(Error::InvalidMessage);
         }
-        Ok(Self { added, dropped })
+
+        let addrs = added
+            .into_iter()
+            .filter(|addr| !dropped.contains(addr))
+            .collect();
+        Ok(Self { addrs })
     }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut added = Vec::new();
         let mut added6 = Vec::new();
 
-        for addr in &self.added {
+        for addr in &self.addrs {
             match addr {
                 SocketAddr::V4(addr) => {
                     added.extend_from_slice(&addr.ip().octets());
@@ -592,35 +597,12 @@ impl UtPexMessage {
                 },
             }
         }
-
-        let mut dropped = Vec::new();
-        let mut dropped6 = Vec::new();
-
-        for addr in &self.dropped {
-            match addr {
-                SocketAddr::V4(addr) => {
-                    dropped.extend_from_slice(&addr.ip().octets());
-                    dropped.extend_from_slice(&addr.port().to_be_bytes());
-                },
-                SocketAddr::V6(addr) => {
-                    dropped6.extend_from_slice(&addr.ip().octets());
-                    dropped6.extend_from_slice(&addr.port().to_be_bytes());
-                },
-            }
-        }
-
         let mut dict = BTreeMap::new();
         if !added.is_empty() {
             dict.insert(b"added".as_slice(), Bencode::Bytes(&added));
         }
         if !added6.is_empty() {
             dict.insert(b"added6".as_slice(), Bencode::Bytes(&added6));
-        }
-        if !dropped.is_empty() {
-            dict.insert(b"dropped".as_slice(), Bencode::Bytes(&dropped));
-        }
-        if !dropped6.is_empty() {
-            dict.insert(b"dropped6".as_slice(), Bencode::Bytes(&dropped6));
         }
         Bencode::Dict(dict).encode()
     }

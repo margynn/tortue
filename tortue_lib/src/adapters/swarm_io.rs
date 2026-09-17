@@ -16,7 +16,7 @@ use crate::{
     domain::{
         message::Message,
         peer::PeerEvent,
-        swarm::{Input, Output, Swarm, SwarmSnapshot},
+        swarm::{Input, Output, Swarm, SwarmSnapshot, Tick},
         torrent::Metainfo,
         tracker::SessionStats,
     },
@@ -53,7 +53,8 @@ struct RateSample {
 }
 
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
-    const TICK_INTERVAL: Duration = Duration::from_secs(10);
+    const BLOCK_TICK_INTERVAL: Duration = Duration::from_secs(10);
+    const PEX_TICK_INTERVAL: Duration = Duration::from_secs(60);
     const RATE_INTERVAL: Duration = Duration::from_secs(2);
 
     pub fn new(
@@ -81,7 +82,8 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
     pub async fn run(&mut self) -> Result<()> {
         let mut coordinator = Swarm::new(Arc::clone(&self.metainfo));
-        let mut tick = time::interval(Self::TICK_INTERVAL);
+        let mut block_tick = time::interval(Self::BLOCK_TICK_INTERVAL);
+        let mut pex_tick = time::interval(Self::PEX_TICK_INTERVAL);
 
         loop {
             let input = tokio::select! {
@@ -106,7 +108,9 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     },
                 },
 
-                _ = tick.tick() => Input::Tick,
+                _ = block_tick.tick() => Input::Tick(Tick::Block),
+
+                _ = pex_tick.tick() => Input::Tick(Tick::Pex),
 
                 // _ = rate_tick.tick() => {
                 //     let snapshot = coordinator.snapshot();
