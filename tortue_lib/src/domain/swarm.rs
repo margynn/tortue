@@ -440,7 +440,6 @@ impl Swarm {
                 _ => vec![],
             },
 
-            // TODO: add more extension message here
             _ => vec![],
         }
     }

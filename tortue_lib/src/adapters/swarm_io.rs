@@ -50,12 +50,13 @@ struct RateSample {
     global_downloaded: u64,
     download_rate: f64,
     upload_rate: f64,
+    per_peer: HashMap<SocketAddr, (u64, u64)>,
 }
 
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     const BLOCK_TICK_INTERVAL: Duration = Duration::from_secs(10);
     const PEX_TICK_INTERVAL: Duration = Duration::from_secs(60);
-    const RATE_INTERVAL: Duration = Duration::from_secs(2);
+    const RATE_TICK_INTERVAL: Duration = Duration::from_secs(2);
 
     pub fn new(
         metainfo: Arc<Metainfo>,
@@ -112,10 +113,6 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
                 _ = pex_tick.tick() => Input::Tick(Tick::Pex),
 
-                // _ = rate_tick.tick() => {
-                //     let snapshot = coordinator.snapshot();
-                //     self.publish(snapshot);
-                // },
             };
 
             for out in coordinator.step(input) {
@@ -131,7 +128,9 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
     fn handle_output(&mut self, out: Output) {
         match out {
-            Output::ConnectPeer(addr) => self.spawn_peer(addr),
+            Output::ConnectPeer(addr) => {
+                self.spawn_peer(addr);
+            },
             Output::DisconnectPeer(addr) => {
                 self.peer_cmds.remove(&addr);
                 self.peer_connector.disconnect(addr);
@@ -185,7 +184,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         let now = Instant::now();
         let should_sample = match self.last_sample.at {
             None => true,
-            Some(prev_at) => now.duration_since(prev_at) >= Self::RATE_INTERVAL,
+            Some(prev_at) => now.duration_since(prev_at) >= Self::RATE_TICK_INTERVAL,
         };
 
         if should_sample {
@@ -199,13 +198,31 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     .saturating_sub(self.last_sample.global_uploaded)
                     as f64
                     / elapsed;
+
+                for peer in &mut snapshot.peers {
+                    let (prev_up, prev_down) = self
+                        .last_sample
+                        .per_peer
+                        .get(&peer.addr)
+                        .copied()
+                        .unwrap_or((peer.bytes_uploaded, peer.bytes_downloaded));
+                    peer.upload_rate = peer.bytes_uploaded.saturating_sub(prev_up) as f64 / elapsed;
+                    peer.download_rate =
+                        peer.bytes_downloaded.saturating_sub(prev_down) as f64 / elapsed;
+                }
             }
             self.last_sample.at = Some(now);
             self.last_sample.global_downloaded = snapshot.bytes_downloaded as u64;
             self.last_sample.global_uploaded = snapshot.bytes_uploaded as u64;
+            self.last_sample.per_peer = snapshot
+                .peers
+                .iter()
+                .map(|p| (p.addr, (p.bytes_uploaded, p.bytes_downloaded)))
+                .collect();
         }
 
         snapshot.download_rate = self.last_sample.download_rate;
         snapshot.upload_rate = self.last_sample.upload_rate;
+        // TODO update snaphost peer stats
     }
 }
