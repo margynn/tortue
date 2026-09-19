@@ -60,11 +60,11 @@ pub enum SwarmStatus {
 
 pub enum SwarmCommand {
     SetStatus(SwarmStatus),
-    ConnectPeer(SocketAddr),
-    DisconnectPeer(SocketAddr),
-    SetPeerLimit(usize),
-    SetUploadLimit(Option<u64>),
-    SetDownloadLimit(Option<u64>),
+    // ConnectPeer(SocketAddr),
+    // DisconnectPeer(SocketAddr),
+    // SetPeerLimit(usize),
+    // SetUploadLimit(Option<u64>),
+    // SetDownloadLimit(Option<u64>),
 }
 
 impl SwarmStatus {
@@ -178,11 +178,7 @@ impl Swarm {
                 self.status = swarm_status;
                 vec![]
             },
-            SwarmCommand::ConnectPeer(socket_addr) => vec![],
-            SwarmCommand::DisconnectPeer(socket_addr) => vec![],
-            SwarmCommand::SetPeerLimit(_) => vec![],
-            SwarmCommand::SetUploadLimit(_) => vec![],
-            SwarmCommand::SetDownloadLimit(_) => vec![],
+            //
         }
     }
 
@@ -378,9 +374,9 @@ impl Swarm {
     ) -> Vec<Output> {
         // Only a peer we actually requested this block from may fulfil it —
         // otherwise any connected peer could complete blocks assigned to
-        // others. A slow reply still counts here even after its scheduling
-        // slot was freed and the block possibly reassigned elsewhere.
-        if !self.block_assignments.accepts_from(block_ref, addr) {
+        // others. Not time-bounded, so a slow-but-legitimate reply is still
+        // accepted; `receive_block` below no-ops if we no longer need it.
+        if !self.block_assignments.is_holder(block_ref, addr) {
             return vec![];
         }
         self.block_assignments.unassign(block_ref, addr);
@@ -463,16 +459,17 @@ impl Swarm {
     /// a piece always the block with fewest holders.
     ///
     /// `holders` is built once (O(N) over in-flight requests) instead of
-    /// rescanned per block per depth. One sweep per depth, so no block gets a
-    /// second holder while another still has none; a sweep only reaches
-    /// depth d once every block has at least d holders, which caps the
-    /// number of sweeps at the number of peers. A sweep that assigns nothing
-    /// means no deeper one can either, so it stops there.
+    /// rescanned per block per depth. Depths are swept low-to-high, one
+    /// block-list pass per depth, so no block gets a second holder while
+    /// another still has none. A block's holders can already sit above 0
+    /// coming into this call (assignments don't expire — see
+    /// `BlockAssignments`), so an empty depth doesn't mean a deeper one
+    /// would be too: we keep sweeping the full depth range until a whole
+    /// pass makes no progress, rather than stopping at the first empty one.
     fn plan(&mut self) -> Vec<Output> {
         if !self.status.download() {
             return vec![];
         }
-        self.block_assignments.release_expired();
         let mut budget = self.budget();
         if budget == 0 {
             return vec![];
@@ -492,31 +489,40 @@ impl Swarm {
             .flat_map(|&piece| self.pieces.unreceived_blocks(piece))
             .collect();
 
+        // A block can't usefully have more holders than there are unchoked
+        // peers to serve it.
+        let max_depth = self.peer_registry.unchoked().count();
+
         let mut rng = rand::rng();
         let mut outputs = vec![];
-        for replication in 0.. {
-            let mut assigned = 0;
+        let mut progressed = true;
+        while budget > 0 && progressed {
+            progressed = false;
 
-            for &block in &blocks {
+            for replication in 0..=max_depth {
                 if budget == 0 {
                     break;
                 }
-                let holders_count = holders.get(&block.block).copied().unwrap_or(0);
-                if holders_count != replication {
-                    continue;
+
+                for &block in &blocks {
+                    if budget == 0 {
+                        break;
+                    }
+                    let holders_count = holders.get(&block.block).copied().unwrap_or(0);
+                    // Only blocks at exactly this depth: every block gets its
+                    // first holder before any block gets a second.
+                    if holders_count != replication {
+                        continue;
+                    }
+                    let Some(addr) = self.pick_peer(block.block, &mut rng) else {
+                        continue;
+                    };
+
+                    budget -= 1;
+                    progressed = true;
+                    *holders.entry(block.block).or_insert(0) += 1;
+                    outputs.push(self.send_request(addr, block));
                 }
-                let Some(addr) = self.pick_peer(block.block, &mut rng) else {
-                    continue;
-                };
-
-                budget -= 1;
-                assigned += 1;
-                *holders.entry(block.block).or_insert(0) += 1;
-                outputs.push(self.send_request(addr, block));
-            }
-
-            if budget == 0 || assigned == 0 {
-                break;
             }
         }
 

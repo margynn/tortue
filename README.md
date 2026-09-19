@@ -1,6 +1,6 @@
 # Tortue 🐢
 
-Tortue, is a BitTorrent client writtent in Rust.
+Tortue, is a BitTorrent client written in Rust.
 
 ## CLI:
 
@@ -36,6 +36,5 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 
 Todo:
 
-- swarm control: pause (stop requesting blocks)/resume (begin/continue)/stop (shutdown, send AnnounceEvent:stop to trackers + disconnect all)
 - support cancel requests
 - support connecting peers
