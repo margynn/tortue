@@ -40,17 +40,25 @@ pub struct SwarmIO<S, C> {
     peer_connector: C,
     progress_tx: watch::Sender<SwarmSnapshot>,
     stats: Arc<Mutex<SessionStats>>,
-    last_sample: RateSample,
+    rate_sample: RateSample,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RateSample {
     at: Option<Instant>,
     global_uploaded: u64,
     global_downloaded: u64,
-    download_rate: f64,
     upload_rate: f64,
-    per_peer: HashMap<SocketAddr, (u64, u64)>,
+    download_rate: f64,
+    per_peer: HashMap<SocketAddr, PeerSample>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerSample {
+    uploaded: u64,
+    downloaded: u64,
+    upload_rate: f64,
+    download_rate: f64,
 }
 
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
@@ -77,7 +85,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             peer_connector,
             progress_tx,
             stats,
-            last_sample: RateSample::default(),
+            rate_sample: RateSample::default(),
         }
     }
 
@@ -176,53 +184,99 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 .bytes_total
                 .saturating_sub(snapshot.bytes_downloaded),
         };
-        self.apply_rates(&mut snapshot);
+
+        // self.apply_rates(&mut snapshot);
+
         let _ = self.progress_tx.send(snapshot);
     }
 
     fn apply_rates(&mut self, snapshot: &mut SwarmSnapshot) {
-        let now = Instant::now();
-        let should_sample = match self.last_sample.at {
-            None => true,
-            Some(prev_at) => now.duration_since(prev_at) >= Self::RATE_TICK_INTERVAL,
+        self.rate_sample
+            .update(snapshot, Instant::now(), Self::RATE_TICK_INTERVAL);
+
+        snapshot.download_rate = self.rate_sample.download_rate;
+        snapshot.upload_rate = self.rate_sample.upload_rate;
+
+        for peer in &mut snapshot.peers {
+            if let Some(sample) = self.rate_sample.per_peer.get(&peer.addr) {
+                peer.upload_rate = sample.upload_rate;
+                peer.download_rate = sample.download_rate;
+            } else {
+                peer.upload_rate = 0.0;
+                peer.download_rate = 0.0;
+            }
+        }
+    }
+}
+
+impl RateSample {
+    fn update(&mut self, snapshot: &SwarmSnapshot, now: Instant, interval: Duration) {
+        let Some(previous_at) = self.at else {
+            self.record(snapshot, now);
+            return;
         };
 
-        if should_sample {
-            if let Some(prev_at) = self.last_sample.at {
-                let elapsed = now.duration_since(prev_at).as_secs_f64();
-                self.last_sample.download_rate = (snapshot.bytes_downloaded as u64)
-                    .saturating_sub(self.last_sample.global_downloaded)
-                    as f64
-                    / elapsed;
-                self.last_sample.upload_rate = (snapshot.bytes_uploaded as u64)
-                    .saturating_sub(self.last_sample.global_uploaded)
-                    as f64
-                    / elapsed;
+        let elapsed = now.duration_since(previous_at);
 
-                for peer in &mut snapshot.peers {
-                    let (prev_up, prev_down) = self
-                        .last_sample
-                        .per_peer
-                        .get(&peer.addr)
-                        .copied()
-                        .unwrap_or((peer.bytes_uploaded, peer.bytes_downloaded));
-                    peer.upload_rate = peer.bytes_uploaded.saturating_sub(prev_up) as f64 / elapsed;
-                    peer.download_rate =
-                        peer.bytes_downloaded.saturating_sub(prev_down) as f64 / elapsed;
-                }
-            }
-            self.last_sample.at = Some(now);
-            self.last_sample.global_downloaded = snapshot.bytes_downloaded as u64;
-            self.last_sample.global_uploaded = snapshot.bytes_uploaded as u64;
-            self.last_sample.per_peer = snapshot
-                .peers
-                .iter()
-                .map(|p| (p.addr, (p.bytes_uploaded, p.bytes_downloaded)))
-                .collect();
+        if elapsed < interval {
+            return;
         }
 
-        snapshot.download_rate = self.last_sample.download_rate;
-        snapshot.upload_rate = self.last_sample.upload_rate;
-        // TODO update snaphost peer stats
+        let elapsed = elapsed.as_secs_f64();
+
+        self.download_rate = snapshot
+            .bytes_downloaded
+            .saturating_sub(self.global_downloaded) as f64
+            / elapsed;
+
+        self.upload_rate =
+            snapshot.bytes_uploaded.saturating_sub(self.global_uploaded) as f64 / elapsed;
+
+        for peer in &snapshot.peers {
+            let previous = self.per_peer.get(&peer.addr).copied().unwrap_or_default();
+
+            let upload_rate =
+                peer.bytes_uploaded.saturating_sub(previous.uploaded) as f64 / elapsed;
+
+            let download_rate =
+                peer.bytes_downloaded.saturating_sub(previous.downloaded) as f64 / elapsed;
+
+            self.per_peer.insert(
+                peer.addr,
+                PeerSample {
+                    uploaded: peer.bytes_uploaded,
+                    downloaded: peer.bytes_downloaded,
+                    upload_rate,
+                    download_rate,
+                },
+            );
+        }
+
+        self.record_global(snapshot, now);
+    }
+
+    fn record(&mut self, snapshot: &SwarmSnapshot, now: Instant) {
+        self.record_global(snapshot, now);
+
+        self.per_peer = snapshot
+            .peers
+            .iter()
+            .map(|peer| {
+                (
+                    peer.addr,
+                    PeerSample {
+                        uploaded: peer.bytes_uploaded,
+                        downloaded: peer.bytes_downloaded,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+    }
+
+    fn record_global(&mut self, snapshot: &SwarmSnapshot, now: Instant) {
+        self.at = Some(now);
+        self.global_uploaded = snapshot.bytes_uploaded;
+        self.global_downloaded = snapshot.bytes_downloaded;
     }
 }

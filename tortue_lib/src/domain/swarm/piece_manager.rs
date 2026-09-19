@@ -39,8 +39,8 @@ pub(super) struct PieceManager {
     pieces: Vec<Piece>,
     bitfield: Bitfield,
 
-    pub(super) uploaded_bytes: usize,
-    pub(super) downloaded_bytes: usize,
+    pub(super) uploaded_bytes: u64,
+    pub(super) downloaded_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -134,7 +134,7 @@ impl PieceManager {
         if piece_len > BLOCK_SIZE {
             return None;
         }
-        self.uploaded_bytes += piece_len;
+        self.uploaded_bytes += piece_len as u64;
         self.pieces.get(piece_index)?.read(piece_offset, piece_len)
     }
 
@@ -159,7 +159,7 @@ impl PieceManager {
             .pieces
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
-        self.downloaded_bytes += data.len();
+        self.downloaded_bytes += data.len() as u64;
 
         // An endgame duplicate must not re-emit a completion: that would
         // write the piece and broadcast `Have` twice.

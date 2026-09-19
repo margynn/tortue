@@ -22,9 +22,9 @@ pub enum AnnounceEvent {
 #[derive(Clone, Copy)]
 pub struct SessionStats {
     pub swarm_status: SwarmStatus,
-    pub uploaded: usize,
-    pub downloaded: usize,
-    pub left: usize,
+    pub uploaded: u64,
+    pub downloaded: u64,
+    pub left: u64,
 }
 
 pub struct TrackerResponse {

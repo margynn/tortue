@@ -52,7 +52,7 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         swarm_status: SwarmStatus::Active,
         uploaded: 0,
         downloaded: 0,
-        left: metainfo.total_size() as usize,
+        left: metainfo.total_size(),
     }));
 
     let (peers_tx, peers_rx) = mpsc::channel(128);

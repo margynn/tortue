@@ -31,12 +31,11 @@ BitTorrent specs: https://www.bittorrent.org/beps/bep_0000.html
 | BEP 10 | https://www.bittorrent.org/beps/bep_0010.html | Extension Protocol        | 🟢                    |
 | BEP 9  | https://www.bittorrent.org/beps/bep_0009.html | Magnet Links support      | 🟢                    |
 | BEP 6  | https://www.bittorrent.org/beps/bep_0006.html | Fast Extension            | 🟠                    |
-| BEP 11 | https://www.bittorrent.org/beps/bep_0011.html | PEX                       | 🔴                    |
+| BEP 11 | https://www.bittorrent.org/beps/bep_0011.html | PEX                       | 🟢                    |
 | BEP 5  | https://www.bittorrent.org/beps/bep_0005.html | DHT                       | 🔴                    |
 
 Todo:
 
 - swarm control: pause (stop requesting blocks)/resume (begin/continue)/stop (shutdown, send AnnounceEvent:stop to trackers + disconnect all)
-- get peer upload/download rate
 - support cancel requests
 - support connecting peers

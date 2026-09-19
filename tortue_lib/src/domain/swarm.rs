@@ -94,9 +94,9 @@ pub struct SwarmSnapshot {
     pub blocks_total: usize,
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
-    pub bytes_total: usize,
-    pub bytes_downloaded: usize,
-    pub bytes_uploaded: usize,
+    pub bytes_total: u64,
+    pub bytes_downloaded: u64,
+    pub bytes_uploaded: u64,
     pub seeders: Vec<SocketAddr>,
     pub leechers: Vec<SocketAddr>,
     pub peers: Vec<PeerStats>,
@@ -130,7 +130,7 @@ impl Swarm {
             blocks_total: self.pieces.blocks_total(),
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
-            bytes_total: self.metainfo.total_size() as usize,
+            bytes_total: self.metainfo.total_size(),
             bytes_downloaded: self.pieces.downloaded_bytes,
             bytes_uploaded: self.pieces.uploaded_bytes,
             seeders: self.peer_registry.seeders.iter().copied().collect(),
@@ -301,8 +301,7 @@ impl Swarm {
                 self.on_extension_message(addr, ext_id, &payload)
             },
 
-            // BEP 6 — the hint is already recorded on the peer by
-            // `peer_registry.apply`; deferred to the next tick like Have.
+            // BEP 6
             Message::SuggestPiece(_) => self.declare_interest(addr),
             Message::RejectRequest {
                 piece_index,
@@ -314,6 +313,8 @@ impl Swarm {
                     piece_offset,
                 };
                 self.block_assignments.unassign(block_ref, addr);
+                // self.pieces.reset_block(block_ref);
+                // self.schedule_requests();
                 vec![]
             },
             Message::AllowedFast(_) => self.declare_interest(addr),
