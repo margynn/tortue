@@ -97,6 +97,13 @@ async fn main() -> Result<()> {
                             human_size(s.upload_rate as u64),
                             s.status,
                         ));
+
+                        // The swarm keeps running (seeding) after this —
+                        // stop the CLI once the download itself is done.
+                        if s.blocks_total > 0 && s.blocks_done == s.blocks_total {
+                            drop(s);
+                            break;
+                        }
                     }
                 }
             }
