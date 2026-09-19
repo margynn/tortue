@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -14,10 +14,11 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::{
-    adapters::bencode::Bencode,
+    InfoHash,
     application::ports::peer_source::PeerSource,
     domain::{
-        torrent::Metainfo,
+        bencode::Bencode,
+        message::parse_socket_addrs,
         tracker::{AnnounceEvent, AnnounceRequest, Node, SessionStats, TrackerResponse},
     },
 };
@@ -36,7 +37,10 @@ pub enum Error {
     UdpRequest(String),
 
     #[error("bencode: {0}")]
-    Bencode(#[from] crate::adapters::bencode::Error),
+    Bencode(#[from] crate::domain::bencode::Error),
+
+    #[error("message: {0}")]
+    Message(#[from] crate::domain::message::Error),
 
     #[error("tracker failure: {0}")]
     TrackerFailure(String),
@@ -58,9 +62,6 @@ pub enum Error {
 
     #[error("missing udp port")]
     MissingUdpPort,
-
-    #[error("peers channel closed")]
-    PeersChannelClosed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -69,45 +70,56 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct TrackerIO {
     client: TrackerClient,
-    metainfo: Arc<Metainfo>,
+    info_hash: InfoHash,
     node: Node,
+    stats: Arc<Mutex<SessionStats>>,
 }
 
 impl TrackerIO {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(15);
     const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
-    pub fn new(url: &str, metainfo: Arc<Metainfo>, node: Node) -> Result<Self> {
+    pub fn new(
+        url: &str,
+        info_hash: InfoHash,
+        node: Node,
+        stats: Arc<Mutex<SessionStats>>,
+    ) -> Result<Self> {
         let client = TrackerClient::new(url)?;
         Ok(Self {
             client,
-            metainfo,
+            info_hash,
             node,
+            stats,
         })
     }
 }
 
 impl PeerSource for TrackerIO {
-    async fn run(mut self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
+    async fn run(self, tx: mpsc::Sender<Vec<SocketAddr>>) -> anyhow::Result<()> {
         info!("start_tracker");
 
         let mut interval = Duration::ZERO;
         let mut backoff = Self::INITIAL_BACKOFF;
-        let mut next_event = Some(AnnounceEvent::Started);
+        let mut event = AnnounceEvent::Started;
 
         loop {
             tokio::time::sleep(interval).await;
 
+            let stats = *self.stats.lock().unwrap();
+            if !stats.swarm_status.upload() {
+                event = AnnounceEvent::Stopped;
+            }
+            if stats.left == 0 {
+                event = AnnounceEvent::Completed;
+            }
+
             let req = AnnounceRequest {
-                info_hash: self.metainfo.hash,
+                info_hash: self.info_hash,
                 peer_id: self.node.id,
                 port: self.node.port,
-                stats: SessionStats {
-                    uploaded: 0,
-                    downloaded: 0,
-                    left: self.metainfo.total_size(),
-                },
-                event: next_event.take().unwrap_or(AnnounceEvent::None),
+                stats,
+                event,
                 compact: true,
             };
 
@@ -243,17 +255,12 @@ impl HttpTransport {
             .map_err(|_| Error::InvalidResponse("interval out of range".to_owned()))?;
 
         let peers = match (decoded.get_bytes(b"peers"), decoded.get_list(b"peers")) {
-            (Ok(compact), _) => parse_compact_ipv4_peers(compact)?,
+            (Ok(compact), _) => parse_socket_addrs(compact)?,
             (_, Ok(list)) => Self::parse_peers_list(list)?,
             _ => return Err(Error::InvalidResponse("missing peers field".to_owned())),
         };
 
-        Ok(TrackerResponse {
-            interval,
-            peers,
-            seeders: None,
-            leechers: None,
-        })
+        Ok(TrackerResponse { interval, peers })
     }
 
     fn parse_peers_list(peer_list: &[Bencode<'_>]) -> Result<Vec<SocketAddr>> {
@@ -399,15 +406,10 @@ impl UdpTransport {
             ));
         }
         let interval = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
-        let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
-        let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-        let peers = parse_compact_ipv4_peers(&bytes[20..])?;
-        Ok(TrackerResponse {
-            interval,
-            peers,
-            seeders: Some(seeders),
-            leechers: Some(leechers),
-        })
+        // let leechers = u32::from_be_bytes(bytes[12..16].try_into().unwrap());
+        // let seeders = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let peers = parse_socket_addrs(&bytes[20..])?;
+        Ok(TrackerResponse { interval, peers })
     }
 }
 
@@ -419,34 +421,14 @@ impl AnnounceEvent {
             Self::Started => Some("started"),
             Self::Completed => Some("completed"),
             Self::Stopped => Some("stopped"),
-            Self::None => None,
         }
     }
 
     fn as_udp_code(self) -> u32 {
         match self {
-            Self::None => 0,
             Self::Completed => 1,
             Self::Started => 2,
             Self::Stopped => 3,
         }
     }
-}
-
-// ── Shared wire helpers ───────────────────────────────────────────────────────
-
-fn parse_compact_ipv4_peers(bytes: &[u8]) -> Result<Vec<SocketAddr>> {
-    if !bytes.len().is_multiple_of(6) {
-        return Err(Error::InvalidResponse(
-            "compact ipv4 peers length must be multiple of 6".to_owned(),
-        ));
-    }
-    Ok(bytes
-        .chunks_exact(6)
-        .map(|c| {
-            let ip = IpAddr::V4(Ipv4Addr::new(c[0], c[1], c[2], c[3]));
-            let port = u16::from_be_bytes([c[4], c[5]]);
-            SocketAddr::new(ip, port)
-        })
-        .collect())
 }

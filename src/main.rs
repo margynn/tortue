@@ -1,10 +1,9 @@
-use std::{fs, path::PathBuf};
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use tortue_lib::{download, metainfo};
+use std::{fs, path::PathBuf};
+use tortue_lib::{download, download_magnet, metainfo};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -19,8 +18,8 @@ struct Cli {
 enum Command {
     /// Download a torrent
     Download {
-        /// Path to the .torrent file
-        path: PathBuf,
+        /// Path to .torrent file or magnet URI
+        source: String,
 
         /// Output directory
         #[arg(short, long, default_value = "./")]
@@ -43,38 +42,73 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Download { path, out, verbose } => {
+        Command::Download {
+            source,
+            out,
+            verbose,
+        } => {
             init_logging(verbose);
 
-            let data = fs::read(path)?;
-            let dl = download(&data, out).await?;
+            let dl = if source.starts_with("magnet:") {
+                download_magnet(&source, out).await?
+            } else {
+                let data = fs::read(&source)?;
+                download(&data, out).await?
+            };
 
             let bar = ProgressBar::new(0);
+
             bar.set_style(
                 ProgressStyle::default_bar()
                     .template(
-                        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} blocks ({percent}%) — {msg}",
+                        "{spinner:.green} [{elapsed_precise}] \
+                         [{bar:40.cyan/blue}] {pos}/{len} blocks ({percent}%) — {msg}",
                     )
                     .unwrap()
                     .progress_chars("#|."),
             );
 
             let mut progress = dl.progress;
-            tokio::spawn(async move {
-                while progress.changed().await.is_ok() {
-                    let s = progress.borrow();
-                    bar.set_length(s.blocks_total as u64);
-                    bar.set_position(s.blocks_done as u64);
-                    bar.set_message(format!(
-                        "{} peer(s), {} in flight",
-                        s.peers.len(),
-                        s.blocks_in_flight
-                    ));
-                }
-                bar.finish_with_message("completed");
-            });
+            let mut task = dl.task;
 
-            dl.task.await??;
+            loop {
+                tokio::select! {
+                    _ = &mut task => {
+                        break;
+                    }
+
+                    result = progress.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
+
+                        let s = progress.borrow();
+
+                        bar.set_length(s.blocks_total as u64);
+                        bar.set_position(s.blocks_done as u64);
+
+                        bar.set_message(format!(
+                            "{} seeders, {} leechers, {} in flight \
+                             — ↓ {}/s ↑ {}/s {:#?}",
+                            s.seeders.len(),
+                            s.leechers.len(),
+                            s.blocks_in_flight,
+                            human_size(s.download_rate as u64),
+                            human_size(s.upload_rate as u64),
+                            s.status,
+                        ));
+
+                        // The swarm keeps running (seeding) after this —
+                        // stop the CLI once the download itself is done.
+                        if s.blocks_total > 0 && s.blocks_done == s.blocks_total {
+                            drop(s);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            bar.finish_with_message("completed");
         },
 
         Command::Inspect { path } => {
@@ -82,7 +116,7 @@ async fn main() -> Result<()> {
             let m = metainfo(&data).await?;
 
             println!("{:<14} {}", "Name:", m.name);
-            println!("{:<14} {}", "Hash:", hex(m.hash.as_ref()));
+            println!("{:<14} {}", "Hash:", hex(m.info_hash.as_ref()));
             println!("{:<14} {}", "Size:", human_size(m.total_size()));
             println!(
                 "{:<14} {} × {}",

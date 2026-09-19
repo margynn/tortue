@@ -1,0 +1,562 @@
+mod block_assignment;
+mod peer_registry;
+mod piece_manager;
+
+use std::{collections::HashSet, net::SocketAddr, sync::Arc, vec};
+
+use rand::seq::IteratorRandom;
+
+use block_assignment::BlockAssignments;
+use peer_registry::{PeerRegistry, RejectReason};
+use piece_manager::{BlockRange, BlockRef, CompletedPiece, PieceManager};
+
+use crate::domain::message::{UT_PEX_EXT_ID, UtPexMessage};
+
+use super::{
+    message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
+    peer::PeerExtensions,
+    torrent::Metainfo,
+};
+
+pub(super) type PieceIndex = usize;
+
+pub enum Input {
+    PeersDiscovered(Vec<SocketAddr>),
+    PeerConnected {
+        addr: SocketAddr,
+        peer_extensions: PeerExtensions,
+    },
+    PeerDisconnected(SocketAddr),
+    MessageReceived {
+        addr: SocketAddr,
+        message: Message,
+    },
+    SwarmCommand(SwarmCommand),
+    Tick(Tick),
+}
+
+pub enum Tick {
+    Block,
+    Pex,
+}
+
+pub enum Output {
+    ConnectPeer(SocketAddr),
+    DisconnectPeer(SocketAddr),
+    SendToPeer { addr: SocketAddr, message: Message },
+    WritePiece { offset: u64, data: Vec<u8> },
+    Broadcast(Message),
+    Completed,
+}
+
+#[derive(Debug, Default, Copy, Clone)]
+pub enum SwarmStatus {
+    #[default]
+    Active, // upload on,  download on
+    Stopped,      // upload off, download off
+    DownloadOnly, // upload off, download on
+    UploadOnly,   // upload on,  download off
+}
+
+pub enum SwarmCommand {
+    SetStatus(SwarmStatus),
+    // ConnectPeer(SocketAddr),
+    // DisconnectPeer(SocketAddr),
+    // SetPeerLimit(usize),
+    // SetUploadLimit(Option<u64>),
+    // SetDownloadLimit(Option<u64>),
+}
+
+impl SwarmStatus {
+    pub fn download(&self) -> bool {
+        match self {
+            SwarmStatus::Stopped => false,
+            SwarmStatus::DownloadOnly => true,
+            SwarmStatus::UploadOnly => false,
+            SwarmStatus::Active => true,
+        }
+    }
+
+    pub fn upload(&self) -> bool {
+        match self {
+            SwarmStatus::Stopped => false,
+            SwarmStatus::DownloadOnly => false,
+            SwarmStatus::UploadOnly => true,
+            SwarmStatus::Active => true,
+        }
+    }
+}
+
+pub struct Swarm {
+    metainfo: Arc<Metainfo>,
+    peer_registry: PeerRegistry,
+    block_assignments: BlockAssignments,
+    pieces: PieceManager,
+    status: SwarmStatus,
+}
+
+#[derive(Default)]
+pub struct SwarmSnapshot {
+    pub status: SwarmStatus,
+    pub blocks_total: usize,
+    pub blocks_done: usize,
+    pub blocks_in_flight: usize,
+    pub bytes_total: u64,
+    pub bytes_downloaded: u64,
+    pub bytes_uploaded: u64,
+    pub seeders: Vec<SocketAddr>,
+    pub leechers: Vec<SocketAddr>,
+    pub peers: Vec<PeerStats>,
+    pub download_rate: f64, // bytes/sec, filled in by SwarmIO
+    pub upload_rate: f64,   // bytes/sec, filled in by SwarmIO
+}
+
+pub struct PeerStats {
+    pub addr: SocketAddr,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+    pub download_rate: f64, // bytes/sec, filled in by SwarmIO
+    pub upload_rate: f64,   // bytes/sec, filled in by SwarmIO
+}
+
+impl Swarm {
+    pub fn new(metainfo: Arc<Metainfo>) -> Self {
+        let total_pieces = metainfo.pieces.len();
+        Self {
+            metainfo: Arc::clone(&metainfo),
+            peer_registry: PeerRegistry::new(total_pieces),
+            block_assignments: BlockAssignments::new(),
+            pieces: PieceManager::new(Arc::clone(&metainfo)),
+            status: SwarmStatus::Active,
+        }
+    }
+
+    pub fn snapshot(&self) -> SwarmSnapshot {
+        SwarmSnapshot {
+            status: self.status,
+            blocks_total: self.pieces.blocks_total(),
+            blocks_done: self.pieces.blocks_received(),
+            blocks_in_flight: self.block_assignments.requests_in_flight(),
+            bytes_total: self.metainfo.total_size(),
+            bytes_downloaded: self.pieces.downloaded_bytes,
+            bytes_uploaded: self.pieces.uploaded_bytes,
+            seeders: self.peer_registry.seeders.iter().copied().collect(),
+            leechers: self.peer_registry.leechers.iter().copied().collect(),
+            peers: self
+                .peer_registry
+                .peer_stats()
+                .map(|(addr, bytes_uploaded, bytes_downloaded)| PeerStats {
+                    addr,
+                    bytes_uploaded,
+                    bytes_downloaded,
+                    download_rate: 0.0,
+                    upload_rate: 0.0,
+                })
+                .collect(),
+            download_rate: 0.0,
+            upload_rate: 0.0,
+        }
+    }
+
+    pub fn step(&mut self, input: Input) -> Vec<Output> {
+        match input {
+            Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
+            Input::PeerConnected {
+                addr,
+                peer_extensions,
+            } => self.on_connected(addr, peer_extensions),
+            Input::PeerDisconnected(addr) => self.on_disconnected(addr),
+            Input::MessageReceived { addr, message } => self.on_message(addr, message),
+            Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
+            Input::Tick(tick) => self.on_tick(tick),
+        }
+    }
+
+    fn on_swarm_command(&mut self, cmd: SwarmCommand) -> Vec<Output> {
+        match cmd {
+            SwarmCommand::SetStatus(swarm_status) => {
+                self.status = swarm_status;
+                vec![]
+            },
+            //
+        }
+    }
+
+    fn on_tick(&mut self, tick: Tick) -> Vec<Output> {
+        match tick {
+            Tick::Block => self.plan(),
+            Tick::Pex => {
+                let addrs: HashSet<SocketAddr> = self
+                    .peer_registry
+                    .seeders
+                    .union(&self.peer_registry.leechers)
+                    .cloned()
+                    .collect();
+
+                let mut out = vec![];
+                let payload = UtPexMessage {
+                    addrs: addrs.clone(),
+                }
+                .encode();
+
+                for addr in addrs {
+                    let Some(peer_ext_id) = self.peer_registry.peer_extension_id(addr, "ut_pex")
+                    else {
+                        continue;
+                    };
+                    out.push(Output::SendToPeer {
+                        addr,
+                        message: Message::Extension {
+                            ext_id: peer_ext_id,
+                            payload: payload.clone(),
+                        },
+                    });
+                }
+
+                out
+            },
+        }
+    }
+
+    fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
+        self.peer_registry.disconnected(addr);
+        self.block_assignments.release_peer(addr);
+        self.plan()
+    }
+
+    fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
+        if self.pieces.is_complete() {
+            return vec![];
+        }
+        let mut output = vec![];
+        for addr in socket_addrs {
+            if !self.peer_registry.contains(addr) {
+                output.push(Output::ConnectPeer(addr));
+            }
+        }
+        output
+    }
+
+    fn on_connected(&mut self, addr: SocketAddr, extensions: PeerExtensions) -> Vec<Output> {
+        self.block_assignments.release_peer(addr);
+        self.peer_registry.connected(addr, extensions);
+
+        // Communicate the pieces we have — BEP 6 allows exactly one of
+        // HaveAll/HaveNone/Bitfield, never a Bitfield on top of the other two.
+        let message = if extensions.fast && self.pieces.is_complete() {
+            Message::HaveAll
+        } else if extensions.fast && self.pieces.has_no_piece() {
+            Message::HaveNone
+        } else {
+            Message::Bitfield(self.pieces.bitfield())
+        };
+        let mut out = vec![Output::SendToPeer { addr, message }];
+        out.extend(self.declare_interest(addr));
+        out
+    }
+
+    fn on_message(&mut self, addr: SocketAddr, message: Message) -> Vec<Output> {
+        match self.peer_registry.apply(addr, &message) {
+            Err(RejectReason::UnknownPeer) => return vec![],
+            Err(RejectReason::ProtocolViolation) => return vec![Output::DisconnectPeer(addr)],
+            Ok(()) => {},
+        }
+
+        // Decided once, up front: does this message type ever change what
+        // `plan()` can accomplish? See `Message::affects_scheduling`.
+        let should_plan = message.affects_scheduling();
+
+        let mut outputs = match message {
+            // Availability-only: recorded by `peer_registry.apply` above,
+            // scheduled at the next tick rather than replanning right away.
+            Message::Bitfield(_) | Message::Have(_) | Message::HaveAll => {
+                self.declare_interest(addr)
+            },
+            Message::HaveNone => vec![],
+            Message::Unchoke => vec![],
+            Message::Choke => {
+                self.block_assignments.release_peer(addr);
+                vec![]
+            },
+            Message::Piece {
+                piece_index,
+                piece_offset,
+                data,
+            } => {
+                let block_ref = BlockRef {
+                    piece_index,
+                    piece_offset,
+                };
+                self.on_message_piece(addr, block_ref, data)
+            },
+            Message::Interested => vec![Output::SendToPeer {
+                addr,
+                message: Message::Unchoke,
+            }],
+            Message::NotInterested => vec![],
+            Message::Request {
+                piece_index,
+                piece_offset,
+                piece_len,
+            } => self.on_message_request(piece_index, piece_offset, piece_len, addr),
+            Message::Cancel { .. } => vec![],
+            Message::KeepAlive => vec![],
+            Message::Unimplemented => vec![],
+
+            // BEP 10
+            Message::ExtensionHandshake(_) => vec![],
+            Message::Extension { ext_id, payload } => {
+                self.on_extension_message(addr, ext_id, &payload)
+            },
+
+            // BEP 6
+            Message::SuggestPiece(_) => self.declare_interest(addr),
+            Message::RejectRequest {
+                piece_index,
+                piece_offset,
+                ..
+            } => {
+                let block_ref = BlockRef {
+                    piece_index,
+                    piece_offset,
+                };
+                self.block_assignments.unassign(block_ref, addr);
+                // self.pieces.reset_block(block_ref);
+                // self.schedule_requests();
+                vec![]
+            },
+            Message::AllowedFast(_) => self.declare_interest(addr),
+        };
+
+        if should_plan {
+            outputs.extend(self.plan());
+        }
+        outputs
+    }
+
+    /// Tell the peer we're interested, but only the first time — a no-op
+    /// once `am_interested` is already set.
+    fn declare_interest(&mut self, addr: SocketAddr) -> Vec<Output> {
+        match self.peer_registry.declare_interest(addr) {
+            Some(message) => vec![Output::SendToPeer { addr, message }],
+            None => vec![],
+        }
+    }
+
+    fn on_message_request(
+        &mut self,
+        piece_index: usize,
+        piece_offset: usize,
+        piece_len: usize,
+        addr: SocketAddr,
+    ) -> Vec<Output> {
+        if !self.status.upload() {
+            return vec![];
+        }
+        let Some(data) = self.pieces.read_block(piece_index, piece_offset, piece_len) else {
+            return vec![];
+        };
+        vec![Output::SendToPeer {
+            addr,
+            message: Message::Piece {
+                piece_index,
+                piece_offset,
+                data,
+            },
+        }]
+    }
+
+    fn on_message_piece(
+        &mut self,
+        addr: SocketAddr,
+        block_ref: BlockRef,
+        data: Vec<u8>,
+    ) -> Vec<Output> {
+        // Only a peer we actually requested this block from may fulfil it —
+        // otherwise any connected peer could complete blocks assigned to
+        // others. Not time-bounded, so a slow-but-legitimate reply is still
+        // accepted; `receive_block` below no-ops if we no longer need it.
+        if !self.block_assignments.is_holder(block_ref, addr) {
+            return vec![];
+        }
+        self.block_assignments.unassign(block_ref, addr);
+
+        let Ok(completed) = self.pieces.receive_block(block_ref, data) else {
+            return vec![]; // Malformed block: already unassigned, gets replanned.
+        };
+        let Some(CompletedPiece {
+            piece_index,
+            piece_offset,
+            data,
+        }) = completed
+        else {
+            return vec![];
+        };
+
+        let mut outputs = vec![
+            Output::Broadcast(Message::Have(piece_index)),
+            Output::WritePiece {
+                offset: piece_offset,
+                data,
+            },
+        ];
+        if self.pieces.is_complete() {
+            outputs.push(Output::Completed);
+            outputs.extend(
+                self.peer_registry
+                    .seeders
+                    .iter()
+                    .map(|a| Output::DisconnectPeer(*a)),
+            );
+        }
+        outputs
+    }
+
+    fn on_extension_message(
+        &mut self,
+        addr: SocketAddr,
+        ext_id: u8,
+        payload: &[u8],
+    ) -> Vec<Output> {
+        match ext_id {
+            UT_METADATA_EXT_ID => match UtMetadataMessage::decode(payload) {
+                Ok(UtMetadataMessage::Request { piece }) => {
+                    let Some(peer_ext_id) =
+                        self.peer_registry.peer_extension_id(addr, "ut_metadata")
+                    else {
+                        return vec![];
+                    };
+                    let data = self.metainfo.info_bytes_block(piece);
+                    let response = UtMetadataMessage::Data {
+                        piece,
+                        total_size: self.metainfo.info_bytes.len(),
+                        data,
+                    };
+                    vec![Output::SendToPeer {
+                        addr,
+                        message: Message::Extension {
+                            ext_id: peer_ext_id,
+                            payload: response.encode(),
+                        },
+                    }]
+                },
+                _ => vec![],
+            },
+
+            UT_PEX_EXT_ID => match UtPexMessage::decode(payload) {
+                Ok(msg) => {
+                    let addrs = msg.addrs.into_iter().collect();
+                    self.on_discovered(addrs)
+                },
+                _ => vec![],
+            },
+
+            _ => vec![],
+        }
+    }
+
+    /// The scheduling policy: suggested pieces first, then rarest, and within
+    /// a piece always the block with fewest holders.
+    ///
+    /// `holders` is built once (O(N) over in-flight requests) instead of
+    /// rescanned per block per depth. Depths are swept low-to-high, one
+    /// block-list pass per depth, so no block gets a second holder while
+    /// another still has none. A block's holders can already sit above 0
+    /// coming into this call (assignments don't expire — see
+    /// `BlockAssignments`), so an empty depth doesn't mean a deeper one
+    /// would be too: we keep sweeping the full depth range until a whole
+    /// pass makes no progress, rather than stopping at the first empty one.
+    fn plan(&mut self) -> Vec<Output> {
+        if !self.status.download() {
+            return vec![];
+        }
+        let mut budget = self.budget();
+        if budget == 0 {
+            return vec![];
+        }
+
+        let mut holders = self.block_assignments.holder_counts();
+        let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
+        // Sort by suggested and rarest first
+        needed.sort_by_cached_key(|&piece| {
+            (
+                !self.peer_registry.is_suggested(piece),
+                self.peer_registry.rarity(piece),
+            )
+        });
+        let blocks: Vec<BlockRange> = needed
+            .iter()
+            .flat_map(|&piece| self.pieces.unreceived_blocks(piece))
+            .collect();
+
+        // A block can't usefully have more holders than there are unchoked
+        // peers to serve it.
+        let max_depth = self.peer_registry.unchoked().count();
+
+        let mut rng = rand::rng();
+        let mut outputs = vec![];
+        let mut progressed = true;
+        while budget > 0 && progressed {
+            progressed = false;
+
+            for replication in 0..=max_depth {
+                if budget == 0 {
+                    break;
+                }
+
+                for &block in &blocks {
+                    if budget == 0 {
+                        break;
+                    }
+                    let holders_count = holders.get(&block.block).copied().unwrap_or(0);
+                    // Only blocks at exactly this depth: every block gets its
+                    // first holder before any block gets a second.
+                    if holders_count != replication {
+                        continue;
+                    }
+                    let Some(addr) = self.pick_peer(block.block, &mut rng) else {
+                        continue;
+                    };
+
+                    budget -= 1;
+                    progressed = true;
+                    *holders.entry(block.block).or_insert(0) += 1;
+                    outputs.push(self.send_request(addr, block));
+                }
+            }
+        }
+
+        outputs
+    }
+
+    /// Total request slots free across peers who unchoked us.
+    fn budget(&self) -> usize {
+        self.peer_registry
+            .unchoked()
+            .map(|addr| self.block_assignments.free_slots_for(addr))
+            .sum()
+    }
+
+    fn pick_peer(&self, block_ref: BlockRef, rng: &mut impl rand::Rng) -> Option<SocketAddr> {
+        self.peer_registry
+            .peers_with(block_ref.piece_index)
+            .filter(|&addr| {
+                self.peer_registry.can_serve(addr, block_ref.piece_index)
+                    && self.block_assignments.free_slots_for(addr) > 0
+                    && !self.block_assignments.is_holder(block_ref, addr)
+            })
+            .choose(rng)
+    }
+
+    fn send_request(&mut self, addr: SocketAddr, block: BlockRange) -> Output {
+        self.block_assignments.assign(block.block, addr);
+        Output::SendToPeer {
+            addr,
+            message: Message::Request {
+                piece_index: block.block.piece_index,
+                piece_offset: block.block.piece_offset,
+                piece_len: block.len,
+            },
+        }
+    }
+}
