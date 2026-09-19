@@ -1,14 +1,9 @@
-use std::{fs, path::PathBuf, thread::sleep, time::Duration};
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{ArgAction, Parser, Subcommand};
-use crossterm::{
-    event::{self, Event, KeyCode},
-    terminal::{disable_raw_mode, enable_raw_mode},
-};
 use indicatif::{ProgressBar, ProgressStyle};
-use tortue_lib::{SwarmHandle, download, download_magnet, metainfo};
+use std::{fs, path::PathBuf};
+use tortue_lib::{download, download_magnet, metainfo};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -74,45 +69,39 @@ async fn main() -> Result<()> {
             );
 
             let mut progress = dl.progress;
-
-            tokio::spawn(async move {
-                while progress.changed().await.is_ok() {
-                    let s = progress.borrow();
-
-                    bar.set_length(s.blocks_total as u64);
-                    bar.set_position(s.blocks_done as u64);
-
-                    bar.set_message(format!(
-                        "{} seeders, {} leechers, {} in flight \
-                         — ↓ {}/s ↑ {}/s {:#?}",
-                        s.seeders.len(),
-                        s.leechers.len(),
-                        s.blocks_in_flight,
-                        human_size(s.download_rate as u64),
-                        human_size(s.upload_rate as u64),
-                        s.status,
-                    ));
-                }
-
-                bar.finish_with_message("completed");
-            });
-
-            let control = dl.handle.clone();
-            let mut keyboard = tokio::spawn(async move { keyboard_control(control).await });
-
             let mut task = dl.task;
 
-            tokio::select! {
-                result = &mut task => {
-                    keyboard.abort();
-                    result??;
-                }
+            loop {
+                tokio::select! {
+                    _ = &mut task => {
+                        break;
+                    }
 
-                result = &mut keyboard => {
-                    result??;
-                    task.await??;
+                    result = progress.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
+
+                        let s = progress.borrow();
+
+                        bar.set_length(s.blocks_total as u64);
+                        bar.set_position(s.blocks_done as u64);
+
+                        bar.set_message(format!(
+                            "{} seeders, {} leechers, {} in flight \
+                             — ↓ {}/s ↑ {}/s {:#?}",
+                            s.seeders.len(),
+                            s.leechers.len(),
+                            s.blocks_in_flight,
+                            human_size(s.download_rate as u64),
+                            human_size(s.upload_rate as u64),
+                            s.status,
+                        ));
+                    }
                 }
             }
+
+            bar.finish_with_message("completed");
         },
 
         Command::Inspect { path } => {
@@ -181,37 +170,4 @@ fn init_logging(verbose: u8) {
         .with_target(false)
         .with_env_filter(EnvFilter::new(level))
         .init();
-}
-
-async fn keyboard_control(control: SwarmHandle) -> Result<()> {
-    enable_raw_mode()?;
-
-    loop {
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            match key.code {
-                KeyCode::Char('s') => {
-                    control.resume().await?;
-                },
-
-                KeyCode::Char('p') => {
-                    control.pause().await?;
-                },
-
-                KeyCode::Char('q') => {
-                    control.shutdown().await?;
-                    break;
-                },
-
-                _ => {},
-            }
-        }
-
-        sleep(Duration::ZERO);
-    }
-
-    disable_raw_mode()?;
-
-    Ok(())
 }
