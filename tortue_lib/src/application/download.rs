@@ -20,7 +20,7 @@ use crate::{
     application::magnet::fetch_metadata,
     domain::{
         magnet::MagnetLink,
-        swarm::{SwarmSnapshot, SwarmStatus},
+        swarm::{SwarmCommand, SwarmSnapshot, SwarmStatus},
         torrent::Metainfo,
         tracker::{Node, SessionStats},
     },
@@ -28,7 +28,18 @@ use crate::{
 
 pub struct Download {
     pub progress: watch::Receiver<SwarmSnapshot>,
+    pub handle: SwarmHandle,
     pub task: JoinHandle<Result<()>>,
+}
+
+#[derive(Clone)]
+pub struct SwarmHandle {
+    command_tx: mpsc::Sender<SwarmCommand>,
+    // shutdown_tx: oneshot::Sender<()>,
+}
+
+impl SwarmHandle {
+    //
 }
 
 pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Download> {
@@ -65,6 +76,7 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
 
     let initial = SwarmSnapshot::default();
     let (progress_tx, progress_rx) = watch::channel(initial);
+    let (cmd_tx, cmd_rx) = mpsc::channel(1);
 
     let connector =
         TcpPeerConnector::new(node.id, metainfo.info_hash, Some(metainfo.info_bytes.len()));
@@ -77,6 +89,7 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         storage,
         progress_tx,
         stats,
+        cmd_rx,
     );
     let task = tokio::spawn(async move {
         coordinator
@@ -87,6 +100,35 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
 
     Ok(Download {
         progress: progress_rx,
+        handle: SwarmHandle::new(cmd_tx),
         task,
     })
+}
+
+impl SwarmHandle {
+    pub fn new(command_tx: mpsc::Sender<SwarmCommand>) -> Self {
+        Self { command_tx }
+    }
+
+    pub async fn pause(&self) -> Result<()> {
+        self.send(SwarmCommand::SetStatus(SwarmStatus::UploadOnly))
+            .await
+    }
+
+    pub async fn resume(&self) -> Result<()> {
+        self.send(SwarmCommand::SetStatus(SwarmStatus::Active))
+            .await
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        self.send(SwarmCommand::SetStatus(SwarmStatus::Stopped))
+            .await
+    }
+
+    async fn send(&self, command: SwarmCommand) -> Result<()> {
+        self.command_tx
+            .send(command)
+            .await
+            .map_err(|_| Error::HandleClosed)
+    }
 }

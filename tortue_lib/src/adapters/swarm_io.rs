@@ -16,7 +16,7 @@ use crate::{
     domain::{
         message::Message,
         peer::PeerEvent,
-        swarm::{Input, Output, Swarm, SwarmSnapshot, Tick},
+        swarm::{Input, Output, Swarm, SwarmCommand, SwarmSnapshot, Tick},
         torrent::Metainfo,
         tracker::SessionStats,
     },
@@ -32,6 +32,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub struct SwarmIO<S, C> {
     metainfo: Arc<Metainfo>,
+    commands_rx: mpsc::Receiver<SwarmCommand>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
@@ -73,10 +74,12 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         piece_store: S,
         progress_tx: watch::Sender<SwarmSnapshot>,
         stats: Arc<Mutex<SessionStats>>,
+        commands_rx: mpsc::Receiver<SwarmCommand>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
             metainfo,
+            commands_rx,
             peers_rx,
             peer_cmds: HashMap::new(),
             peer_events_tx,
@@ -96,11 +99,19 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
         loop {
             let input = tokio::select! {
+                // Listen to application commands
+                command = self.commands_rx.recv() => match command {
+                    Some(cmd) => Input::SwarmCommand(cmd),
+                    None => break,
+                },
+
+                // Listen to trackers
                 addrs = self.peers_rx.recv() => match addrs {
                     Some(addrs) => Input::PeersDiscovered(addrs),
                     None => return Err(Error::TrackerDisconnected),
                 },
 
+                // Listen to peers
                 msg = self.peer_events_rx.recv() => match msg {
                     None => break,
                     Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
@@ -117,8 +128,10 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     },
                 },
 
+                // Tick block
                 _ = block_tick.tick() => Input::Tick(Tick::Block),
 
+                // Tick PEX
                 _ = pex_tick.tick() => Input::Tick(Tick::Pex),
 
             };
@@ -184,9 +197,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 .bytes_total
                 .saturating_sub(snapshot.bytes_downloaded),
         };
-
-        // self.apply_rates(&mut snapshot);
-
+        self.apply_rates(&mut snapshot);
         let _ = self.progress_tx.send(snapshot);
     }
 

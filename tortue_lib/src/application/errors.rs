@@ -20,5 +20,8 @@ pub enum Error {
 
     #[error("invalid magnet link: {0}")]
     InvalidMagnet(#[from] MagnetError),
+
+    #[error("handle closed")]
+    HandleClosed,
 }
 pub type Result<T> = std::result::Result<T, Error>;

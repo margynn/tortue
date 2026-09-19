@@ -31,9 +31,7 @@ pub enum Input {
         addr: SocketAddr,
         message: Message,
     },
-    SwarmCommand {
-        status: SwarmStatus,
-    },
+    SwarmCommand(SwarmCommand),
     Tick(Tick),
 }
 
@@ -51,13 +49,22 @@ pub enum Output {
     Completed,
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone)]
 pub enum SwarmStatus {
     #[default]
     Active, // upload on,  download on
     Stopped,      // upload off, download off
     DownloadOnly, // upload off, download on
     UploadOnly,   // upload on,  download off
+}
+
+pub enum SwarmCommand {
+    SetStatus(SwarmStatus),
+    ConnectPeer(SocketAddr),
+    DisconnectPeer(SocketAddr),
+    SetPeerLimit(usize),
+    SetUploadLimit(Option<u64>),
+    SetDownloadLimit(Option<u64>),
 }
 
 impl SwarmStatus {
@@ -160,23 +167,28 @@ impl Swarm {
             } => self.on_connected(addr, peer_extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            Input::SwarmCommand { status } => {
-                self.status = status;
+            Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
+            Input::Tick(tick) => self.on_tick(tick),
+        }
+    }
+
+    fn on_swarm_command(&mut self, cmd: SwarmCommand) -> Vec<Output> {
+        match cmd {
+            SwarmCommand::SetStatus(swarm_status) => {
+                self.status = swarm_status;
                 vec![]
             },
-            Input::Tick(tick) => self.on_tick(tick),
+            SwarmCommand::ConnectPeer(socket_addr) => vec![],
+            SwarmCommand::DisconnectPeer(socket_addr) => vec![],
+            SwarmCommand::SetPeerLimit(_) => vec![],
+            SwarmCommand::SetUploadLimit(_) => vec![],
+            SwarmCommand::SetDownloadLimit(_) => vec![],
         }
     }
 
     fn on_tick(&mut self, tick: Tick) -> Vec<Output> {
         match tick {
-            Tick::Block => {
-                // Sweeping here rather than in `plan` keeps the per-message path free
-                // of a walk over every request in flight; a few seconds of extra
-                // latency on a timeout does not need finer granularity than a tick.
-                self.block_assignments.release_expired();
-                self.plan()
-            },
+            Tick::Block => self.plan(),
             Tick::Pex => {
                 let addrs: HashSet<SocketAddr> = self
                     .peer_registry
@@ -365,8 +377,10 @@ impl Swarm {
         data: Vec<u8>,
     ) -> Vec<Output> {
         // Only a peer we actually requested this block from may fulfil it —
-        // otherwise any connected peer could complete blocks assigned to others.
-        if !self.block_assignments.is_holder(block_ref, addr) {
+        // otherwise any connected peer could complete blocks assigned to
+        // others. A slow reply still counts here even after its scheduling
+        // slot was freed and the block possibly reassigned elsewhere.
+        if !self.block_assignments.accepts_from(block_ref, addr) {
             return vec![];
         }
         self.block_assignments.unassign(block_ref, addr);
@@ -458,6 +472,7 @@ impl Swarm {
         if !self.status.download() {
             return vec![];
         }
+        self.block_assignments.release_expired();
         let mut budget = self.budget();
         if budget == 0 {
             return vec![];
