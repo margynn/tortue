@@ -1,10 +1,10 @@
+use rand::RngExt;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener as StdTcpListener},
     time::Duration,
 };
-
-use rand::RngExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream, tcp::OwnedReadHalf},
@@ -454,75 +454,51 @@ impl Message {
 
 // TMP listenning part:
 
-// use socket2::{Domain, Protocol, Socket, Type};
-// use std::{
-//     io,
-//     net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener as StdTcpListener},
-// };
-// use tokio::net::{TcpListener, TcpStream};
+struct PeerListenner {
+    //
+}
 
-// fn bind_listener(addr: SocketAddr) -> io::Result<TcpListener> {
-//     let domain = if addr.is_ipv4() {
-//         Domain::IPV4
-//     } else {
-//         Domain::IPV6
-//     };
+impl PeerListenner {
+    // new
 
-//     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    async fn main_loop() -> Result<()> {
+        let port = 8080;
+        let ipv4 = Self::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?;
+        let ipv6 = Self::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))?;
+        tokio::try_join!(Self::accept_loop(ipv4), Self::accept_loop(ipv6),)?;
+        Ok(())
+    }
 
-//     // Garantit que la socket IPv6 ne capture pas aussi IPv4.
-//     if addr.is_ipv6() {
-//         socket.set_only_v6(true)?;
-//     }
+    async fn accept_loop(listener: TcpListener) -> Result<()> {
+        loop {
+            let (stream, peer) = listener.accept().await?;
 
-//     #[cfg(unix)]
-//     socket.set_reuse_address(true)?;
+            tokio::spawn(async move {
+                if let Err(error) = Self::handle_peer(stream).await {
+                    eprintln!("peer {peer}: {error}");
+                }
+            });
+        }
+    }
 
-//     socket.bind(&addr.into())?;
-//     socket.listen(1024)?;
-//     socket.set_nonblocking(true)?;
+    async fn handle_peer(_stream: TcpStream) -> Result<()> {
+        // Handshake et protocole P2P.
+        Ok(())
+    }
 
-//     let listener: StdTcpListener = socket.into();
-//     TcpListener::from_std(listener)
-// }
-
-// async fn accept_loop(listener: TcpListener) -> io::Result<()> {
-//     loop {
-//         let (stream, peer) = listener.accept().await?;
-
-//         tokio::spawn(async move {
-//             if let Err(error) = handle_peer(stream).await {
-//                 eprintln!("peer {peer}: {error}");
-//             }
-//         });
-//     }
-// }
-
-// async fn handle_peer(_stream: TcpStream) -> io::Result<()> {
-//     // Handshake et protocole P2P.
-//     Ok(())
-// }
-
-// #[tokio::main]
-// async fn main() -> io::Result<()> {
-//     let port = 8080;
-
-//     let ipv4 = bind_listener(SocketAddr::from((
-//         Ipv4Addr::UNSPECIFIED,
-//         port,
-//     )))?;
-
-//     let ipv6 = bind_listener(SocketAddr::from((
-//         Ipv6Addr::UNSPECIFIED,
-//         port,
-//     )))?;
-
-//     println!("Listening on 0.0.0.0:{port} and [::]:{port}");
-
-//     tokio::try_join!(
-//         accept_loop(ipv4),
-//         accept_loop(ipv6),
-//     )?;
-
-//     Ok(())
-// }
+    fn bind(addr: SocketAddr) -> Result<TcpListener> {
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        if addr.is_ipv6() {
+            socket.set_only_v6(true)?;
+        }
+        socket.bind(&addr.into())?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        TcpListener::from_std(socket.into()).map_err(|err| Error::Io(err))
+    }
+}

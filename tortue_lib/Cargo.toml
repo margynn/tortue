@@ -25,3 +25,4 @@ tokio = { version = "1.50.0", features = [
 rand = "0.10.0"
 hex = "0.4.3"
 tracing = "0.1.44"
+socket2 = "0.6.5"
