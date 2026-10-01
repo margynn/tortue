@@ -221,7 +221,7 @@ impl Swarm {
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.peer_registry.disconnected(addr);
         self.block_assignments.release_peer(addr);
-        self.plan()
+        vec![]
     }
 
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {

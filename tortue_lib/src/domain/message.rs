@@ -4,8 +4,6 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
-use crate::domain::bencode;
-
 use super::bencode::Bencode;
 
 #[derive(Debug, thiserror::Error)]
@@ -136,11 +134,7 @@ impl Message {
     pub fn affects_scheduling(&self) -> bool {
         matches!(
             self,
-            Message::Unchoke
-                | Message::Choke
-                | Message::AllowedFast(_)
-                | Message::RejectRequest { .. }
-                | Message::Piece { .. }
+            Message::Unchoke | Message::AllowedFast(_) | Message::Piece { .. }
         )
     }
 
