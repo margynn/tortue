@@ -38,10 +38,6 @@ pub struct SwarmHandle {
     // shutdown_tx: oneshot::Sender<()>,
 }
 
-impl SwarmHandle {
-    //
-}
-
 pub async fn download(torrent_file: &[u8], output_dir: PathBuf) -> Result<Download> {
     let metainfo = Arc::new(
         Metainfo::try_from(torrent_file).map_err(|e| Error::InvalidTorrentFile(e.to_string()))?,
