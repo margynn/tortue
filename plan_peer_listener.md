@@ -18,12 +18,13 @@ Déplacer la struct `Handshake` (et `Message::frame`/`read_from`, déjà dans `d
 ### 2.2 Séparer "connexion" et "session" dans `peer_io.rs`
 
 `TcpPeerIO::run` mélange aujourd'hui deux responsabilités :
+
 1. **Établir** la connexion (connect + handshake + retry/backoff) — n'a de sens que pour le sortant.
 2. **Faire vivre** une connexion déjà établie (lecture/écriture de `Message`, keepalive, `spawn_reader`, sélection sur `cmd_rx`/`cancel_rx`) — identique que la connexion soit entrante ou sortante.
 
 Proposition : extraire (2) dans une fonction/struct neutre, par ex. `PeerSession::run(stream, peer_addr, cmd_rx, evt_tx, cancel_rx)`, qui ne connaît ni le handshake ni la reconnexion. `TcpPeerIO` (sortant) devient : boucle de retry + handshake, puis délégation à `PeerSession::run`. Le flux entrant fera : handshake entrant (une seule tentative, pas de retry), puis la même délégation à `PeerSession::run`.
 
-Ça règle directement la remarque du cahier des charges : *"PeerIO est conçu pour la reconnexion, ça n'a pas de sens pour une connexion acceptée"* — la reconnexion reste isolée dans `TcpPeerIO`/`TcpPeerConnector`, `PeerSession` est l'unique brique commune.
+Ça règle directement la remarque du cahier des charges : _"PeerIO est conçu pour la reconnexion, ça n'a pas de sens pour une connexion acceptée"_ — la reconnexion reste isolée dans `TcpPeerIO`/`TcpPeerConnector`, `PeerSession` est l'unique brique commune.
 
 ### 2.3 Registre des metainfo/swarms connus
 
@@ -44,7 +45,7 @@ Ce registre est **global au process** (un seul, partagé entre tous les `Downloa
 
 ### 2.4 `PeerListenner` : finir l'implémentation
 
-- Démarré **une seule fois avec le programme** (pas par torrent), reçoit `client_id: PeerId` et `SwarmRegistry` en injection (conforme à *"Listener qui démarre avec le reste du programme / Passer à swarmIO (injecter)"*).
+- Démarré **une seule fois avec le programme** (pas par torrent), reçoit `client_id: PeerId` et `SwarmRegistry` en injection (conforme à _"Listener qui démarre avec le reste du programme / Passer à swarmIO (injecter)"_).
 - `handle_peer(stream)` :
   1. Lire le handshake entrant avec timeout (`Handshake::decode`, réutilisant le code déplacé en 2.1).
   2. `registry.route(info_hash)` :

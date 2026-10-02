@@ -2,14 +2,13 @@ use rand::RngExt;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener as StdTcpListener},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpSocket, TcpStream, tcp::OwnedReadHalf},
+    net::{TcpListener, TcpStream},
     sync::{mpsc, watch},
-    task::JoinHandle,
     time::timeout,
 };
 
@@ -19,7 +18,7 @@ use crate::{
         message::{
             Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID, UT_PEX_EXT_ID,
         },
-        peer::{PeerEvent, PeerExtensions, PeerId},
+        peer::{self, Handshake, PeerEvent, PeerExtensions, PeerId},
         torrent::InfoHash,
     },
 };
@@ -29,14 +28,14 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("peer error: {0}")]
+    Peer(#[from] peer::Error),
+
     #[error("connection timed out")]
     Timeout,
 
     #[error("info hash mismatch")]
     InfoHashMismatch,
-
-    #[error("invalid handshake: {0}")]
-    InvalidHandshake(&'static str),
 
     #[error("message too large")]
     MessageTooLarge,
@@ -101,6 +100,90 @@ impl PeerConnector for TcpPeerConnector {
     }
 }
 
+enum SessionExit {
+    Stop,
+    Reconnect,
+}
+
+async fn run_session(
+    stream: TcpStream,
+    handshake: &Handshake,
+    peer_addr: SocketAddr,
+    cmd_rx: &mut mpsc::Receiver<Message>,
+    evt_tx: &mpsc::Sender<(SocketAddr, PeerEvent)>,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> SessionExit {
+    const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
+        KEEPALIVE_INTERVAL,
+    );
+
+    let _ = evt_tx
+        .send((
+            peer_addr,
+            PeerEvent::Connected {
+                peer_id: handshake.peer_id,
+                peer_extensions: PeerExtensions {
+                    fast: handshake.fast_extension,
+                    dht: handshake.dht_protocol,
+                },
+            },
+        ))
+        .await;
+
+    let reader_tx = evt_tx.clone();
+    let (mut reader, mut writer) = stream.into_split();
+    let mut read_task = tokio::spawn(async move {
+        loop {
+            let msg = match timeout(PEER_IDLE_TIMEOUT, Message::read_from(&mut reader)).await {
+                Ok(Ok(msg)) => msg,
+                _ => return,
+            };
+            if reader_tx
+                .send((peer_addr, PeerEvent::MessageReceived(msg)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => match cmd {
+                None => {
+                    // Channel closed -> disconnect the peer
+                    read_task.abort();
+                    return SessionExit::Stop;
+                },
+                Some(msg) => {
+                    if writer.write_all(&msg.frame()).await.is_err() {
+                        break
+                    }
+                },
+            },
+
+            _ = cancel_rx.changed() => {
+                read_task.abort();
+                return SessionExit::Stop;
+            }
+
+            _ = &mut read_task => break,
+
+            _ = keepalive.tick() => {
+                if writer.write_all(&Message::KeepAlive.frame()).await.is_err() {
+                   break
+                }
+             },
+        }
+    }
+
+    SessionExit::Reconnect
+}
+
 struct TcpPeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
@@ -112,8 +195,6 @@ impl TcpPeerIO {
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
-    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
-    const READ_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_ATTEMPTS: usize = 5;
 
     fn new(
@@ -135,60 +216,26 @@ impl TcpPeerIO {
         mut cmd_rx: mpsc::Receiver<Message>,
         evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) -> Result<()> {
-        let mut keepalive = tokio::time::interval(Self::KEEPALIVE_INTERVAL);
         let mut reconnect_delay = Duration::ZERO;
 
         'run: loop {
-            let (tcp, handshake) = self.connect_with_retry(reconnect_delay).await?;
+            let (stream, handshake) = self.connect_with_retry(reconnect_delay).await?;
 
-            let _ = evt_tx
-                .send((
-                    self.peer_addr,
-                    PeerEvent::Connected {
-                        peer_id: handshake.peer_id,
-                        peer_extensions: PeerExtensions {
-                            fast: handshake.fast_extension,
-                            dht: handshake.dht_protocol,
-                        },
-                    },
-                ))
-                .await;
-
-            let (reader, mut writer) = tcp.into_split();
-            let mut read_task = self.spawn_reader(reader, evt_tx.clone());
-
-            loop {
-                tokio::select! {
-                    cmd = cmd_rx.recv() => match cmd {
-                        None => {
-                            // Channel closed -> disconnect the peer
-                            read_task.abort();
-                            break 'run
-                        },
-                        Some(msg) => {
-                            if writer.write_all(&msg.frame()).await.is_err() {
-                                break
-                            }
-                        },
-                    },
-
-                    _ = self.cancel_rx.changed() => {
-                        read_task.abort();
-                        break 'run
-                    }
-
-                    _ = &mut read_task => break,
-
-                    _ = keepalive.tick() => {
-                        if writer.write_all(&Message::KeepAlive.frame()).await.is_err() {
-                           break
-                        }
-                     },
-                }
+            match run_session(
+                stream,
+                &handshake,
+                self.peer_addr,
+                &mut cmd_rx,
+                &evt_tx,
+                &mut self.cancel_rx,
+            )
+            .await
+            {
+                SessionExit::Stop => break 'run,
+                SessionExit::Reconnect => {
+                    reconnect_delay = Self::RECONNECT_DELAY;
+                },
             }
-
-            reconnect_delay = Self::RECONNECT_DELAY;
-            read_task.abort()
         }
 
         // Sentinel: ensures Coordinator always receives Disconnected even on clean exit.
@@ -196,36 +243,11 @@ impl TcpPeerIO {
         Ok(())
     }
 
-    fn spawn_reader(
-        &self,
-        mut reader: OwnedReadHalf,
-        tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
-    ) -> JoinHandle<()> {
-        let addr = self.peer_addr;
-
-        tokio::spawn(async move {
-            loop {
-                let msg = match timeout(Self::READ_TIMEOUT, Message::read_from(&mut reader)).await {
-                    Ok(Ok(msg)) => msg,
-                    _ => return,
-                };
-
-                if tx
-                    .send((addr, PeerEvent::MessageReceived(msg)))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        })
-    }
-
     async fn connect_with_retry(&mut self, mut delay: Duration) -> Result<(TcpStream, Handshake)> {
         let mut attempts = 0;
         loop {
-            if attempts > Self::MAX_ATTEMPTS {
-                return Err(Error::MaxAttemptsExceeded); // Add error variant
+            if attempts >= Self::MAX_ATTEMPTS {
+                return Err(Error::MaxAttemptsExceeded);
             }
             attempts += 1;
 
@@ -311,108 +333,6 @@ impl TcpPeerIO {
     }
 }
 
-struct Handshake {
-    info_hash: InfoHash,
-    peer_id: PeerId,
-    dht_protocol: bool,
-    extension_protocol: bool,
-    fast_extension: bool,
-}
-
-impl Handshake {
-    // BitTorrent handshake (BEP 3).
-    //
-    // Offset  Size  Field
-    // ------  ----  ------------------------------------------------
-    // 0       1     pstrlen      = 19
-    // 1       19    pstr         = "BitTorrent protocol"
-    // 20      8     reserved     Extension / feature flags
-    // 28      20    info_hash    SHA-1 hash of the torrent info dictionary
-    // 48      20    peer_id      Peer identifier
-    //
-    // Total size: 68 bytes.
-    //
-    // `reserved` bits commonly used:
-    //
-    // reserved[5] bit 4 (0x10) → BEP 10: Extension Protocol
-    // reserved[7] bit 2 (0x04) → BEP 6:  Fast Extension
-    // reserved[7] bit 0 (0x01) → BEP 5:  DHT Protocol
-
-    const PSTR: &[u8; 19] = b"BitTorrent protocol";
-    const HANDSHAKE_LEN: usize = 68;
-
-    const EXTENSION_PROTOCOL_MASK: u8 = 0b0001_0000;
-    const FAST_EXTENSION_MASK: u8 = 0b0000_0100;
-    const DHT_PROTOCOL_MASK: u8 = 0b0000_0001;
-
-    fn new(
-        info_hash: InfoHash,
-        peer_id: PeerId,
-        dht_protocol: bool,
-        extension_protocol: bool,
-        fast_extension: bool,
-    ) -> Self {
-        Self {
-            info_hash,
-            peer_id,
-            fast_extension,
-            extension_protocol,
-            dht_protocol,
-        }
-    }
-
-    fn encode(&self) -> [u8; Self::HANDSHAKE_LEN] {
-        let mut out = [0u8; Self::HANDSHAKE_LEN];
-        out[0] = Self::PSTR.len() as u8;
-        out[1..20].copy_from_slice(Self::PSTR);
-        if self.extension_protocol {
-            out[25] |= Self::EXTENSION_PROTOCOL_MASK;
-        }
-        if self.fast_extension {
-            out[27] |= Self::FAST_EXTENSION_MASK;
-        }
-        if self.dht_protocol {
-            out[27] |= Self::DHT_PROTOCOL_MASK;
-        }
-        out[28..48].copy_from_slice(self.info_hash.as_ref());
-        out[48..68].copy_from_slice(self.peer_id.as_ref());
-        out
-    }
-
-    fn decode(buf: &[u8]) -> Result<Self> {
-        if buf.len() != Self::HANDSHAKE_LEN {
-            return Err(Error::InvalidHandshake("invalid handshake length"));
-        }
-        if buf[0] as usize != Self::PSTR.len() {
-            return Err(Error::InvalidHandshake("invalid protocol string length"));
-        }
-        if &buf[1..20] != Self::PSTR {
-            return Err(Error::InvalidHandshake("invalid protocol string"));
-        }
-
-        let mut reserved_bytes = [0u8; 8];
-        reserved_bytes.copy_from_slice(&buf[20..28]);
-
-        let mut hash_bytes = [0u8; 20];
-        hash_bytes.copy_from_slice(&buf[28..48]);
-
-        let mut peer_id_bytes = [0u8; 20];
-        peer_id_bytes.copy_from_slice(&buf[48..68]);
-
-        let extension_protocol = (reserved_bytes[5] & Self::EXTENSION_PROTOCOL_MASK) != 0;
-        let fast_extension = (reserved_bytes[7] & Self::FAST_EXTENSION_MASK) != 0;
-        let dht_protocol = (reserved_bytes[7] & Self::DHT_PROTOCOL_MASK) != 0;
-
-        Ok(Handshake::new(
-            InfoHash::from(hash_bytes),
-            PeerId::new(peer_id_bytes),
-            dht_protocol,
-            extension_protocol,
-            fast_extension,
-        ))
-    }
-}
-
 impl Message {
     // TCP framing for the BitTorrent wire protocol (BEP 3):
     //
@@ -454,11 +374,11 @@ impl Message {
 
 // TMP listenning part:
 
-struct PeerListenner {
+struct TcpPeerListenner {
     //
 }
 
-impl PeerListenner {
+impl TcpPeerListenner {
     // new
 
     async fn main_loop() -> Result<()> {
