@@ -19,7 +19,7 @@ use crate::{
         message::{
             Error as DecodeError, ExtensionHandshake, Message, UT_METADATA_EXT_ID, UT_PEX_EXT_ID,
         },
-        peer::{self, Handshake, PeerEvent, PeerExtensions, PeerId},
+        peer::{self, ConnectionDirection, Handshake, PeerEvent, PeerExtensions, PeerId},
         torrent::InfoHash,
     },
 };
@@ -124,6 +124,7 @@ impl PeerConnector for TcpPeerConnector {
                     &mut cmd_rx,
                     &evt_tx,
                     &mut cancel_rx,
+                    ConnectionDirection::Inbound,
                 )
                 .await;
             }
@@ -151,6 +152,7 @@ async fn run_session(
     cmd_rx: &mut mpsc::Receiver<Message>,
     evt_tx: &mpsc::Sender<(SocketAddr, PeerEvent)>,
     cancel_rx: &mut watch::Receiver<bool>,
+    direction: ConnectionDirection,
 ) -> SessionExit {
     const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
@@ -163,6 +165,7 @@ async fn run_session(
         .send((
             peer_addr,
             PeerEvent::Connected {
+                direction,
                 peer_id: handshake.peer_id,
                 peer_extensions: PeerExtensions {
                     fast: handshake.fast_extension,
@@ -268,6 +271,7 @@ impl TcpPeerIO {
                 &mut cmd_rx,
                 &evt_tx,
                 &mut self.cancel_rx,
+                ConnectionDirection::Outbound,
             )
             .await
             {

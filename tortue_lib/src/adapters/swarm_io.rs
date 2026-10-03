@@ -12,6 +12,7 @@ use tokio::{
 use tracing::info;
 
 use crate::{
+    adapters::swarm_registry::InboundPeer,
     application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
         message::Message,
@@ -26,6 +27,9 @@ use crate::{
 pub enum Error {
     #[error("tracker disconnected")]
     TrackerDisconnected,
+
+    #[error("registry disconnected")]
+    RegistryDisconnected,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -34,6 +38,7 @@ pub struct SwarmIO<S, C> {
     metainfo: Arc<Metainfo>,
     commands_rx: mpsc::Receiver<SwarmCommand>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+    inbound_rx: mpsc::Receiver<InboundPeer>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
@@ -70,6 +75,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     pub fn new(
         metainfo: Arc<Metainfo>,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+        inbound_rx: mpsc::Receiver<InboundPeer>,
         peer_connector: C,
         piece_store: S,
         progress_tx: watch::Sender<SwarmSnapshot>,
@@ -81,6 +87,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             metainfo,
             commands_rx,
             peers_rx,
+            inbound_rx,
             peer_cmds: HashMap::new(),
             peer_events_tx,
             peer_events_rx,
@@ -105,18 +112,29 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     None => break,
                 },
 
-                // Listen to trackers
+                // Listen to trackers peers
                 addrs = self.peers_rx.recv() => match addrs {
                     Some(addrs) => Input::PeersDiscovered(addrs),
                     None => return Err(Error::TrackerDisconnected),
                 },
 
+                // Listen to inbound (accepting) peers
+                inbound = self.inbound_rx.recv() => match inbound {
+                    Some(peer) => self.accept_inbound(peer, &mut coordinator),
+                    None => return Err(Error::RegistryDisconnected),
+                },
+
                 // Listen to peers
                 msg = self.peer_events_rx.recv() => match msg {
                     None => break,
-                    Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
+                    Some((addr, PeerEvent::Connected{peer_id, direction, peer_extensions})) => {
                         info!(addr = %addr, peer_id = %peer_id, "peer connected");
-                        Input::PeerConnected { addr, peer_extensions }
+                        Input::PeerConnected {
+                            direction,
+                            addr,
+                            id: peer_id,
+                            extensions: peer_extensions,
+                        }
                     },
                     Some((addr, PeerEvent::Disconnected)) => {
                         info!(addr = %addr, "peer disconnected");
@@ -186,6 +204,12 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         self.peer_cmds.insert(addr, cmd_tx);
         self.peer_connector
             .connect(addr, cmd_rx, self.peer_events_tx.clone());
+    }
+
+    fn accept_inbound(&mut self, peer: InboundPeer, swarm: &mut Swarm) -> Input {
+        //
+
+        todo!()
     }
 
     fn publish(&mut self, mut snapshot: SwarmSnapshot) {

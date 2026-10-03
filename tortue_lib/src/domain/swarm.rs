@@ -10,7 +10,12 @@ use block_assignment::BlockAssignments;
 use peer_registry::{PeerRegistry, RejectReason};
 use piece_manager::{BlockRange, BlockRef, CompletedPiece, PieceManager};
 
-use crate::domain::message::{UT_PEX_EXT_ID, UtPexMessage};
+use crate::domain::peer::ConnectionDirection;
+
+use super::{
+    message::{UT_PEX_EXT_ID, UtPexMessage},
+    peer::PeerId,
+};
 
 use super::{
     message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
@@ -23,8 +28,10 @@ pub(super) type PieceIndex = usize;
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
     PeerConnected {
+        id: PeerId,
+        direction: ConnectionDirection,
         addr: SocketAddr,
-        peer_extensions: PeerExtensions,
+        extensions: PeerExtensions,
     },
     PeerDisconnected(SocketAddr),
     MessageReceived {
@@ -162,9 +169,11 @@ impl Swarm {
         match input {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
             Input::PeerConnected {
+                direction,
                 addr,
-                peer_extensions,
-            } => self.on_connected(addr, peer_extensions),
+                id,
+                extensions,
+            } => self.on_connected(addr, id, extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
             Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
@@ -230,16 +239,21 @@ impl Swarm {
         }
         let mut output = vec![];
         for addr in socket_addrs {
-            if !self.peer_registry.contains(addr) {
+            if !self.peer_registry.contains_addr(addr) {
                 output.push(Output::ConnectPeer(addr));
             }
         }
         output
     }
 
-    fn on_connected(&mut self, addr: SocketAddr, extensions: PeerExtensions) -> Vec<Output> {
+    fn on_connected(
+        &mut self,
+        addr: SocketAddr,
+        id: PeerId,
+        extensions: PeerExtensions,
+    ) -> Vec<Output> {
         self.block_assignments.release_peer(addr);
-        self.peer_registry.connected(addr, extensions);
+        self.peer_registry.connected(addr, id, extensions);
 
         // Communicate the pieces we have — BEP 6 allows exactly one of
         // HaveAll/HaveNone/Bitfield, never a Bitfield on top of the other two.

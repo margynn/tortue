@@ -16,11 +16,18 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum PeerEvent {
     Connected {
+        direction: ConnectionDirection,
         peer_id: PeerId,
         peer_extensions: PeerExtensions,
     },
     Disconnected,
     MessageReceived(Message),
+}
+
+#[derive(Debug)]
+pub enum ConnectionDirection {
+    Inbound,
+    Outbound,
 }
 
 #[derive(Debug, Clone, Copy)]

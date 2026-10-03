@@ -63,23 +63,64 @@ Ce registre est **global au process** (un seul, partagé entre tous les `Downloa
       None => continue, // registry fermé, pas fatal
   }
   ```
-- `accept_inbound` : vérifie le doublon de `peer_id` (nouvelle info portée par `Input`, voir 2.6) ; si doublon → drop le stream (ne rien spawn) ; sinon, même câblage que `spawn_peer` aujourd'hui (créer `cmd_tx/cmd_rx`, l'insérer dans `peer_cmds`), mais au lieu d'appeler `peer_connector.connect(addr, ...)` (qui referait un handshake sortant), on spawn directement `PeerSession::run(stream, addr, cmd_rx, peer_events_tx)` (cf. 2.2) puisque le handshake a déjà eu lieu côté `PeerListenner`.
-- Émet ensuite `Input::PeerConnected { addr, peer_id, peer_extensions }` vers `coordinator.step` (même chemin que pour le sortant, donc même logique `Bitfield`/`HaveAll` etc. réutilisée gratuitement).
+- `accept_inbound` : même câblage que `spawn_peer` (créer `cmd_tx/cmd_rx`, enregistrer le sender), puis appeler `peer_connector.accept(inbound, cmd_rx, peer_events_tx)` plutôt que `connect`. Le port expose un type associé `Inbound` ; `SwarmIO` ne manipule pas le `TcpStream` et ne lance pas lui-même `run_session`. L'implémentation TCP vérifie l'info hash, conserve le mécanisme d'annulation et démarre la session sans nouveau handshake ni reconnexion.
+- La session émet `PeerEvent::Connected` avec `peer_id`, `peer_extensions` et `direction`. `SwarmIO` transmet ces données à `Input::PeerConnected` ; le domaine décide quelle connexion garder selon 2.6, puis réutilise la logique `Bitfield`/`HaveAll` pour la connexion retenue. Ne pas rejeter systématiquement la seconde connexion avant cette décision : elle peut être celle qu'il faut conserver.
+- Le wrapper entrant émet `Disconnected` à la fin de la session. `disconnect` doit annuler aussi bien les connexions entrantes que sortantes ; une connexion sortante rejetée comme doublon ne doit pas se reconnecter automatiquement.
 
-### 2.6 Domaine : détection de doublon par `PeerId`
+### 2.6 Domaine : doublons par `PeerId` et connexions simultanées
 
-- `PeerExtensions`/`Input::PeerConnected` doit transporter le `peer_id` (actuellement jeté). Ajouter le champ dans `Input::PeerConnected`.
-- `PeerRegistry` (domain) doit garder une table `peer_id → addr` (ou stocker `peer_id` dans `PeerState`) pour pouvoir répondre à `contains_peer_id(id) -> bool`.
-- `Swarm::on_connected` (ou une nouvelle étape avant, côté `SwarmIO::accept_inbound`) refuse l'ajout si le `peer_id` est déjà présent. Deux options :
-  - (a) vérif faite côté `SwarmIO` avant même d'appeler `coordinator.step` (évite de complexifier `Input`/`Output` avec un cas de rejet) — plus simple, mais duplique un peu la logique de connu/pas connu.
-  - (b) vérif entièrement dans `Swarm::on_connected`, qui retournerait `Output::DisconnectPeer` au lieu d'ajouter le pair si le `peer_id` est dupliqué — plus propre car toute la logique métier reste dans le domaine pur, testable sans IO.
-  - **Recommandation : (b)**, cohérent avec le reste de `Swarm` qui concentre toutes les règles métier et reste 100% testable sans tokio.
+**Politique : une seule connexion active par `(InfoHash, PeerId)`.** TCP étant full duplex, une connexion suffit pour échanger dans les deux sens. Deux connexions peuvent toutefois apparaître temporairement si les deux clients se connectent simultanément.
+
+La déduplication par `SocketAddr` dans `on_discovered` reste utile pour éviter plusieurs tentatives vers la même adresse, mais ne remplace pas celle par `PeerId` : le port source d'une connexion entrante peut différer du port d'écoute utilisé pour la connexion sortante. IPv4 et IPv6 peuvent également conduire au même peer.
+
+#### Données nécessaires
+
+- Définir dans le domaine `ConnectionDirection::{Inbound, Outbound}`.
+- Transporter `peer_id` et `direction` dans `PeerEvent::Connected` et `Input::PeerConnected`, en plus des extensions. La direction décrit la connexion ; elle n'appartient pas à `PeerExtensions`.
+- Injecter le `PeerId` local utilisé au handshake dans `Swarm` pour comparer les identifiants. Le listener et les connectors doivent utiliser cet identifiant de façon cohérente pour le torrent.
+- Stocker le `PeerId` et la direction dans `PeerRegistry`, avec un moyen de retrouver la connexion active pour un identifiant donné. La portée est le swarm, pas un registre global de peers.
+
+#### Règle déterministe
+
+Ne pas simplement « garder la première connexion » : lors d'une ouverture simultanée, chaque client pourrait conserver sa sortante et fermer l'entrante, ce qui fermerait les deux connexions.
+
+Pour un doublon de directions opposées :
+
+| Comparaison lexicographique des 20 octets | Connexion à conserver localement |
+| ----------------------------------------- | -------------------------------- |
+| `local_peer_id > remote_peer_id`          | `Outbound`                       |
+| `local_peer_id < remote_peer_id`          | `Inbound`                        |
+| Identifiants égaux                        | Refuser la connexion à soi-même  |
+
+Les deux clients sélectionnent ainsi la même connexion physique **s'ils appliquent cette règle**. C'est notamment la stratégie présente dans libtorrent ; ce n'est pas une obligation universelle du protocole.
+
+Pour deux connexions de même direction avec le même `PeerId`, conserver celle déjà acceptée et rejeter la nouvelle. Le `PeerId` n'est pas une identité authentifiée ; cette règle constitue une politique de gestion des connexions, pas une mesure d'authentification.
+
+#### Application dans `Swarm::on_connected`
+
+- Sans doublon : enregistrer la connexion et produire les messages initiaux habituels.
+- Si la nouvelle connexion perd : retourner `Output::DisconnectPeer(new_addr)` sans remplacer le peer actif ni réinitialiser ses assignments.
+- Si la nouvelle connexion gagne : libérer les assignments et l'état de l'ancienne, produire `Output::DisconnectPeer(old_addr)`, puis enregistrer et initialiser la nouvelle.
+- Nettoyer l'association `PeerId → connexion` lors de la déconnexion **uniquement si elle désigne encore cette connexion** : le `Disconnected` tardif de l'ancienne ne doit pas retirer la nouvelle.
+- Ne pas écraser un canal de commandes ou une annulation pour un `SocketAddr` encore actif. Si le code permet ultérieurement de réutiliser une adresse avant la fin de l'ancienne tâche, identifier les événements par un identifiant de connexion pour éviter le nettoyage de la mauvaise session.
+
+La décision reste dans le domaine, pure et testable ; les adapters exécutent les déconnexions et arrêtent toute reconnexion pour le runner rejeté.
+
+#### Tests minimaux
+
+- Un doublon de même direction est rejeté sans modifier le peer actif.
+- Pour chacune des deux comparaisons de `PeerId`, tester les deux ordres d'arrivée (`Inbound` puis `Outbound`, et inversement) : la direction conservée doit être identique.
+- Simuler les deux côtés d'une ouverture simultanée : ils doivent conserver la même connexion physique.
+- Après remplacement, un `Disconnected` tardif de l'ancienne connexion ne retire ni le nouveau peer ni ses assignments.
+- Une connexion sortante rejetée ne relance pas une boucle de reconnexion.
+
+Références : [BEP 11, déduplication IPv4/IPv6](https://www.bittorrent.org/beps/bep_0011.html) et [gestion des doublons dans libtorrent](https://github.com/arvidn/libtorrent/blob/RC_2_0/src/bt_peer_connection.cpp). Libtorrent dispose également d'une option autorisant plusieurs connexions par `PeerId` ; Tortue conserve ici la politique simple d'une seule connexion.
 
 ## 3. Ordre d'implémentation suggéré
 
 1. Déplacer `Handshake` dans le domaine (pas de changement de comportement, juste un déplacement + adaptation des imports). Commit isolé, facile à vérifier par les tests existants.
 2. Extraire `PeerSession` de `TcpPeerIO` sans rien changer côté `TcpPeerConnector` (refactor pur, tests de non-régression sur le sortant).
-3. Ajouter `peer_id` à `Input::PeerConnected` + table de doublons dans `PeerRegistry` (domaine), avec un test unitaire dédié ("deuxième connexion avec le même `peer_id` → `DisconnectPeer`").
+3. Ajouter `peer_id` et `ConnectionDirection` aux événements de connexion, injecter le `PeerId` local dans `Swarm`, puis implémenter la résolution déterministe des doublons dans `PeerRegistry`/`Swarm::on_connected` avec les tests de 2.6 (deux ordres d'arrivée, remplacement et nettoyage tardif).
 4. Introduire `SwarmRegistry` (application) + branchement dans `start_download` (register/unregister).
 5. Implémenter `PeerListenner::handle_peer` (lecture handshake, route, réponse handshake, envoi `InboundPeer`).
 6. Brancher `inbound_rx` dans `SwarmIO::run` + `accept_inbound`.

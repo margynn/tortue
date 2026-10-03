@@ -7,7 +7,7 @@ use super::PieceIndex;
 use crate::domain::{
     bitfield::Bitfield,
     message::{ExtensionHandshake, Message},
-    peer::PeerExtensions,
+    peer::{PeerExtensions, PeerId},
 };
 
 pub(super) struct PeerRegistry {
@@ -34,8 +34,8 @@ impl PeerRegistry {
         }
     }
 
-    pub(super) fn connected(&mut self, addr: SocketAddr, extensions: PeerExtensions) {
-        self.peers.insert(addr, PeerState::new(extensions));
+    pub(super) fn connected(&mut self, addr: SocketAddr, id: PeerId, extensions: PeerExtensions) {
+        self.peers.insert(addr, PeerState::new(id, extensions));
     }
 
     pub(super) fn disconnected(&mut self, addr: SocketAddr) {
@@ -45,8 +45,12 @@ impl PeerRegistry {
         self.availability.remove_peer(addr);
     }
 
-    pub(super) fn contains(&self, addr: SocketAddr) -> bool {
+    pub(super) fn contains_addr(&self, addr: SocketAddr) -> bool {
         self.peers.contains_key(&addr)
+    }
+
+    pub(super) fn contains_peer_id(&self, id: PeerId) -> bool {
+        self.peers.values().any(|state| state.id == id)
     }
 
     /// `Some(Message::Interested)` the first time we become interested in
@@ -195,6 +199,7 @@ impl PieceAvailability {
 
 #[derive(Clone)]
 struct PeerState {
+    id: PeerId,
     am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
@@ -207,8 +212,9 @@ struct PeerState {
 }
 
 impl PeerState {
-    fn new(extensions: PeerExtensions) -> Self {
+    fn new(id: PeerId, extensions: PeerExtensions) -> Self {
         Self {
+            id,
             am_interested: false,
             peer_choking: true,
             peer_interested: false,
