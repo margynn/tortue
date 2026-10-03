@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use crate::{
-    adapters::swarm_registry::SwarmRegistry,
+    adapters::swarm_registry::{InboundPeer, SwarmRegistry},
     application::ports::peer_connector::PeerConnector,
     domain::{
         message::{
@@ -52,6 +52,9 @@ pub enum Error {
 
     #[error("connection to myself")]
     SelfConnection,
+
+    #[error("inbound swarm channel closed")]
+    SwarmChannelClosed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -185,6 +188,8 @@ async fn run_session(
     SessionExit::Reconnect
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 struct TcpPeerIO {
     client_id: PeerId,
     peer_addr: SocketAddr,
@@ -193,7 +198,6 @@ struct TcpPeerIO {
 }
 
 impl TcpPeerIO {
-    const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
     const RECONNECT_DELAY: Duration = Duration::from_secs(4);
     const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(90);
     const MAX_ATTEMPTS: usize = 5;
@@ -276,7 +280,7 @@ impl TcpPeerIO {
     }
 
     async fn connect(&self) -> Result<(TcpStream, Handshake)> {
-        let mut stream = timeout(Self::CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
+        let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
             .await
             .map_err(|_| Error::Timeout)??;
 
@@ -294,13 +298,13 @@ impl TcpPeerIO {
             extension_protocol,
             fast_extension,
         );
-        timeout(Self::CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
+        timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
             .await
             .map_err(|_| Error::Timeout)??;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
         timeout(
-            Self::CONNECT_TIMEOUT,
+            CONNECT_TIMEOUT,
             AsyncReadExt::read_exact(&mut stream, &mut buf),
         )
         .await
@@ -325,7 +329,7 @@ impl TcpPeerIO {
                 extensions,
                 metadata_size: self.config.metadata_size,
             });
-            timeout(Self::CONNECT_TIMEOUT, stream.write_all(&hs.frame()))
+            timeout(CONNECT_TIMEOUT, stream.write_all(&hs.frame()))
                 .await
                 .map_err(|_| Error::Timeout)??;
         }
@@ -377,39 +381,23 @@ impl Message {
 
 struct TcpPeerListenner {
     client_id: PeerId,
+    port: u16,
     swarm_registry: SwarmRegistry,
 }
 
 impl TcpPeerListenner {
-    pub fn new(client_id: PeerId, swarm_registry: SwarmRegistry) -> Self {
+    pub fn new(client_id: PeerId, port: u16, swarm_registry: SwarmRegistry) -> Self {
         Self {
             client_id,
+            port,
             swarm_registry,
         }
     }
 
-    pub async fn run() -> Result<()> {
-        let port = 8080; // parameter / configurable
-        let ipv4 = Self::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?;
-        let ipv6 = Self::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))?;
-        tokio::try_join!(Self::accept_loop(ipv4), Self::accept_loop(ipv6),)?;
-        Ok(())
-    }
-
-    async fn accept_loop(listener: TcpListener) -> Result<()> {
-        loop {
-            let (stream, peer) = listener.accept().await?;
-
-            tokio::spawn(async move {
-                if let Err(error) = Self::handle_peer(stream).await {
-                    eprintln!("peer {peer}: {error}");
-                }
-            });
-        }
-    }
-
-    async fn handle_peer(_stream: TcpStream) -> Result<()> {
-        // Handshake et protocole P2P.
+    pub async fn run(&self) -> Result<()> {
+        let ipv4 = Self::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, self.port)))?;
+        let ipv6 = Self::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, self.port)))?;
+        tokio::try_join!(self.accept_loop(ipv4), self.accept_loop(ipv6),)?;
         Ok(())
     }
 
@@ -427,5 +415,82 @@ impl TcpPeerListenner {
         socket.listen(1024)?;
         socket.set_nonblocking(true)?;
         TcpListener::from_std(socket.into()).map_err(|err| Error::Io(err))
+    }
+
+    async fn accept_loop(&self, listener: TcpListener) -> Result<()> {
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let registry = self.swarm_registry.clone();
+            let client_id = self.client_id;
+
+            tokio::spawn(async move {
+                let _ = Self::handle_peer(stream, client_id, registry).await;
+            });
+        }
+    }
+
+    async fn handle_peer(
+        mut stream: TcpStream,
+        client_id: PeerId,
+        registry: SwarmRegistry,
+    ) -> Result<()> {
+        let addr = stream.peer_addr()?;
+
+        let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
+        timeout(
+            CONNECT_TIMEOUT,
+            AsyncReadExt::read_exact(&mut stream, &mut buf),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
+
+        let inbound = Handshake::decode(&buf)?;
+
+        if inbound.peer_id == client_id {
+            return Err(Error::SelfConnection);
+        }
+
+        let Some(tx) = registry.route(inbound.info_hash) else {
+            // unknown torrent, closing the stream
+            drop(stream);
+            return Ok(());
+        };
+
+        let outbound = Handshake::new(
+            inbound.info_hash,
+            client_id,
+            false, // DHT
+            true,  // BEP 10
+            true,  // Fast extension
+        );
+
+        timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
+            .await
+            .map_err(|_| Error::Timeout)??;
+
+        if inbound.extension_protocol {
+            let extensions = HashMap::from([
+                ("ut_metadata".to_owned(), UT_METADATA_EXT_ID),
+                ("ut_pex".to_owned(), UT_PEX_EXT_ID),
+            ]);
+            let message = Message::ExtensionHandshake(ExtensionHandshake {
+                extensions,
+                metadata_size: None,
+            });
+            timeout(CONNECT_TIMEOUT, stream.write_all(&message.frame()))
+                .await
+                .map_err(|_| Error::Timeout)??;
+        }
+
+        let peer = InboundPeer {
+            addr,
+            handshake: inbound,
+            stream,
+        };
+        timeout(CONNECT_TIMEOUT, tx.send(peer))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::SwarmChannelClosed)?;
+        Ok(())
     }
 }
