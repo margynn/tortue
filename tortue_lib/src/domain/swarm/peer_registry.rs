@@ -7,11 +7,12 @@ use super::PieceIndex;
 use crate::domain::{
     bitfield::Bitfield,
     message::{ExtensionHandshake, Message},
-    peer::{PeerExtensions, PeerId},
+    peer::{ConnectionDirection, PeerExtensions, PeerId},
 };
 
 pub(super) struct PeerRegistry {
     peers: HashMap<SocketAddr, PeerState>,
+    by_id: HashMap<PeerId, (SocketAddr, ConnectionDirection)>,
     availability: PieceAvailability,
     pub seeders: HashSet<SocketAddr>,
     pub leechers: HashSet<SocketAddr>,
@@ -28,29 +29,45 @@ impl PeerRegistry {
     pub(super) fn new(total_pieces: usize) -> Self {
         Self {
             peers: HashMap::new(),
+            by_id: HashMap::new(),
             availability: PieceAvailability::new(total_pieces),
             seeders: HashSet::new(),
             leechers: HashSet::new(),
         }
     }
 
-    pub(super) fn connected(&mut self, addr: SocketAddr, id: PeerId, extensions: PeerExtensions) {
+    pub(super) fn connected(
+        &mut self,
+        addr: SocketAddr,
+        id: PeerId,
+        direction: ConnectionDirection,
+        extensions: PeerExtensions,
+    ) {
         self.peers.insert(addr, PeerState::new(id, extensions));
+        self.by_id.insert(id, (addr, direction));
     }
 
     pub(super) fn disconnected(&mut self, addr: SocketAddr) {
         self.seeders.remove(&addr);
         self.leechers.remove(&addr);
-        self.peers.remove(&addr);
         self.availability.remove_peer(addr);
+        if let Some(peer) = self.peers.remove(&addr) {
+            if self
+                .by_id
+                .get(&peer.id)
+                .is_some_and(|(active_addr, _)| *active_addr == addr)
+            {
+                self.by_id.remove(&peer.id);
+            }
+        }
     }
 
     pub(super) fn contains_addr(&self, addr: SocketAddr) -> bool {
         self.peers.contains_key(&addr)
     }
 
-    pub(super) fn contains_peer_id(&self, id: PeerId) -> bool {
-        self.peers.values().any(|state| state.id == id)
+    pub(super) fn connection_for(&self, id: PeerId) -> Option<(SocketAddr, ConnectionDirection)> {
+        self.by_id.get(&id).cloned()
     }
 
     /// `Some(Message::Interested)` the first time we become interested in

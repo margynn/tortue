@@ -95,6 +95,7 @@ impl SwarmStatus {
 }
 
 pub struct Swarm {
+    client_id: PeerId,
     metainfo: Arc<Metainfo>,
     peer_registry: PeerRegistry,
     block_assignments: BlockAssignments,
@@ -127,9 +128,10 @@ pub struct PeerStats {
 }
 
 impl Swarm {
-    pub fn new(metainfo: Arc<Metainfo>) -> Self {
+    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         let total_pieces = metainfo.pieces.len();
         Self {
+            client_id,
             metainfo: Arc::clone(&metainfo),
             peer_registry: PeerRegistry::new(total_pieces),
             block_assignments: BlockAssignments::new(),
@@ -173,7 +175,7 @@ impl Swarm {
                 addr,
                 id,
                 extensions,
-            } => self.on_connected(addr, id, extensions),
+            } => self.on_connected(addr, direction, id, extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
             Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
@@ -249,11 +251,32 @@ impl Swarm {
     fn on_connected(
         &mut self,
         addr: SocketAddr,
+        direction: ConnectionDirection,
         id: PeerId,
         extensions: PeerExtensions,
     ) -> Vec<Output> {
+        // Duplicate resolution for the same remote PeerId:
+        // | Case                                 | Decision                       |
+        // |--------------------------------------|--------------------------------|
+        // | No existing connection               | Accept the new connection      |
+        // | Same direction                       | Reject the new connection      |
+        // | Opposite directions, old preferred   | Reject the new connection      |
+        // | Opposite directions, new preferred   | Replace the old connection     |
+        // The greater PeerId keeps its outbound connection; the smaller keeps
+        // its inbound connection, so both sides select the same TCP connection.
+        let mut out = vec![];
+        if let Some((old_addr, old_direction)) = self.peer_registry.connection_for(id) {
+            if direction == old_direction || direction != self.prefered_direction(id) {
+                return vec![Output::DisconnectPeer(addr)];
+            }
+
+            self.on_disconnected(old_addr);
+            out.push(Output::DisconnectPeer(old_addr));
+        }
+
         self.block_assignments.release_peer(addr);
-        self.peer_registry.connected(addr, id, extensions);
+        self.peer_registry
+            .connected(addr, id, direction, extensions);
 
         // Communicate the pieces we have — BEP 6 allows exactly one of
         // HaveAll/HaveNone/Bitfield, never a Bitfield on top of the other two.
@@ -264,7 +287,7 @@ impl Swarm {
         } else {
             Message::Bitfield(self.pieces.bitfield())
         };
-        let mut out = vec![Output::SendToPeer { addr, message }];
+        out.push(Output::SendToPeer { addr, message });
         out.extend(self.declare_interest(addr));
         out
     }
@@ -572,5 +595,14 @@ impl Swarm {
                 piece_len: block.len,
             },
         }
+    }
+
+    fn prefered_direction(&self, peer_id: PeerId) -> ConnectionDirection {
+        let preferred = if self.client_id.as_ref() > peer_id.as_ref() {
+            ConnectionDirection::Outbound
+        } else {
+            ConnectionDirection::Inbound
+        };
+        preferred
     }
 }

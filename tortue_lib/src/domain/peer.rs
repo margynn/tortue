@@ -24,7 +24,7 @@ pub enum PeerEvent {
     MessageReceived(Message),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ConnectionDirection {
     Inbound,
     Outbound,

@@ -75,7 +75,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     pub fn new(
         metainfo: Arc<Metainfo>,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
-        inbound_rx: mpsc::Receiver<InboundPeer>,
+        inbound_rx: mpsc::Receiver<C::Inbound>,
         peer_connector: C,
         piece_store: S,
         progress_tx: watch::Sender<SwarmSnapshot>,
@@ -120,7 +120,10 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
                 // Listen to inbound (accepting) peers
                 inbound = self.inbound_rx.recv() => match inbound {
-                    Some(peer) => self.accept_inbound(peer, &mut coordinator),
+                    Some(peer) => {
+                        self.accept_inbound(peer);
+                        continue;
+                    },
                     None => return Err(Error::RegistryDisconnected),
                 },
 
@@ -206,10 +209,15 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             .connect(addr, cmd_rx, self.peer_events_tx.clone());
     }
 
-    fn accept_inbound(&mut self, peer: InboundPeer, swarm: &mut Swarm) -> Input {
-        //
-
-        todo!()
+    fn accept_inbound(&mut self, peer: C::Inbound) {
+        let addr = peer.addr;
+        if self.peer_cmds.contains_key(&addr) {
+            return;
+        }
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        self.peer_cmds.insert(addr, cmd_tx);
+        self.peer_connector
+            .accept(peer, cmd_rx, self.peer_events_tx.clone());
     }
 
     fn publish(&mut self, mut snapshot: SwarmSnapshot) {
