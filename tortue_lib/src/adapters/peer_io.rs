@@ -13,6 +13,7 @@ use tokio::{
 };
 
 use crate::{
+    adapters::swarm_registry::SwarmRegistry,
     application::ports::peer_connector::PeerConnector,
     domain::{
         message::{
@@ -375,14 +376,20 @@ impl Message {
 // TMP listenning part:
 
 struct TcpPeerListenner {
-    //
+    client_id: PeerId,
+    swarm_registry: SwarmRegistry,
 }
 
 impl TcpPeerListenner {
-    // new
+    pub fn new(client_id: PeerId, swarm_registry: SwarmRegistry) -> Self {
+        Self {
+            client_id,
+            swarm_registry,
+        }
+    }
 
-    async fn main_loop() -> Result<()> {
-        let port = 8080;
+    pub async fn run() -> Result<()> {
+        let port = 8080; // parameter / configurable
         let ipv4 = Self::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?;
         let ipv6 = Self::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))?;
         tokio::try_join!(Self::accept_loop(ipv4), Self::accept_loop(ipv6),)?;
