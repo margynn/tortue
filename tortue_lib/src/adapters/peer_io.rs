@@ -85,6 +85,8 @@ impl TcpPeerConnector {
 }
 
 impl PeerConnector for TcpPeerConnector {
+    type Inbound = InboundPeer;
+
     fn connect(
         &mut self,
         addr: SocketAddr,
@@ -95,6 +97,39 @@ impl PeerConnector for TcpPeerConnector {
         self.peer_cancels.insert(addr, cancel_tx);
         let mut runner = TcpPeerIO::new(addr, self.client_id, self.peer_config, cancel_rx);
         tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
+    }
+
+    fn accept(
+        &mut self,
+        inbound: Self::Inbound,
+        cmd_rx: mpsc::Receiver<Message>,
+        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+    ) {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        self.peer_cancels.insert(inbound.addr, cancel_tx);
+        let info_hash = self.peer_config.info_hash;
+        tokio::spawn(async move {
+            let addr = inbound.addr;
+
+            if inbound.handshake.info_hash != info_hash {
+                // Programming error the connector should never be sent mismatching inbound
+                drop(inbound);
+            } else {
+                let mut cmd_rx = cmd_rx;
+                let mut cancel_rx = cancel_rx;
+                run_session(
+                    inbound.stream,
+                    &inbound.handshake,
+                    addr,
+                    &mut cmd_rx,
+                    &evt_tx,
+                    &mut cancel_rx,
+                )
+                .await;
+            }
+
+            let _ = evt_tx.send((addr, PeerEvent::Disconnected)).await;
+        });
     }
 
     fn disconnect(&mut self, addr: SocketAddr) {
@@ -376,8 +411,6 @@ impl Message {
         Ok(Self::decode(&payload)?)
     }
 }
-
-// TMP listenning part:
 
 struct TcpPeerListenner {
     client_id: PeerId,
