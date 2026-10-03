@@ -1,16 +1,24 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use tokio::{net::TcpStream, sync::mpsc};
 
 use crate::{InfoHash, domain::peer::Handshake};
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("already registered")]
+    AlreadyRegistered,
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Clone, Default)]
 pub struct SwarmRegistry {
-    inner: Arc<Mutex<HashMap<InfoHash, mpsc::Sender<InboundPeer>>>>,
+    inner: Arc<RwLock<HashMap<InfoHash, mpsc::Sender<InboundPeer>>>>,
 }
 
 pub struct InboundPeer {
@@ -22,13 +30,27 @@ pub struct InboundPeer {
 impl SwarmRegistry {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub fn register(&mut self, info_hash: InfoHash) {
-        todo!()
+    pub fn register(&mut self, info_hash: InfoHash, tx: mpsc::Sender<InboundPeer>) {
+        let mut data = self.inner.write().unwrap();
+        match data.entry(info_hash) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(tx);
+            },
+            std::collections::hash_map::Entry::Occupied(_) => {},
+        };
     }
-    // register(info_hash, tx) / unregister(info_hash) : appelés par start_download quand un SwarmIO démarre/s'arrête.
-    // route(info_hash) -> Option<Sender<InboundPeer>> : utilisé par PeerListenner pour savoir si le metainfo est connu et à qui transmettre la connexion.
+
+    pub fn unregister(&mut self, info_hash: InfoHash) {
+        let mut data = self.inner.write().unwrap();
+        data.remove(&info_hash);
+    }
+
+    pub fn route(&self, info_hash: InfoHash) -> Option<mpsc::Sender<InboundPeer>> {
+        let data = self.inner.read().unwrap();
+        data.get(&info_hash).cloned()
+    }
 }

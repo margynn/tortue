@@ -5,7 +5,7 @@ use std::collections::HashSet;
 pub type PieceHash = [u8; PIECE_HASH_LEN];
 pub const PIECE_HASH_LEN: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoHash([u8; PIECE_HASH_LEN]);
 
 impl From<[u8; PIECE_HASH_LEN]> for InfoHash {
