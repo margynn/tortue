@@ -12,11 +12,10 @@ use tokio::{
 use tracing::info;
 
 use crate::{
-    adapters::swarm_registry::InboundPeer,
     application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
         message::Message,
-        peer::PeerEvent,
+        peer::{PeerEvent, PeerId},
         swarm::{Input, Output, Swarm, SwarmCommand, SwarmSnapshot, Tick},
         torrent::Metainfo,
         tracker::SessionStats,
@@ -27,18 +26,16 @@ use crate::{
 pub enum Error {
     #[error("tracker disconnected")]
     TrackerDisconnected,
-
-    #[error("registry disconnected")]
-    RegistryDisconnected,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct SwarmIO<S, C> {
+pub struct SwarmIO<S, C: PeerConnector> {
+    client_id: PeerId,
     metainfo: Arc<Metainfo>,
     commands_rx: mpsc::Receiver<SwarmCommand>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
-    inbound_rx: mpsc::Receiver<InboundPeer>,
+    inbound_rx: mpsc::Receiver<(SocketAddr, C::Inbound)>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
@@ -73,9 +70,10 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     const RATE_TICK_INTERVAL: Duration = Duration::from_secs(2);
 
     pub fn new(
+        client_id: PeerId,
         metainfo: Arc<Metainfo>,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
-        inbound_rx: mpsc::Receiver<C::Inbound>,
+        inbound_rx: mpsc::Receiver<(SocketAddr, C::Inbound)>,
         peer_connector: C,
         piece_store: S,
         progress_tx: watch::Sender<SwarmSnapshot>,
@@ -84,6 +82,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
         Self {
+            client_id,
             metainfo,
             commands_rx,
             peers_rx,
@@ -100,9 +99,10 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut coordinator = Swarm::new(Arc::clone(&self.metainfo));
+        let mut coordinator = Swarm::new(self.client_id, Arc::clone(&self.metainfo));
         let mut block_tick = time::interval(Self::BLOCK_TICK_INTERVAL);
         let mut pex_tick = time::interval(Self::PEX_TICK_INTERVAL);
+        let mut inbound_open = true;
 
         loop {
             let input = tokio::select! {
@@ -119,12 +119,12 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 },
 
                 // Listen to inbound (accepting) peers
-                inbound = self.inbound_rx.recv() => match inbound {
-                    Some(peer) => {
-                        self.accept_inbound(peer);
-                        continue;
-                    },
-                    None => return Err(Error::RegistryDisconnected),
+                inbound = self.inbound_rx.recv(), if inbound_open => {
+                    match inbound {
+                        Some((addr, peer)) => self.accept_inbound(addr, peer),
+                        None => inbound_open = false,
+                    }
+                    continue;
                 },
 
                 // Listen to peers
@@ -209,8 +209,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             .connect(addr, cmd_rx, self.peer_events_tx.clone());
     }
 
-    fn accept_inbound(&mut self, peer: C::Inbound) {
-        let addr = peer.addr;
+    fn accept_inbound(&mut self, addr: SocketAddr, peer: C::Inbound) {
         if self.peer_cmds.contains_key(&addr) {
             return;
         }

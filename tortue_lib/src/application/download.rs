@@ -78,9 +78,14 @@ async fn start_download(metainfo: Arc<Metainfo>, output_dir: PathBuf) -> Result<
         TcpPeerConnector::new(node.id, metainfo.info_hash, Some(metainfo.info_bytes.len()));
     let storage = DiskStorage::new(&metainfo, output_dir).await?;
 
+    // Inbound routing will be connected to the shared registry at client startup.
+    let (inbound_tx, inbound_rx) = mpsc::channel(128);
+    drop(inbound_tx);
     let mut coordinator = SwarmIO::new(
+        node.id,
         Arc::clone(&metainfo),
         peers_rx,
+        inbound_rx,
         connector,
         storage,
         progress_tx,

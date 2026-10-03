@@ -18,7 +18,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Default)]
 pub struct SwarmRegistry {
-    inner: Arc<RwLock<HashMap<InfoHash, mpsc::Sender<InboundPeer>>>>,
+    inner: Arc<RwLock<HashMap<InfoHash, mpsc::Sender<(SocketAddr, InboundPeer)>>>>,
 }
 
 pub struct InboundPeer {
@@ -34,7 +34,7 @@ impl SwarmRegistry {
         }
     }
 
-    pub fn register(&mut self, info_hash: InfoHash, tx: mpsc::Sender<InboundPeer>) {
+    pub fn register(&mut self, info_hash: InfoHash, tx: mpsc::Sender<(SocketAddr, InboundPeer)>) {
         let mut data = self.inner.write().unwrap();
         match data.entry(info_hash) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -49,7 +49,7 @@ impl SwarmRegistry {
         data.remove(&info_hash);
     }
 
-    pub fn route(&self, info_hash: InfoHash) -> Option<mpsc::Sender<InboundPeer>> {
+    pub fn route(&self, info_hash: InfoHash) -> Option<mpsc::Sender<(SocketAddr, InboundPeer)>> {
         let data = self.inner.read().unwrap();
         data.get(&info_hash).cloned()
     }

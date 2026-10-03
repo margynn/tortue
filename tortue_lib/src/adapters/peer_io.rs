@@ -59,6 +59,19 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+async fn with_timeout<T, E>(
+    duration: Duration,
+    future: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> Result<T>
+where
+    Error: From<E>,
+{
+    timeout(duration, future)
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(Error::from)
+}
+
 pub struct TcpPeerConnector {
     client_id: PeerId,
     peer_config: PeerConfig,
@@ -96,7 +109,11 @@ impl PeerConnector for TcpPeerConnector {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         self.peer_cancels.insert(addr, cancel_tx);
         let mut runner = TcpPeerIO::new(addr, self.client_id, self.peer_config, cancel_rx);
-        tokio::spawn(async move { runner.run(cmd_rx, evt_tx).await });
+        tokio::spawn(async move {
+            let mut cmd_rx = cmd_rx;
+            let _ = runner.run(&mut cmd_rx, &evt_tx).await;
+            let _ = evt_tx.send((addr, PeerEvent::Disconnected)).await;
+        });
     }
 
     fn accept(
@@ -108,6 +125,7 @@ impl PeerConnector for TcpPeerConnector {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         self.peer_cancels.insert(inbound.addr, cancel_tx);
         let info_hash = self.peer_config.info_hash;
+        let metadata_size = self.peer_config.metadata_size;
         tokio::spawn(async move {
             let addr = inbound.addr;
 
@@ -125,6 +143,7 @@ impl PeerConnector for TcpPeerConnector {
                     &evt_tx,
                     &mut cancel_rx,
                     ConnectionDirection::Inbound,
+                    metadata_size,
                 )
                 .await;
             }
@@ -146,84 +165,108 @@ enum SessionExit {
 }
 
 async fn run_session(
-    stream: TcpStream,
+    mut stream: TcpStream,
     handshake: &Handshake,
     peer_addr: SocketAddr,
     cmd_rx: &mut mpsc::Receiver<Message>,
     evt_tx: &mpsc::Sender<(SocketAddr, PeerEvent)>,
     cancel_rx: &mut watch::Receiver<bool>,
     direction: ConnectionDirection,
+    metadata_size: Option<usize>,
+) -> SessionExit {
+    if *cancel_rx.borrow() || cancel_rx.has_changed().is_err() {
+        return SessionExit::Stop;
+    }
+
+    tokio::select! {
+        biased;
+
+        _ = cancel_rx.changed() => SessionExit::Stop,
+
+        exit = async {
+            if handshake.extension_protocol {
+                let message = Message::ExtensionHandshake(ExtensionHandshake {
+                    extensions: HashMap::from([
+                        ("ut_metadata".to_owned(), UT_METADATA_EXT_ID),
+                        ("ut_pex".to_owned(), UT_PEX_EXT_ID),
+                    ]),
+                    metadata_size,
+                });
+                if with_timeout(CONNECT_TIMEOUT, stream.write_all(&message.frame()))
+                    .await
+                    .is_err()
+                {
+                    return SessionExit::Reconnect;
+                }
+            }
+
+            if evt_tx.send((
+                peer_addr,
+                PeerEvent::Connected {
+                    direction,
+                    peer_id: handshake.peer_id,
+                    peer_extensions: PeerExtensions {
+                        fast: handshake.fast_extension,
+                        dht: handshake.dht_protocol,
+                    },
+                },
+            )).await.is_err() {
+                return SessionExit::Stop;
+            }
+
+            let (mut reader, mut writer) = stream.into_split();
+            tokio::select! {
+                exit = read_peer_messages(&mut reader, peer_addr, evt_tx) => exit,
+                exit = write_peer_messages(&mut writer, cmd_rx) => exit,
+            }
+        } => exit,
+    }
+}
+
+async fn read_peer_messages<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    addr: SocketAddr,
+    evt_tx: &mpsc::Sender<(SocketAddr, PeerEvent)>,
 ) -> SessionExit {
     const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
+    loop {
+        let message = match with_timeout(PEER_IDLE_TIMEOUT, Message::read_from(reader)).await {
+            Ok(message) => message,
+            _ => return SessionExit::Reconnect,
+        };
+        if evt_tx
+            .send((addr, PeerEvent::MessageReceived(message)))
+            .await
+            .is_err()
+        {
+            return SessionExit::Stop;
+        }
+    }
+}
+
+async fn write_peer_messages<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    cmd_rx: &mut mpsc::Receiver<Message>,
+) -> SessionExit {
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
     let mut keepalive = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
         KEEPALIVE_INTERVAL,
     );
 
-    let _ = evt_tx
-        .send((
-            peer_addr,
-            PeerEvent::Connected {
-                direction,
-                peer_id: handshake.peer_id,
-                peer_extensions: PeerExtensions {
-                    fast: handshake.fast_extension,
-                    dht: handshake.dht_protocol,
-                },
-            },
-        ))
-        .await;
-
-    let reader_tx = evt_tx.clone();
-    let (mut reader, mut writer) = stream.into_split();
-    let mut read_task = tokio::spawn(async move {
-        loop {
-            let msg = match timeout(PEER_IDLE_TIMEOUT, Message::read_from(&mut reader)).await {
-                Ok(Ok(msg)) => msg,
-                _ => return,
-            };
-            if reader_tx
-                .send((peer_addr, PeerEvent::MessageReceived(msg)))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-    });
-
     loop {
-        tokio::select! {
+        let message = tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
-                None => {
-                    // Channel closed -> disconnect the peer
-                    read_task.abort();
-                    return SessionExit::Stop;
-                },
-                Some(msg) => {
-                    if writer.write_all(&msg.frame()).await.is_err() {
-                        break
-                    }
-                },
+                Some(message) => message,
+                None => return SessionExit::Stop,
             },
-
-            _ = cancel_rx.changed() => {
-                read_task.abort();
-                return SessionExit::Stop;
-            }
-
-            _ = &mut read_task => break,
-
-            _ = keepalive.tick() => {
-                if writer.write_all(&Message::KeepAlive.frame()).await.is_err() {
-                   break
-                }
-             },
+            _ = keepalive.tick() => Message::KeepAlive,
+        };
+        if writer.write_all(&message.frame()).await.is_err() {
+            return SessionExit::Reconnect;
         }
     }
-
-    SessionExit::Reconnect
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -256,22 +299,27 @@ impl TcpPeerIO {
 
     async fn run(
         &mut self,
-        mut cmd_rx: mpsc::Receiver<Message>,
-        evt_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
+        cmd_rx: &mut mpsc::Receiver<Message>,
+        evt_tx: &mpsc::Sender<(SocketAddr, PeerEvent)>,
     ) -> Result<()> {
         let mut reconnect_delay = Duration::ZERO;
 
         'run: loop {
-            let (stream, handshake) = self.connect_with_retry(reconnect_delay).await?;
+            let mut cancel_rx = self.cancel_rx.clone();
+            let (stream, handshake) = tokio::select! {
+                result = self.connect_with_retry(reconnect_delay) => result,
+                _ = cancel_rx.changed() => return Err(Error::Cancelled),
+            }?;
 
             match run_session(
                 stream,
                 &handshake,
                 self.peer_addr,
-                &mut cmd_rx,
-                &evt_tx,
+                cmd_rx,
+                evt_tx,
                 &mut self.cancel_rx,
                 ConnectionDirection::Outbound,
+                self.config.metadata_size,
             )
             .await
             {
@@ -282,14 +330,16 @@ impl TcpPeerIO {
             }
         }
 
-        // Sentinel: ensures Coordinator always receives Disconnected even on clean exit.
-        let _ = evt_tx.send((self.peer_addr, PeerEvent::Disconnected)).await;
         Ok(())
     }
 
     async fn connect_with_retry(&mut self, mut delay: Duration) -> Result<(TcpStream, Handshake)> {
         let mut attempts = 0;
         loop {
+            if *self.cancel_rx.borrow() || self.cancel_rx.has_changed().is_err() {
+                return Err(Error::Cancelled);
+            }
+
             if attempts >= Self::MAX_ATTEMPTS {
                 return Err(Error::MaxAttemptsExceeded);
             }
@@ -298,10 +348,7 @@ impl TcpPeerIO {
             let jitter = rand::rng().random_range(0.8..=1.2);
             let sleep_for = delay.mul_f64(jitter);
 
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_for) => {},
-                _ = self.cancel_rx.changed() => return Err(Error::Cancelled),
-            };
+            tokio::time::sleep(sleep_for).await;
 
             match self.connect().await {
                 Ok(result) => return Ok(result),
@@ -319,9 +366,7 @@ impl TcpPeerIO {
     }
 
     async fn connect(&self) -> Result<(TcpStream, Handshake)> {
-        let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr))
-            .await
-            .map_err(|_| Error::Timeout)??;
+        let mut stream = with_timeout(CONNECT_TIMEOUT, TcpStream::connect(self.peer_addr)).await?;
 
         // Extension configuration during handshake
         let extension_protocol = true; // BEP 10
@@ -337,17 +382,10 @@ impl TcpPeerIO {
             extension_protocol,
             fast_extension,
         );
-        timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
-            .await
-            .map_err(|_| Error::Timeout)??;
+        with_timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode())).await?;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
-        timeout(
-            CONNECT_TIMEOUT,
-            AsyncReadExt::read_exact(&mut stream, &mut buf),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+        with_timeout(CONNECT_TIMEOUT, stream.read_exact(&mut buf)).await?;
 
         let inbound = Handshake::decode(&buf)?;
 
@@ -356,21 +394,6 @@ impl TcpPeerIO {
         }
         if inbound.info_hash != self.config.info_hash {
             return Err(Error::InfoHashMismatch);
-        }
-
-        if inbound.extension_protocol {
-            // Upon connection we share our supported extensions via BEP10
-            let mut extensions = HashMap::new();
-            extensions.insert("ut_metadata".to_string(), UT_METADATA_EXT_ID); // BEP 9
-            extensions.insert("ut_pex".to_string(), UT_PEX_EXT_ID); // BEP 11
-
-            let hs = Message::ExtensionHandshake(ExtensionHandshake {
-                extensions,
-                metadata_size: self.config.metadata_size,
-            });
-            timeout(CONNECT_TIMEOUT, stream.write_all(&hs.frame()))
-                .await
-                .map_err(|_| Error::Timeout)??;
         }
 
         Ok((stream, inbound))
@@ -474,12 +497,7 @@ impl TcpPeerListenner {
         let addr = stream.peer_addr()?;
 
         let mut buf = [0u8; Handshake::HANDSHAKE_LEN];
-        timeout(
-            CONNECT_TIMEOUT,
-            AsyncReadExt::read_exact(&mut stream, &mut buf),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+        with_timeout(CONNECT_TIMEOUT, stream.read_exact(&mut buf)).await?;
 
         let inbound = Handshake::decode(&buf)?;
 
@@ -501,33 +519,19 @@ impl TcpPeerListenner {
             true,  // Fast extension
         );
 
-        timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode()))
-            .await
-            .map_err(|_| Error::Timeout)??;
-
-        if inbound.extension_protocol {
-            let extensions = HashMap::from([
-                ("ut_metadata".to_owned(), UT_METADATA_EXT_ID),
-                ("ut_pex".to_owned(), UT_PEX_EXT_ID),
-            ]);
-            let message = Message::ExtensionHandshake(ExtensionHandshake {
-                extensions,
-                metadata_size: None,
-            });
-            timeout(CONNECT_TIMEOUT, stream.write_all(&message.frame()))
-                .await
-                .map_err(|_| Error::Timeout)??;
-        }
+        with_timeout(CONNECT_TIMEOUT, stream.write_all(&outbound.encode())).await?;
 
         let peer = InboundPeer {
             addr,
             handshake: inbound,
             stream,
         };
-        timeout(CONNECT_TIMEOUT, tx.send(peer))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SwarmChannelClosed)?;
+        with_timeout(CONNECT_TIMEOUT, async {
+            tx.send((addr, peer))
+                .await
+                .map_err(|_| Error::SwarmChannelClosed)
+        })
+        .await?;
         Ok(())
     }
 }
