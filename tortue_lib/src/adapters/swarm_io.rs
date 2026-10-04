@@ -172,7 +172,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     continue;
                 },
 
-                // Listen to peers
+                // Listen to peer events
                 msg = self.peer_events_rx.recv() => match msg {
                     None => break,
                     Some((addr, PeerEvent::Connected{peer_id, direction, peer_extensions})) => {
@@ -192,6 +192,30 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     Some((addr, PeerEvent::MessageReceived(message))) => {
                         Input::MessageReceived { addr, message }
                     },
+                },
+
+                // Join the disk read for upload requests
+                result = self.reads.join_next(), if !self.reads.is_empty() => {
+                    let read = match result.expect("non-empty JoinSet") {
+                        Ok(read) => read,
+                        Err(error) if error.is_cancelled() => continue,
+                        Err(error) => return Err(std::io::Error::other(error).into()),
+                    };
+                    if self.read_handles.remove(&read.id).is_none() {
+                        continue; // annulée logiquement
+                    }
+                    let data = read.result?;
+                    if data.len() != read.range.len {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "incomplete upload read",
+                        ).into());
+                    }
+                    Input::UploadReadCompleted {
+                        id: read.id,
+                        range: read.range,
+                        data,
+                    }
                 },
 
                 // Tick block
