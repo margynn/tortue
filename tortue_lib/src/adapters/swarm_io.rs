@@ -253,7 +253,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             downloaded: snapshot.bytes_downloaded,
             left: snapshot
                 .bytes_total
-                .saturating_sub(snapshot.bytes_downloaded),
+                .saturating_sub(snapshot.bytes_available),
         };
         self.apply_rates(&mut snapshot);
         let _ = self.progress_tx.send(snapshot);

@@ -121,6 +121,14 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.is_complete())
     }
 
+    pub(super) fn available_bytes(&self) -> u64 {
+        self.pieces
+            .iter()
+            .filter(|piece| piece.is_complete())
+            .map(|piece| piece.length as u64)
+            .sum()
+    }
+
     pub(super) fn is_partial(&self, piece_index: usize) -> bool {
         self.pieces
             .get(piece_index)
