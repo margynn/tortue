@@ -24,6 +24,9 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("storage error: {0}")]
+    Storage(#[from] std::io::Error),
+
     #[error("tracker disconnected")]
     TrackerDisconnected,
 }
@@ -158,7 +161,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             };
 
             for out in coordinator.step(input) {
-                self.handle_output(out);
+                self.handle_output(out).await?;
             }
 
             let snapshot = coordinator.snapshot();
@@ -168,7 +171,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         Ok(())
     }
 
-    fn handle_output(&mut self, out: Output) {
+    async fn handle_output(&mut self, out: Output) -> Result<()> {
         match out {
             Output::ConnectPeer(addr) => {
                 self.spawn_peer(addr);
@@ -187,9 +190,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 // todo: hook
             },
             Output::WritePiece { offset, data } => {
-                if let Err(e) = self.piece_store.write(offset, data) {
-                    tracing::error!(error = %e, "failed to write piece");
-                }
+                self.piece_store.write(offset, data).await?;
             },
             Output::Broadcast(message) => {
                 for tx in self.peer_cmds.values() {
@@ -197,6 +198,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 }
             },
         }
+        Ok(())
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {

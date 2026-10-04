@@ -34,7 +34,7 @@ struct OutputFile {
 }
 
 pub struct DiskStorage {
-    cmd_tx: mpsc::UnboundedSender<DiskCommand>,
+    cmd_tx: mpsc::Sender<DiskCommand>,
 }
 
 enum DiskCommand {
@@ -50,9 +50,10 @@ enum DiskCommand {
 }
 
 impl PieceStore for DiskStorage {
-    fn write(&mut self, offset: u64, data: Vec<u8>) -> std::io::Result<()> {
+    async fn write(&mut self, offset: u64, data: Vec<u8>) -> std::io::Result<()> {
         self.cmd_tx
             .send(DiskCommand::Write { offset, data })
+            .await
             .map_err(|_| std::io::Error::other("writer task closed"))
     }
 
@@ -65,6 +66,7 @@ impl PieceStore for DiskStorage {
                 len,
                 reply: reply_tx,
             })
+            .await
             .map_err(|_| std::io::Error::other("reader task closed"))?;
 
         reply_rx
@@ -74,14 +76,17 @@ impl PieceStore for DiskStorage {
 }
 
 impl DiskStorage {
+    // Bounds queued commands, not bytes: each write owns one piece buffer.
+    const COMMAND_CAPACITY: usize = 8;
+
     pub async fn new(metainfo: &Metainfo, root: PathBuf) -> Result<Self> {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(Self::COMMAND_CAPACITY);
         let files = Self::create_files(metainfo, root).await?;
         tokio::spawn(Self::worker(files, cmd_rx));
         Ok(Self { cmd_tx })
     }
 
-    async fn worker(mut files: Vec<OutputFile>, mut rx: mpsc::UnboundedReceiver<DiskCommand>) {
+    async fn worker(mut files: Vec<OutputFile>, mut rx: mpsc::Receiver<DiskCommand>) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 DiskCommand::Write { offset, data } => {
