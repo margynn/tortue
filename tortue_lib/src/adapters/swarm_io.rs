@@ -211,6 +211,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 }
             },
             Output::Completed => {
+                self.piece_store.flush().await?;
                 info!("download completed");
                 // todo: hook
             },

@@ -47,6 +47,9 @@ enum DiskCommand {
         len: usize,
         reply: oneshot::Sender<std::io::Result<Vec<u8>>>,
     },
+    Flush {
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
 }
 
 impl PieceStore for DiskStorage {
@@ -55,6 +58,16 @@ impl PieceStore for DiskStorage {
             .send(DiskCommand::Write { offset, data })
             .await
             .map_err(|_| std::io::Error::other("writer task closed"))
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(DiskCommand::Flush { reply })
+            .await
+            .map_err(|_| std::io::Error::other("storage task closed"))?;
+        rx.await
+            .map_err(|_| std::io::Error::other("storage reply dropped"))?
     }
 
     async fn read(&mut self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
@@ -90,19 +103,40 @@ impl DiskStorage {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 DiskCommand::Write { offset, data } => {
-                    if let Err(e) = Self::write_to_files(&mut files, offset, &data).await {
-                        tracing::error!(error = %e, "disk write failed");
+                    if let Err(error) = Self::write_to_files(&mut files, offset, &data).await {
+                        tracing::error!(%error, "disk write failed");
+                        return;
                     }
                 },
                 DiskCommand::Read { offset, len, reply } => {
                     let result = Self::read_from_files(&mut files, offset, len).await;
                     let _ = reply.send(result);
                 },
+                DiskCommand::Flush { reply } => {
+                    let result = Self::flush_files(&mut files).await;
+                    let failed = result.is_err();
+                    let _ = reply.send(result);
+                    if failed {
+                        return;
+                    }
+                },
             }
         }
     }
 
-    async fn write_to_files(files: &mut Vec<OutputFile>, offset: u64, data: &[u8]) -> Result<()> {
+    async fn flush_files(files: &mut [OutputFile]) -> std::io::Result<()> {
+        for file in files {
+            // Wait for Tokio's blocking file IO, not crash-durable persistence.
+            file.file.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn write_to_files(
+        files: &mut Vec<OutputFile>,
+        offset: u64,
+        data: &[u8],
+    ) -> std::io::Result<()> {
         let write_end = offset + data.len() as u64;
         for file in files.iter_mut() {
             let file_start = file.offset;
@@ -153,7 +187,7 @@ impl DiskStorage {
         Ok(buffer)
     }
 
-    async fn write_at(file: &mut File, offset: u64, data: &[u8]) -> Result<()> {
+    async fn write_at(file: &mut File, offset: u64, data: &[u8]) -> std::io::Result<()> {
         file.seek(SeekFrom::Start(offset)).await?;
         file.write_all(data).await?;
         Ok(())

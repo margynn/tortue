@@ -73,13 +73,15 @@ async fn main() -> Result<()> {
 
             loop {
                 tokio::select! {
-                    _ = &mut task => {
-                        break;
+                    result = &mut task => {
+                        result??;
+                        anyhow::bail!("download stopped before completion");
                     }
 
                     result = progress.changed() => {
                         if result.is_err() {
-                            break;
+                            (&mut task).await??;
+                            anyhow::bail!("download progress closed before completion");
                         }
 
                         let s = progress.borrow();
@@ -98,9 +100,9 @@ async fn main() -> Result<()> {
                             s.status,
                         ));
 
-                        // The swarm keeps running (seeding) after this —
-                        // stop the CLI once the download itself is done.
-                        if s.blocks_total > 0 && s.blocks_done == s.blocks_total {
+                        // SwarmIO publishes completion only after the storage barrier.
+                        // Received blocks alone may belong to unverified partial pieces.
+                        if s.bytes_total > 0 && s.bytes_available == s.bytes_total {
                             drop(s);
                             break;
                         }
