@@ -149,9 +149,6 @@ impl TryFrom<&Bencode<'_>> for File {
             .iter()
             .map(|c| bytes_to_str(c).ok_or(Error::InvalidUtf8))
             .collect::<Result<Vec<_>>>()?;
-        if path.len() as u64 != length {
-            return Err(Error::InvalidMetainfoSize);
-        }
         Ok(File { length, path })
     }
 }

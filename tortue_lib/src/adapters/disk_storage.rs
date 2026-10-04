@@ -19,8 +19,8 @@ pub enum Error {
     #[error("path traversal")]
     PathTraversal,
 
-    #[error("invalid file size")]
-    InvalidFileSize,
+    #[error("invalid file")]
+    InvalidFile,
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -83,11 +83,10 @@ impl DiskStorage {
         Ok(())
     }
 
-    /// Creates the torrent files on disk with appropriate allocation
-    /// Performs multiple checks to prevent attacks:
-    /// - requesting too much disk space
-    /// - overwritting unrelated files
-    /// - using relative path and ../
+    /// Opens or creates the torrent files and records their offsets.
+    /// Rejects absolute paths and parent-directory components (`..`).
+    /// Creates missing parent directories and preserves existing file contents.
+    /// Does not prevent symlink traversal or guarantee available disk space.
     async fn create_files(metainfo: &Metainfo, root: PathBuf) -> Result<Vec<OutputFile>> {
         let mut files = Vec::new();
         let mut offset = 0u64;
@@ -127,20 +126,41 @@ impl DiskStorage {
         Ok(files)
     }
 
+    /// Creates a new file exclusively and sets its length, or opens an existing
+    /// regular file of the expected length without truncating or resizing it.
+    /// Existing-file checks use metadata from the opened handle.
+    /// Symlinks are followed; matching length does not verify torrent contents.
     async fn open_file(file_path: PathBuf, length: u64) -> Result<File> {
-        if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
-            if metadata.len() != length {
-                return Err(Error::InvalidFileSize);
-            }
-        }
-        let file = OpenOptions::new()
-            .create(true)
+        match OpenOptions::new()
+            .create_new(true)
             .read(true)
             .write(true)
             .open(&file_path)
-            .await?;
-        file.set_len(length).await?;
-        Ok(file)
+            .await
+        {
+            Ok(file) => {
+                // Only newly created files may be resized.
+                file.set_len(length).await?;
+                Ok(file)
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&file_path)
+                    .await?;
+                let metadata = file.metadata().await?;
+                if !metadata.is_file() {
+                    return Err(Error::InvalidFile);
+                }
+                if metadata.len() > length {
+                    return Err(Error::InvalidFile);
+                }
+                file.set_len(length).await?;
+                Ok(file)
+            },
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn build_path(root_path: &Path, path: &Path) -> Result<PathBuf> {
