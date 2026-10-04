@@ -187,7 +187,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 // todo: hook
             },
             Output::WritePiece { offset, data } => {
-                if let Err(e) = self.piece_store.write(offset, &data) {
+                if let Err(e) = self.piece_store.write(offset, data) {
                     tracing::error!(error = %e, "failed to write piece");
                 }
             },

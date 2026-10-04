@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncSeekExt, AsyncWriteExt},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
 use crate::{
@@ -31,32 +31,62 @@ struct OutputFile {
 }
 
 pub struct DiskStorage {
-    buffer_tx: mpsc::UnboundedSender<(u64, Vec<u8>)>,
+    cmd_tx: mpsc::UnboundedSender<DiskCommand>,
+}
+
+enum DiskCommand {
+    Write {
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Read {
+        offset: u64,
+        len: usize,
+        reply: oneshot::Sender<Vec<u8>>,
+    },
 }
 
 impl PieceStore for DiskStorage {
-    fn write(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
-        self.buffer_tx
-            .send((offset, data.to_vec()))
+    fn write(&mut self, offset: u64, data: Vec<u8>) -> std::io::Result<()> {
+        self.cmd_tx
+            .send(DiskCommand::Write { offset, data })
             .map_err(|_| std::io::Error::other("writer task closed"))
+    }
+
+    async fn read(&mut self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        self.cmd_tx
+            .send(DiskCommand::Read {
+                offset,
+                len,
+                reply: reply_tx,
+            })
+            .map_err(|_| std::io::Error::other("reader task closed"));
+
+        reply_rx
+            .await
+            .map_err(|_| std::io::Error::other("storage reply dropped"))
     }
 }
 
 impl DiskStorage {
     pub async fn new(metainfo: &Metainfo, root: PathBuf) -> Result<Self> {
-        let (buffer_tx, buffer_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let files = Self::create_files(metainfo, root).await?;
-        tokio::spawn(Self::writer_task(files, buffer_rx));
-        Ok(Self { buffer_tx })
+        tokio::spawn(Self::worker(files, cmd_rx));
+        Ok(Self { cmd_tx })
     }
 
-    async fn writer_task(
-        mut files: Vec<OutputFile>,
-        mut rx: mpsc::UnboundedReceiver<(u64, Vec<u8>)>,
-    ) {
-        while let Some((offset, data)) = rx.recv().await {
-            if let Err(e) = Self::write_to_files(&mut files, offset, &data).await {
-                tracing::error!(error = %e, "disk write failed");
+    async fn worker(mut files: Vec<OutputFile>, mut rx: mpsc::UnboundedReceiver<DiskCommand>) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                DiskCommand::Write { offset, data } => {
+                    if let Err(e) = Self::write_to_files(&mut files, offset, &data).await {
+                        tracing::error!(error = %e, "disk write failed");
+                    }
+                },
+                DiskCommand::Read { offset, len, reply } => todo!(),
             }
         }
     }
