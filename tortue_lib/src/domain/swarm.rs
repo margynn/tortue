@@ -74,7 +74,7 @@ pub enum Output {
     ConnectPeer(SocketAddr),
     DisconnectPeer(SocketAddr),
     SendToPeer { addr: SocketAddr, message: Message },
-    WritePiece { offset: u64, data: Vec<u8> },
+    WritePiece { range: BlockRange, data: Vec<u8> },
     ReadForUpload { id: UploadReadId, range: BlockRange },
     CancelUploadRead(UploadReadId),
     Broadcast(Message),
@@ -521,21 +521,14 @@ impl Swarm {
             return vec![]; // Malformed block: already unassigned, gets replanned.
         };
         self.downloaded_bytes += len as u64;
-        let Some(CompletedPiece {
-            piece_index,
-            piece_offset,
-            data,
-        }) = completed
+        let Some(CompletedPiece { range, data }) = completed
         else {
             return vec![];
         };
 
         let mut outputs = vec![
-            Output::Broadcast(Message::Have(piece_index)),
-            Output::WritePiece {
-                offset: piece_offset,
-                data,
-            },
+            Output::Broadcast(Message::Have(range.piece_index)),
+            Output::WritePiece { range, data },
         ];
         if self.pieces.is_complete() {
             outputs.push(Output::Completed);

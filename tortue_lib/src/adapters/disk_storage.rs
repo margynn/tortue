@@ -11,7 +11,10 @@ use tokio::{
 
 use crate::{
     application::ports::piece_store::PieceStore,
-    domain::torrent::{Metainfo, Mode},
+    domain::{
+        block::BlockRange,
+        torrent::{Metainfo, Mode},
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +38,9 @@ struct OutputFile {
 
 pub struct DiskStorage {
     cmd_tx: mpsc::Sender<DiskCommand>,
+    piece_length: usize,
+    piece_count: usize,
+    total_size: u64,
 }
 
 enum DiskCommand {
@@ -53,7 +59,14 @@ enum DiskCommand {
 }
 
 impl PieceStore for DiskStorage {
-    async fn write(&mut self, offset: u64, data: Vec<u8>) -> std::io::Result<()> {
+    async fn write(&mut self, range: BlockRange, data: Vec<u8>) -> std::io::Result<()> {
+        if data.len() != range.len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "write length does not match block range",
+            ));
+        }
+        let offset = self.storage_offset(range)?;
         self.cmd_tx
             .send(DiskCommand::Write { offset, data })
             .await
@@ -70,13 +83,14 @@ impl PieceStore for DiskStorage {
             .map_err(|_| std::io::Error::other("storage reply dropped"))?
     }
 
-    async fn read(&mut self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    async fn read(&mut self, range: BlockRange) -> std::io::Result<Vec<u8>> {
+        let offset = self.storage_offset(range)?;
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.cmd_tx
             .send(DiskCommand::Read {
                 offset,
-                len,
+                len: range.len,
                 reply: reply_tx,
             })
             .await
@@ -96,7 +110,42 @@ impl DiskStorage {
         let (cmd_tx, cmd_rx) = mpsc::channel(Self::COMMAND_CAPACITY);
         let files = Self::create_files(metainfo, root).await?;
         tokio::spawn(Self::worker(files, cmd_rx));
-        Ok(Self { cmd_tx })
+        Ok(Self {
+            cmd_tx,
+            piece_length: metainfo.piece_length,
+            piece_count: metainfo.pieces.len(),
+            total_size: metainfo.total_size(),
+        })
+    }
+
+    fn storage_offset(&self, range: BlockRange) -> std::io::Result<u64> {
+        let invalid_range = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "block range outside torrent or overflowing",
+            )
+        };
+        let piece_end = range
+            .piece_offset
+            .checked_add(range.len)
+            .ok_or_else(invalid_range)?;
+        if range.piece_index >= self.piece_count
+            || range.len == 0
+            || piece_end > self.piece_length
+        {
+            return Err(invalid_range());
+        }
+        let offset = (range.piece_index as u64)
+            .checked_mul(self.piece_length as u64)
+            .and_then(|start| start.checked_add(range.piece_offset as u64))
+            .ok_or_else(invalid_range)?;
+        let end = offset
+            .checked_add(range.len as u64)
+            .ok_or_else(invalid_range)?;
+        if end > self.total_size {
+            return Err(invalid_range());
+        }
+        Ok(offset)
     }
 
     async fn worker(mut files: Vec<OutputFile>, mut rx: mpsc::Receiver<DiskCommand>) {

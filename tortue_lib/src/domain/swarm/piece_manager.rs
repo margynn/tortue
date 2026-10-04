@@ -31,8 +31,7 @@ pub(super) enum Error {
 pub(super) type Result<T> = std::result::Result<T, Error>;
 
 pub(super) struct CompletedPiece {
-    pub(super) piece_index: usize,
-    pub(super) piece_offset: u64,
+    pub(super) range: BlockRange,
     pub(super) data: Vec<u8>,
 }
 
@@ -153,11 +152,13 @@ impl PieceManager {
         let Some(buffer) = p.receive_block(block_index, data)? else {
             return Ok(None);
         };
-        let torrent_offset = piece_index as u64 * self.metainfo.piece_length as u64;
         self.bitfield.set_bit(piece_index)?;
         Ok(Some(CompletedPiece {
-            piece_index,
-            piece_offset: torrent_offset,
+            range: BlockRange {
+                piece_index,
+                piece_offset: 0,
+                len: buffer.len(),
+            },
             data: buffer,
         }))
     }

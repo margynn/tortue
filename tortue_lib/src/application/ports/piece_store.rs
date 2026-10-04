@@ -1,5 +1,7 @@
+use crate::domain::block::BlockRange;
+
 pub trait PieceStore: Send {
-    async fn write(&mut self, offset: u64, data: Vec<u8>) -> std::io::Result<()>;
+    async fn write(&mut self, range: BlockRange, data: Vec<u8>) -> std::io::Result<()>;
     async fn flush(&mut self) -> std::io::Result<()>;
-    async fn read(&mut self, offset: u64, len: usize) -> std::io::Result<Vec<u8>>;
+    async fn read(&mut self, range: BlockRange) -> std::io::Result<Vec<u8>>;
 }

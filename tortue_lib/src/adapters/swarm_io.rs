@@ -7,6 +7,7 @@ use std::{
 
 use tokio::{
     sync::{mpsc, watch},
+    task::{AbortHandle, JoinSet},
     time,
 };
 use tracing::info;
@@ -14,9 +15,10 @@ use tracing::info;
 use crate::{
     application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
+        block::BlockRange,
         message::Message,
         peer::{PeerEvent, PeerId},
-        swarm::{Input, Output, Swarm, SwarmCommand, SwarmSnapshot, Tick},
+        swarm::{Input, Output, Swarm, SwarmCommand, SwarmSnapshot, Tick, UploadReadId},
         torrent::Metainfo,
         tracker::SessionStats,
     },
@@ -42,6 +44,8 @@ pub struct SwarmIO<S, C: PeerConnector> {
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+    reads: JoinSet<UploadReadResult>,
+    read_handles: HashMap<UploadReadId, AbortHandle>,
     piece_store: S,
     peer_connector: C,
     progress_tx: watch::Sender<SwarmSnapshot>,
@@ -65,6 +69,12 @@ struct PeerSample {
     downloaded: u64,
     upload_rate: f64,
     download_rate: f64,
+}
+
+struct UploadReadResult {
+    id: UploadReadId,
+    range: BlockRange,
+    res: std::io::Result<Vec<u8>>,
 }
 
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
@@ -99,24 +109,24 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             progress_tx,
             stats,
             rate_sample: RateSample::default(),
+            reads: todo!(),
+            read_handles: HashMap::new(),
         }
     }
 
     async fn restore(&mut self) -> Result<()> {
-        let total_size = self.metainfo.total_size();
+        let mut remaining = self.metainfo.total_size();
         let piece_length = self.metainfo.piece_length as u64;
 
         for piece_index in 0..self.metainfo.pieces.len() {
-            let storage_offset = (piece_index as u64)
-                .checked_mul(piece_length)
-                .ok_or_else(|| std::io::Error::other("piece offset overflow"))?;
-
-            let remaining = total_size
-                .checked_sub(storage_offset)
-                .ok_or_else(|| std::io::Error::other("piece exceeds torrent size"))?;
-
             let len = remaining.min(piece_length) as usize;
-            let data = self.piece_store.read(storage_offset, len).await?;
+            let range = BlockRange {
+                piece_index,
+                piece_offset: 0,
+                len,
+            };
+            let data = self.piece_store.read(range).await?;
+            remaining -= len as u64;
             self.swarm.step(Input::LocalPiece { piece_index, data });
         }
 
@@ -215,14 +225,20 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                 info!("download completed");
                 // todo: hook
             },
-            Output::WritePiece { offset, data } => {
-                self.piece_store.write(offset, data).await?;
+            Output::WritePiece { range, data } => {
+                self.piece_store.write(range, data).await?;
             },
             Output::Broadcast(message) => {
                 for tx in self.peer_cmds.values() {
                     let _ = tx.try_send(message.clone());
                 }
             },
+            Output::ReadForUpload { id, range } => {
+                let read = self.piece_store.read(range);
+                let handle = self.reads.spawn(async move { (id, range, read.await) });
+                self.read_handles.insert(id, handle);
+            },
+            Output::CancelUploadRead(upload_read_id) => todo!(),
         }
         Ok(())
     }
