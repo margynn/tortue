@@ -41,8 +41,6 @@ pub(super) struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
     bitfield: Bitfield,
-    // pub(super) uploaded_bytes: u64,
-    // pub(super) downloaded_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -123,6 +121,12 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.is_complete())
     }
 
+    pub(super) fn is_partial(&self, piece_index: usize) -> bool {
+        self.pieces
+            .get(piece_index)
+            .is_some_and(|piece| piece.received > 0 && !piece.is_complete())
+    }
+
     pub(super) fn has_no_piece(&self) -> bool {
         self.pieces.iter().all(|p| !p.is_complete())
     }
@@ -169,7 +173,7 @@ impl PieceManager {
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
 
-        // An endgame duplicate must not re-emit a completion: that would
+        // A duplicate must not re-emit a completion: that would
         // write the piece and broadcast `Have` twice.
         let block_index = block_ref.block_index()?;
         if !p.receive_block(block_index, data)? || !p.is_complete() {
@@ -181,6 +185,7 @@ impl PieceManager {
 
         if !verify_piece_hash(expected_hash, &buffer) {
             p.reset();
+            self.bitfield.unset_bit(piece_index)?;
             return Ok(None);
         }
 

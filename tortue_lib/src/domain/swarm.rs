@@ -38,9 +38,8 @@ pub enum Input {
         addr: SocketAddr,
         message: Message,
     },
-    LocalBlock {
+    LocalPiece {
         piece_index: usize,
-        piece_offset: usize,
         data: Vec<u8>,
     },
     SwarmCommand(SwarmCommand),
@@ -137,12 +136,13 @@ pub struct PeerStats {
 impl Swarm {
     pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         let total_pieces = metainfo.pieces.len();
+        let pieces = PieceManager::new(Arc::clone(&metainfo));
         Self {
             client_id,
-            metainfo: Arc::clone(&metainfo),
+            metainfo,
             peer_registry: PeerRegistry::new(total_pieces),
             block_assignments: BlockAssignments::new(),
-            pieces: PieceManager::new(Arc::clone(&metainfo)),
+            pieces,
             status: SwarmStatus::Active,
             uploaded_bytes: 0,
             downloaded_bytes: 0,
@@ -189,11 +189,7 @@ impl Swarm {
             } => self.on_connected(addr, direction, id, extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
-            Input::LocalBlock {
-                piece_index,
-                piece_offset,
-                data,
-            } => self.on_local_block(piece_index, piece_offset, data),
+            Input::LocalPiece { piece_index, data } => self.on_local_piece(piece_index, data),
             Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
             Input::Tick(tick) => self.on_tick(tick),
         }
@@ -308,18 +304,15 @@ impl Swarm {
         out
     }
 
-    fn on_local_block(
-        &mut self,
-        piece_index: usize,
-        piece_offset: usize,
-        data: Vec<u8>,
-    ) -> Vec<Output> {
-        let block_ref = BlockRef {
-            piece_index,
-            piece_offset,
-        };
-        // Invalid local blocks remain missing; valid completions need no IO effects.
-        let _ = self.pieces.receive_block(block_ref, data);
+    fn on_local_piece(&mut self, piece_index: usize, data: Vec<u8>) -> Vec<Output> {
+        let blocks: Vec<_> = self.pieces.unreceived_blocks(piece_index).collect();
+        for range in blocks {
+            let start = range.block.piece_offset;
+            let Some(block) = data.get(start..start + range.len) else {
+                break; // Remaining blocks are outside the available local prefix.
+            };
+            let _ = self.pieces.receive_block(range.block, block.to_vec());
+        }
         vec![]
     }
 
@@ -548,9 +541,12 @@ impl Swarm {
 
         let mut holders = self.block_assignments.holder_counts();
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
-        // Sort by suggested and rarest first
+        // Finish partial pieces first, then prefer suggested and rare pieces.
+        // Targetting partial first allow to reduce memory footprint, as completed piece are
+        // evicted and served back via store read or cache.
         needed.sort_by_cached_key(|&piece| {
             (
+                !self.pieces.is_partial(piece),
                 !self.peer_registry.is_suggested(piece),
                 self.peer_registry.rarity(piece),
             )

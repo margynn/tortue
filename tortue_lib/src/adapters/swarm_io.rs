@@ -34,8 +34,8 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 pub struct SwarmIO<S, C: PeerConnector> {
-    client_id: PeerId,
     metainfo: Arc<Metainfo>,
+    swarm: Swarm,
     commands_rx: mpsc::Receiver<SwarmCommand>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
     inbound_rx: mpsc::Receiver<(SocketAddr, C::Inbound)>,
@@ -84,9 +84,10 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         commands_rx: mpsc::Receiver<SwarmCommand>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
+        let swarm = Swarm::new(client_id, Arc::clone(&metainfo));
         Self {
-            client_id,
             metainfo,
+            swarm,
             commands_rx,
             peers_rx,
             inbound_rx,
@@ -101,8 +102,32 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         }
     }
 
+    async fn restore(&mut self) -> Result<()> {
+        let total_size = self.metainfo.total_size();
+        let piece_length = self.metainfo.piece_length as u64;
+
+        for piece_index in 0..self.metainfo.pieces.len() {
+            let storage_offset = (piece_index as u64)
+                .checked_mul(piece_length)
+                .ok_or_else(|| std::io::Error::other("piece offset overflow"))?;
+
+            let remaining = total_size
+                .checked_sub(storage_offset)
+                .ok_or_else(|| std::io::Error::other("piece exceeds torrent size"))?;
+
+            let len = remaining.min(piece_length) as usize;
+            let data = self.piece_store.read(storage_offset, len).await?;
+            self.swarm.step(Input::LocalPiece { piece_index, data });
+        }
+
+        let snapshot = self.swarm.snapshot();
+        self.publish(snapshot);
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<()> {
-        let mut coordinator = Swarm::new(self.client_id, Arc::clone(&self.metainfo));
+        self.restore().await?;
+
         let mut block_tick = time::interval(Self::BLOCK_TICK_INTERVAL);
         let mut pex_tick = time::interval(Self::PEX_TICK_INTERVAL);
         let mut inbound_open = true;
@@ -160,11 +185,11 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
             };
 
-            for out in coordinator.step(input) {
+            for out in self.swarm.step(input) {
                 self.handle_output(out).await?;
             }
 
-            let snapshot = coordinator.snapshot();
+            let snapshot = self.swarm.snapshot();
             self.publish(snapshot);
         }
 
