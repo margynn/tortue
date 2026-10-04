@@ -38,6 +38,11 @@ pub enum Input {
         addr: SocketAddr,
         message: Message,
     },
+    LocalBlock {
+        piece_index: usize,
+        piece_offset: usize,
+        data: Vec<u8>,
+    },
     SwarmCommand(SwarmCommand),
     Tick(Tick),
 }
@@ -171,6 +176,8 @@ impl Swarm {
         }
     }
 
+    // TODO: should return Option<Vec<Output>> because some actions do not return any outputs
+    // and we should save memory
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
@@ -182,6 +189,11 @@ impl Swarm {
             } => self.on_connected(addr, direction, id, extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
+            Input::LocalBlock {
+                piece_index,
+                piece_offset,
+                data,
+            } => self.on_local_block(piece_index, piece_offset, data),
             Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
             Input::Tick(tick) => self.on_tick(tick),
         }
@@ -294,6 +306,21 @@ impl Swarm {
         out.push(Output::SendToPeer { addr, message });
         out.extend(self.declare_interest(addr));
         out
+    }
+
+    fn on_local_block(
+        &mut self,
+        piece_index: usize,
+        piece_offset: usize,
+        data: Vec<u8>,
+    ) -> Vec<Output> {
+        let block_ref = BlockRef {
+            piece_index,
+            piece_offset,
+        };
+        // Invalid local blocks remain missing; valid completions need no IO effects.
+        let _ = self.pieces.receive_block(block_ref, data);
+        vec![]
     }
 
     fn on_message(&mut self, addr: SocketAddr, message: Message) -> Vec<Output> {

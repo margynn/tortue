@@ -23,6 +23,9 @@ pub(super) enum Error {
 
     #[error("invalid piece index: {0}")]
     InvalidPieceIndex(usize),
+
+    #[error("unaligned block offset: {0}")]
+    UnalignedBlockOffset(usize),
 }
 pub(super) type Result<T> = std::result::Result<T, Error>;
 
@@ -55,8 +58,11 @@ pub(super) struct BlockRef {
 }
 
 impl BlockRef {
-    fn block_index(&self) -> usize {
-        self.piece_offset / BLOCK_SIZE
+    fn block_index(&self) -> Result<usize> {
+        if !self.piece_offset.is_multiple_of(BLOCK_SIZE) {
+            return Err(Error::UnalignedBlockOffset(self.piece_offset));
+        }
+        Ok(self.piece_offset / BLOCK_SIZE)
     }
 }
 
@@ -130,7 +136,15 @@ impl PieceManager {
         if piece_len > BLOCK_SIZE {
             return None;
         }
-        self.pieces.get(piece_index)?.read(piece_offset, piece_len)
+        // ! We should not share / communicate blocks that are not validated.
+        // Only when the piece is complete and its hash validated we can
+        // distribute blocks - otherwise there is a risk of global degradation
+        // and distributed corrupted blocks.
+        let piece = self.pieces.get(piece_index)?;
+        if piece.is_complete() {
+            return piece.read(piece_offset, piece_len);
+        }
+        None
     }
 
     pub(super) fn blocks_total(&self) -> usize {
@@ -157,7 +171,8 @@ impl PieceManager {
 
         // An endgame duplicate must not re-emit a completion: that would
         // write the piece and broadcast `Have` twice.
-        if !p.receive_block(block_ref.block_index(), data)? || !p.is_complete() {
+        let block_index = block_ref.block_index()?;
+        if !p.receive_block(block_index, data)? || !p.is_complete() {
             return Ok(None);
         }
 
