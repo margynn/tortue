@@ -176,6 +176,26 @@ impl PieceManager {
             data: buffer,
         }))
     }
+
+    // pub(super) fn valid_upload_range(&self, index: usize, offset: usize, len: usize) -> bool {
+    //     self.pieces.get(index).is_some_and(|p| {
+    //         p.is_complete()
+    //             && len > 0
+    //             && len <= BLOCK_SIZE
+    //             && offset.checked_add(len).is_some_and(|end| end <= p.length)
+    //     })
+    // }
+
+    // pub(super) fn upload_block_len(&self, block: BlockRef) -> Option<usize> {
+    //     let piece = self.pieces.get(block.piece_index)?;
+    //     if !piece.is_complete()
+    //         || !block.piece_offset.is_multiple_of(BLOCK_SIZE)
+    //         || block.piece_offset >= piece.length
+    //     {
+    //         return None;
+    //     }
+    //     Some((piece.length - block.piece_offset).min(BLOCK_SIZE))
+    // }
 }
 
 fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
