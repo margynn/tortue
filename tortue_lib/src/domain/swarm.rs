@@ -101,6 +101,8 @@ pub struct Swarm {
     block_assignments: BlockAssignments,
     pieces: PieceManager,
     status: SwarmStatus,
+    downloaded_bytes: u64,
+    uploaded_bytes: u64,
 }
 
 #[derive(Default)]
@@ -137,6 +139,8 @@ impl Swarm {
             block_assignments: BlockAssignments::new(),
             pieces: PieceManager::new(Arc::clone(&metainfo)),
             status: SwarmStatus::Active,
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
         }
     }
 
@@ -147,8 +151,8 @@ impl Swarm {
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
             bytes_total: self.metainfo.total_size(),
-            bytes_downloaded: self.pieces.downloaded_bytes,
-            bytes_uploaded: self.pieces.uploaded_bytes,
+            bytes_downloaded: self.downloaded_bytes,
+            bytes_uploaded: self.uploaded_bytes,
             seeders: self.peer_registry.seeders.iter().copied().collect(),
             leechers: self.peer_registry.leechers.iter().copied().collect(),
             peers: self
@@ -393,6 +397,7 @@ impl Swarm {
         let Some(data) = self.pieces.read_block(piece_index, piece_offset, piece_len) else {
             return vec![];
         };
+        self.uploaded_bytes += piece_len as u64;
         vec![Output::SendToPeer {
             addr,
             message: Message::Piece {
@@ -418,9 +423,11 @@ impl Swarm {
         }
         self.block_assignments.unassign(block_ref, addr);
 
+        let len = data.len();
         let Ok(completed) = self.pieces.receive_block(block_ref, data) else {
             return vec![]; // Malformed block: already unassigned, gets replanned.
         };
+        self.downloaded_bytes += len as u64;
         let Some(CompletedPiece {
             piece_index,
             piece_offset,

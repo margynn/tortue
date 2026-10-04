@@ -38,9 +38,8 @@ pub(super) struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
     bitfield: Bitfield,
-
-    pub(super) uploaded_bytes: u64,
-    pub(super) downloaded_bytes: u64,
+    // pub(super) uploaded_bytes: u64,
+    // pub(super) downloaded_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -62,7 +61,6 @@ impl BlockRef {
 }
 
 impl PieceManager {
-    // TODO: should initialize with existing content when available
     pub(super) fn new(metainfo: Arc<Metainfo>) -> Self {
         let piece_count = metainfo.pieces.len();
         let mut pieces = Vec::with_capacity(piece_count);
@@ -81,8 +79,6 @@ impl PieceManager {
             metainfo,
             pieces,
             bitfield,
-            uploaded_bytes: 0,
-            downloaded_bytes: 0,
         }
     }
 
@@ -134,7 +130,6 @@ impl PieceManager {
         if piece_len > BLOCK_SIZE {
             return None;
         }
-        self.uploaded_bytes += piece_len as u64;
         self.pieces.get(piece_index)?.read(piece_offset, piece_len)
     }
 
@@ -159,7 +154,6 @@ impl PieceManager {
             .pieces
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
-        self.downloaded_bytes += data.len() as u64;
 
         // An endgame duplicate must not re-emit a completion: that would
         // write the piece and broadcast `Have` twice.
@@ -190,16 +184,16 @@ fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
     digest.as_slice() == expected
 }
 
-#[derive(Clone)]
-enum BlockState {
-    Missing,
-    Received(Vec<u8>),
-}
-
 struct Piece {
     blocks: Vec<BlockState>,
     length: usize,
     received: usize,
+}
+
+#[derive(Clone)]
+enum BlockState {
+    Missing,
+    Received(Vec<u8>),
 }
 
 impl Piece {
