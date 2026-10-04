@@ -43,16 +43,16 @@ pub(super) struct PieceManager {
     bitfield: Bitfield,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct BlockRange {
-    pub(super) block: BlockRef,
-    pub(super) len: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockRange {
+    pub block: BlockRef,
+    pub len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct BlockRef {
-    pub(super) piece_index: usize,
-    pub(super) piece_offset: usize,
+pub struct BlockRef {
+    pub piece_index: usize,
+    pub piece_offset: usize,
 }
 
 impl BlockRef {
@@ -177,25 +177,18 @@ impl PieceManager {
         }))
     }
 
-    // pub(super) fn valid_upload_range(&self, index: usize, offset: usize, len: usize) -> bool {
-    //     self.pieces.get(index).is_some_and(|p| {
-    //         p.is_complete()
-    //             && len > 0
-    //             && len <= BLOCK_SIZE
-    //             && offset.checked_add(len).is_some_and(|end| end <= p.length)
-    //     })
-    // }
-
-    // pub(super) fn upload_block_len(&self, block: BlockRef) -> Option<usize> {
-    //     let piece = self.pieces.get(block.piece_index)?;
-    //     if !piece.is_complete()
-    //         || !block.piece_offset.is_multiple_of(BLOCK_SIZE)
-    //         || block.piece_offset >= piece.length
-    //     {
-    //         return None;
-    //     }
-    //     Some((piece.length - block.piece_offset).min(BLOCK_SIZE))
-    // }
+    pub(super) fn valid_upload_range(&self, range: BlockRange) -> bool {
+        let BlockRange { block, len } = range;
+        self.pieces.get(block.piece_index).is_some_and(|piece| {
+            piece.is_complete()
+                && len > 0
+                && len <= BLOCK_SIZE
+                && block
+                    .piece_offset
+                    .checked_add(len)
+                    .is_some_and(|end| end <= piece.length)
+        })
+    }
 }
 
 fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {

@@ -2,13 +2,19 @@ mod block_assignment;
 mod peer_registry;
 mod piece_manager;
 
-use std::{collections::HashSet, net::SocketAddr, sync::Arc, vec};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    vec,
+};
 
 use rand::seq::IteratorRandom;
 
 use block_assignment::BlockAssignments;
 use peer_registry::{PeerRegistry, RejectReason};
-use piece_manager::{BlockRange, BlockRef, CompletedPiece, PieceManager};
+pub use piece_manager::{BlockRange, BlockRef};
+use piece_manager::{CompletedPiece, PieceManager};
 
 use crate::domain::peer::ConnectionDirection;
 
@@ -42,6 +48,11 @@ pub enum Input {
         piece_index: usize,
         data: Vec<u8>,
     },
+    UploadReadCompleted {
+        id: UploadReadId,
+        range: BlockRange,
+        data: Vec<u8>,
+    },
     SwarmCommand(SwarmCommand),
     Tick(Tick),
 }
@@ -51,11 +62,21 @@ pub enum Tick {
     Pex,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UploadReadId(pub u64);
+
+struct PendingRead {
+    id: UploadReadId,
+    peers: HashSet<SocketAddr>,
+}
+
 pub enum Output {
     ConnectPeer(SocketAddr),
     DisconnectPeer(SocketAddr),
     SendToPeer { addr: SocketAddr, message: Message },
     WritePiece { offset: u64, data: Vec<u8> },
+    ReadForUpload { id: UploadReadId, range: BlockRange },
+    CancelUploadRead(UploadReadId),
     Broadcast(Message),
     Completed,
 }
@@ -101,12 +122,17 @@ impl SwarmStatus {
 pub struct Swarm {
     client_id: PeerId,
     metainfo: Arc<Metainfo>,
+
     peer_registry: PeerRegistry,
     block_assignments: BlockAssignments,
     pieces: PieceManager,
+
     status: SwarmStatus,
     downloaded_bytes: u64,
     uploaded_bytes: u64,
+
+    pending_reads: HashMap<BlockRange, PendingRead>,
+    next_upload_read_id: u64,
 }
 
 #[derive(Default)]
@@ -135,6 +161,8 @@ pub struct PeerStats {
 }
 
 impl Swarm {
+    const MAX_PENDING_UPLOADS: usize = 32;
+
     pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         let total_pieces = metainfo.pieces.len();
         let pieces = PieceManager::new(Arc::clone(&metainfo));
@@ -147,6 +175,8 @@ impl Swarm {
             status: SwarmStatus::Active,
             uploaded_bytes: 0,
             downloaded_bytes: 0,
+            pending_reads: HashMap::new(),
+            next_upload_read_id: 0,
         }
     }
 
@@ -192,6 +222,9 @@ impl Swarm {
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
             Input::LocalPiece { piece_index, data } => self.on_local_piece(piece_index, data),
+            Input::UploadReadCompleted { id, range, data } => {
+                self.on_upload_read_completed(id, range, data)
+            },
             Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
             Input::Tick(tick) => self.on_tick(tick),
         }
@@ -205,6 +238,16 @@ impl Swarm {
             },
             //
         }
+    }
+
+    fn on_upload_read_completed(
+        &mut self,
+        id: UploadReadId,
+        range: BlockRange,
+        data: Vec<u8>,
+    ) -> Vec<Output> {
+        //
+        todo!()
     }
 
     fn on_tick(&mut self, tick: Tick) -> Vec<Output> {
@@ -416,18 +459,43 @@ impl Swarm {
         if !self.status.upload() {
             return vec![];
         }
-        let Some(data) = self.pieces.read_block(piece_index, piece_offset, piece_len) else {
-            return vec![];
-        };
-        self.uploaded_bytes += piece_len as u64;
-        vec![Output::SendToPeer {
-            addr,
-            message: Message::Piece {
+        let range = BlockRange {
+            block: BlockRef {
                 piece_index,
                 piece_offset,
-                data,
             },
-        }]
+            len: piece_len,
+        };
+        if !self.pieces.valid_upload_range(range) {
+            return vec![]; // requested data not available
+        }
+
+        let pending: usize = self
+            .pending_reads
+            .values()
+            .map(|read| read.peers.len())
+            .sum();
+        if pending >= Self::MAX_PENDING_UPLOADS {
+            // TODO: should send reject request message if peer support fast-extension
+            return vec![]; // saturating - ignore request
+        }
+        if let Some(read) = self.pending_reads.get_mut(&range) {
+            read.peers.insert(addr);
+            return vec![]; // identical request - sharing the read
+        }
+        let id = UploadReadId(self.next_upload_read_id);
+        self.next_upload_read_id = self
+            .next_upload_read_id
+            .checked_add(1)
+            .expect("upload read id exhausted");
+        self.pending_reads.insert(
+            range,
+            PendingRead {
+                id,
+                peers: HashSet::from([addr]),
+            },
+        );
+        vec![Output::ReadForUpload { id, range }]
     }
 
     fn on_message_piece(
