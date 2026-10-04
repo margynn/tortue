@@ -139,11 +139,11 @@ Elle :
 
 ### Résultats
 
-| Résultat | Signification |
-| --- | --- |
-| `Ok(true)` | Pièce valide restaurée |
-| `Ok(false)` | Hash incorrect ; pièce non restaurée |
-| `Err(...)` | Index ou longueur invalide, ou autre erreur de cohérence |
+| Résultat    | Signification                                            |
+| ----------- | -------------------------------------------------------- |
+| `Ok(true)`  | Pièce valide restaurée                                   |
+| `Ok(false)` | Hash incorrect ; pièce non restaurée                     |
+| `Err(...)`  | Index ou longueur invalide, ou autre erreur de cohérence |
 
 Ce chemin est destiné à l’initialisation d’un manager neuf, avant les échanges réseau. Un mismatch au démarrage laisse donc la pièce manquante.
 
@@ -212,12 +212,12 @@ Les pièces sont lues une par une. Aucun buffer intermédiaire contenant tout le
 
 Le snapshot distingue maintenant :
 
-| Champ | Sens |
-| --- | --- |
-| `bytes_total` | Taille totale du contenu |
-| `bytes_available` | Taille des pièces complètes et validées, y compris celles restaurées |
-| `bytes_downloaded` | Compteur de données reçues par le chemin de téléchargement |
-| `bytes_uploaded` | Compteur existant d’upload |
+| Champ              | Sens                                                                 |
+| ------------------ | -------------------------------------------------------------------- |
+| `bytes_total`      | Taille totale du contenu                                             |
+| `bytes_available`  | Taille des pièces complètes et validées, y compris celles restaurées |
+| `bytes_downloaded` | Compteur de données reçues par le chemin de téléchargement           |
+| `bytes_uploaded`   | Compteur existant d’upload                                           |
 
 `available_bytes()` somme la taille des pièces complètes. Le calcul du tracker devient :
 
