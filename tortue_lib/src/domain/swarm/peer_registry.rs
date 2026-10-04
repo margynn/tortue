@@ -70,15 +70,11 @@ impl PeerRegistry {
         self.by_id.get(&id).cloned()
     }
 
-    /// `Some(Message::Interested)` the first time we become interested in
-    /// `addr` — the caller relays it. `None` on every later call.
-    pub(super) fn declare_interest(&mut self, addr: SocketAddr) -> Option<Message> {
-        let peer = self.peers.get_mut(&addr)?;
-        if peer.am_interested {
-            return None;
-        }
-        peer.am_interested = true;
-        Some(Message::Interested)
+    /// Repeat interest for a known peer; enqueueing does not confirm delivery.
+    pub(super) fn declare_interest(&self, addr: SocketAddr) -> Option<Message> {
+        self.peers
+            .contains_key(&addr)
+            .then_some(Message::Interested)
     }
 
     pub(super) fn peer_extension_id(&self, addr: SocketAddr, name: &str) -> Option<u8> {
@@ -217,7 +213,6 @@ impl PieceAvailability {
 #[derive(Clone)]
 struct PeerState {
     id: PeerId,
-    am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
     allowed_fast: HashSet<usize>,
@@ -232,7 +227,6 @@ impl PeerState {
     fn new(id: PeerId, extensions: PeerExtensions) -> Self {
         Self {
             id,
-            am_interested: false,
             peer_choking: true,
             peer_interested: false,
             allowed_fast: HashSet::new(),
@@ -260,8 +254,8 @@ impl PeerState {
             Message::Piece { data, .. } => {
                 self.bytes_downloaded += data.len() as u64;
             },
-            Message::Request { piece_len, .. } => {
-                self.bytes_uploaded += *piece_len as u64;
+            Message::Request(range) => {
+                self.bytes_uploaded += range.len as u64;
             },
             _ => {},
         }

@@ -1,9 +1,9 @@
 use std::{collections::HashMap, net::SocketAddr, time::Instant};
 
-use super::piece_manager::BlockRef;
+use crate::domain::block::BlockRange;
 
 pub(super) struct BlockAssignments {
-    by_peer: HashMap<SocketAddr, HashMap<BlockRef, Instant>>,
+    by_peer: HashMap<SocketAddr, HashMap<BlockRange, Instant>>,
 }
 
 impl BlockAssignments {
@@ -15,14 +15,14 @@ impl BlockAssignments {
         }
     }
 
-    pub(super) fn assign(&mut self, b: BlockRef, addr: SocketAddr) {
+    pub(super) fn assign(&mut self, b: BlockRange, addr: SocketAddr) {
         self.by_peer
             .entry(addr)
             .or_default()
             .insert(b, Instant::now());
     }
 
-    pub(super) fn unassign(&mut self, b: BlockRef, addr: SocketAddr) {
+    pub(super) fn unassign(&mut self, b: BlockRange, addr: SocketAddr) {
         if let Some(blocks) = self.by_peer.get_mut(&addr) {
             blocks.remove(&b);
         }
@@ -34,7 +34,7 @@ impl BlockAssignments {
     /// block it no longer needs — and never re-requesting the same block
     /// from the same peer while it's still pending avoids ever sending them
     /// a duplicate `Request`.
-    pub(super) fn is_holder(&self, b: BlockRef, addr: SocketAddr) -> bool {
+    pub(super) fn is_holder(&self, b: BlockRange, addr: SocketAddr) -> bool {
         self.by_peer
             .get(&addr)
             .is_some_and(|blocks| blocks.contains_key(&b))
@@ -42,7 +42,7 @@ impl BlockAssignments {
 
     /// One pass over every in-flight request: how many peers currently hold
     /// each block. Replaces a per-block, per-depth scan.
-    pub(super) fn holder_counts(&self) -> HashMap<BlockRef, usize> {
+    pub(super) fn holder_counts(&self) -> HashMap<BlockRange, usize> {
         let mut counts = HashMap::new();
         for blocks in self.by_peer.values() {
             for block_ref in blocks.keys() {

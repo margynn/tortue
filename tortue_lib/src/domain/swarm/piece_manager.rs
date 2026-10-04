@@ -4,6 +4,7 @@ use sha1::{Digest, Sha1};
 
 use crate::domain::{
     bitfield::{self, Bitfield},
+    block::{BLOCK_SIZE, BlockRange},
     torrent::Metainfo,
 };
 
@@ -29,8 +30,6 @@ pub(super) enum Error {
 }
 pub(super) type Result<T> = std::result::Result<T, Error>;
 
-const BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
-
 pub(super) struct CompletedPiece {
     pub(super) piece_index: usize,
     pub(super) piece_offset: u64,
@@ -41,27 +40,6 @@ pub(super) struct PieceManager {
     metainfo: Arc<Metainfo>,
     pieces: Vec<Piece>,
     bitfield: Bitfield,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockRange {
-    pub block: BlockRef,
-    pub len: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockRef {
-    pub piece_index: usize,
-    pub piece_offset: usize,
-}
-
-impl BlockRef {
-    fn block_index(&self) -> Result<usize> {
-        if !self.piece_offset.is_multiple_of(BLOCK_SIZE) {
-            return Err(Error::UnalignedBlockOffset(self.piece_offset));
-        }
-        Ok(self.piece_offset / BLOCK_SIZE)
-    }
 }
 
 impl PieceManager {
@@ -107,10 +85,8 @@ impl PieceManager {
                 piece
                     .unreceived_blocks()
                     .map(move |block_index| BlockRange {
-                        block: BlockRef {
-                            piece_index,
-                            piece_offset: block_index * BLOCK_SIZE,
-                        },
+                        piece_index,
+                        piece_offset: block_index * BLOCK_SIZE,
                         len: piece.block_length(block_index).expect("iter on blocks"),
                     })
             })
@@ -156,15 +132,24 @@ impl PieceManager {
     /// Only a hash mismatch resets the piece.
     pub(super) fn receive_block(
         &mut self,
-        block_ref: BlockRef,
+        range: BlockRange,
         data: Vec<u8>,
     ) -> Result<Option<CompletedPiece>> {
-        let piece_index = block_ref.piece_index;
+        if data.len() != range.len {
+            return Err(Error::InvalidBlockSize {
+                expected: range.len,
+                actual: data.len(),
+            });
+        }
+        if !range.piece_offset.is_multiple_of(BLOCK_SIZE) {
+            return Err(Error::UnalignedBlockOffset(range.piece_offset));
+        }
+        let piece_index = range.piece_index;
         let p = self
             .pieces
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
-        let block_index = block_ref.block_index()?;
+        let block_index = range.piece_offset / BLOCK_SIZE;
         let Some(buffer) = p.receive_block(block_index, data)? else {
             return Ok(None);
         };
@@ -178,14 +163,13 @@ impl PieceManager {
     }
 
     pub(super) fn valid_upload_range(&self, range: BlockRange) -> bool {
-        let BlockRange { block, len } = range;
-        self.pieces.get(block.piece_index).is_some_and(|piece| {
+        self.pieces.get(range.piece_index).is_some_and(|piece| {
             piece.is_complete()
-                && len > 0
-                && len <= BLOCK_SIZE
-                && block
+                && range.len > 0
+                && range.len <= BLOCK_SIZE
+                && range
                     .piece_offset
-                    .checked_add(len)
+                    .checked_add(range.len)
                     .is_some_and(|end| end <= piece.length)
         })
     }

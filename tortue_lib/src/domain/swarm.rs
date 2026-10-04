@@ -11,9 +11,9 @@ use std::{
 
 use rand::seq::IteratorRandom;
 
+use crate::domain::block::BlockRange;
 use block_assignment::BlockAssignments;
 use peer_registry::{PeerRegistry, RejectReason};
-pub use piece_manager::{BlockRange, BlockRef};
 use piece_manager::{CompletedPiece, PieceManager};
 
 use crate::domain::peer::ConnectionDirection;
@@ -236,7 +236,6 @@ impl Swarm {
                 self.status = swarm_status;
                 vec![]
             },
-            //
         }
     }
 
@@ -246,8 +245,28 @@ impl Swarm {
         range: BlockRange,
         data: Vec<u8>,
     ) -> Vec<Output> {
-        //
-        todo!()
+        if !self.status.upload() {
+            return vec![];
+        }
+        if !self.pending_reads.get(&range).is_some_and(|r| r.id == id) {
+            return vec![]; // cancelled
+        }
+        let mut out = vec![];
+        let read = self.pending_reads.remove(&range).expect("checked above");
+        for addr in read.peers {
+            if !self.peer_registry.contains_addr(addr) {
+                continue;
+            }
+            self.uploaded_bytes += data.len() as u64;
+            out.push(Output::SendToPeer {
+                addr,
+                message: Message::Piece {
+                    range,
+                    data: data.clone(),
+                },
+            });
+        }
+        out
     }
 
     fn on_tick(&mut self, tick: Tick) -> Vec<Output> {
@@ -289,7 +308,7 @@ impl Swarm {
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.peer_registry.disconnected(addr);
         self.block_assignments.release_peer(addr);
-        vec![]
+        self.cancel_peer_uploads(addr)
     }
 
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
@@ -352,11 +371,11 @@ impl Swarm {
     fn on_local_piece(&mut self, piece_index: usize, data: Vec<u8>) -> Vec<Output> {
         let blocks: Vec<_> = self.pieces.unreceived_blocks(piece_index).collect();
         for range in blocks {
-            let start = range.block.piece_offset;
+            let start = range.piece_offset;
             let Some(block) = data.get(start..start + range.len) else {
                 break; // Remaining blocks are outside the available local prefix.
             };
-            let _ = self.pieces.receive_block(range.block, block.to_vec());
+            let _ = self.pieces.receive_block(range, block.to_vec());
         }
         vec![]
     }
@@ -368,70 +387,41 @@ impl Swarm {
             Ok(()) => {},
         }
 
-        // Decided once, up front: does this message type ever change what
-        // `plan()` can accomplish? See `Message::affects_scheduling`.
+        // Capture before consuming the message; replan after handling it.
         let should_plan = message.affects_scheduling();
 
         let mut outputs = match message {
-            // Availability-only: recorded by `peer_registry.apply` above,
-            // scheduled at the next tick rather than replanning right away.
-            Message::Bitfield(_) | Message::Have(_) | Message::HaveAll => {
-                self.declare_interest(addr)
-            },
-            Message::HaveNone => vec![],
-            Message::Unchoke => vec![],
+            Message::Bitfield(_)
+            | Message::Have(_)
+            | Message::HaveAll
+            | Message::SuggestPiece(_)
+            | Message::AllowedFast(_) => self.declare_interest(addr),
             Message::Choke => {
                 self.block_assignments.release_peer(addr);
                 vec![]
             },
-            Message::Piece {
-                piece_index,
-                piece_offset,
-                data,
-            } => {
-                let block_ref = BlockRef {
-                    piece_index,
-                    piece_offset,
-                };
-                self.on_message_piece(addr, block_ref, data)
-            },
+            Message::Piece { range, data } => self.on_message_piece(addr, range, data),
             Message::Interested => vec![Output::SendToPeer {
                 addr,
                 message: Message::Unchoke,
             }],
-            Message::NotInterested => vec![],
-            Message::Request {
-                piece_index,
-                piece_offset,
-                piece_len,
-            } => self.on_message_request(piece_index, piece_offset, piece_len, addr),
-            Message::Cancel { .. } => vec![],
-            Message::KeepAlive => vec![],
-            Message::Unimplemented => vec![],
-
-            // BEP 10
-            Message::ExtensionHandshake(_) => vec![],
+            Message::Request(range) => self.on_message_request(addr, range),
             Message::Extension { ext_id, payload } => {
                 self.on_extension_message(addr, ext_id, &payload)
             },
 
-            // BEP 6
-            Message::SuggestPiece(_) => self.declare_interest(addr),
-            Message::RejectRequest {
-                piece_index,
-                piece_offset,
-                ..
-            } => {
-                let block_ref = BlockRef {
-                    piece_index,
-                    piece_offset,
-                };
-                self.block_assignments.unassign(block_ref, addr);
-                // self.pieces.reset_block(block_ref);
-                // self.schedule_requests();
+            Message::RejectRequest(range) => {
+                self.block_assignments.unassign(range, addr);
                 vec![]
             },
-            Message::AllowedFast(_) => self.declare_interest(addr),
+            Message::Cancel(range) => self.cancel_upload(addr, range),
+            // Already handled by the registry, or no swarm action yet.
+            Message::HaveNone
+            | Message::Unchoke
+            | Message::NotInterested
+            | Message::KeepAlive
+            | Message::Unimplemented
+            | Message::ExtensionHandshake(_) => vec![],
         };
 
         if should_plan {
@@ -440,8 +430,7 @@ impl Swarm {
         outputs
     }
 
-    /// Tell the peer we're interested, but only the first time — a no-op
-    /// once `am_interested` is already set.
+    /// Repeat interest; a previous output may not have reached the peer.
     fn declare_interest(&mut self, addr: SocketAddr) -> Vec<Output> {
         match self.peer_registry.declare_interest(addr) {
             Some(message) => vec![Output::SendToPeer { addr, message }],
@@ -449,23 +438,37 @@ impl Swarm {
         }
     }
 
-    fn on_message_request(
-        &mut self,
-        piece_index: usize,
-        piece_offset: usize,
-        piece_len: usize,
-        addr: SocketAddr,
-    ) -> Vec<Output> {
+    fn cancel_upload(&mut self, addr: SocketAddr, range: BlockRange) -> Vec<Output> {
+        let Some(read) = self.pending_reads.get_mut(&range) else {
+            return vec![];
+        };
+        read.peers.remove(&addr);
+        if !read.peers.is_empty() {
+            return vec![];
+        }
+        let id = read.id;
+        self.pending_reads.remove(&range);
+        vec![Output::CancelUploadRead(id)]
+    }
+
+    fn cancel_peer_uploads(&mut self, addr: SocketAddr) -> Vec<Output> {
+        let mut out = vec![];
+        self.pending_reads.retain(|_, read| {
+            read.peers.remove(&addr);
+            if read.peers.is_empty() {
+                out.push(Output::CancelUploadRead(read.id));
+                false
+            } else {
+                true
+            }
+        });
+        out
+    }
+
+    fn on_message_request(&mut self, addr: SocketAddr, range: BlockRange) -> Vec<Output> {
         if !self.status.upload() {
             return vec![];
         }
-        let range = BlockRange {
-            block: BlockRef {
-                piece_index,
-                piece_offset,
-            },
-            len: piece_len,
-        };
         if !self.pieces.valid_upload_range(range) {
             return vec![]; // requested data not available
         }
@@ -501,20 +504,20 @@ impl Swarm {
     fn on_message_piece(
         &mut self,
         addr: SocketAddr,
-        block_ref: BlockRef,
+        range: BlockRange,
         data: Vec<u8>,
     ) -> Vec<Output> {
         // Only a peer we actually requested this block from may fulfil it —
         // otherwise any connected peer could complete blocks assigned to
         // others. Not time-bounded, so a slow-but-legitimate reply is still
         // accepted; `receive_block` below no-ops if we no longer need it.
-        if !self.block_assignments.is_holder(block_ref, addr) {
+        if !self.block_assignments.is_holder(range, addr) {
             return vec![];
         }
-        self.block_assignments.unassign(block_ref, addr);
+        self.block_assignments.unassign(range, addr);
 
         let len = data.len();
-        let Ok(completed) = self.pieces.receive_block(block_ref, data) else {
+        let Ok(completed) = self.pieces.receive_block(range, data) else {
             return vec![]; // Malformed block: already unassigned, gets replanned.
         };
         self.downloaded_bytes += len as u64;
@@ -645,20 +648,20 @@ impl Swarm {
                     if budget == 0 {
                         break;
                     }
-                    let holders_count = holders.get(&block.block).copied().unwrap_or(0);
+                    let holders_count = holders.get(&block).copied().unwrap_or(0);
                     // Only blocks at exactly this depth: every block gets its
                     // first holder before any block gets a second.
                     if holders_count != replication {
                         continue;
                     }
-                    let Some(addr) = self.pick_peer(block.block, &mut rng) else {
+                    let Some(addr) = self.pick_peer(block, &mut rng) else {
                         continue;
                     };
 
                     budget -= 1;
                     progressed = true;
-                    *holders.entry(block.block).or_insert(0) += 1;
-                    outputs.push(self.send_request(addr, block));
+                    *holders.entry(block).or_insert(0) += 1;
+                    outputs.extend(self.send_request(addr, block));
                 }
             }
         }
@@ -674,27 +677,25 @@ impl Swarm {
             .sum()
     }
 
-    fn pick_peer(&self, block_ref: BlockRef, rng: &mut impl rand::Rng) -> Option<SocketAddr> {
+    fn pick_peer(&self, range: BlockRange, rng: &mut impl rand::Rng) -> Option<SocketAddr> {
         self.peer_registry
-            .peers_with(block_ref.piece_index)
+            .peers_with(range.piece_index)
             .filter(|&addr| {
-                self.peer_registry.can_serve(addr, block_ref.piece_index)
+                self.peer_registry.can_serve(addr, range.piece_index)
                     && self.block_assignments.free_slots_for(addr) > 0
-                    && !self.block_assignments.is_holder(block_ref, addr)
+                    && !self.block_assignments.is_holder(range, addr)
             })
             .choose(rng)
     }
 
-    fn send_request(&mut self, addr: SocketAddr, block: BlockRange) -> Output {
-        self.block_assignments.assign(block.block, addr);
-        Output::SendToPeer {
+    fn send_request(&mut self, addr: SocketAddr, block: BlockRange) -> Vec<Output> {
+        let mut outputs = self.declare_interest(addr);
+        self.block_assignments.assign(block, addr);
+        outputs.push(Output::SendToPeer {
             addr,
-            message: Message::Request {
-                piece_index: block.block.piece_index,
-                piece_offset: block.block.piece_offset,
-                piece_len: block.len,
-            },
-        }
+            message: Message::Request(block),
+        });
+        outputs
     }
 
     fn prefered_direction(&self, peer_id: PeerId) -> ConnectionDirection {
