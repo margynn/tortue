@@ -81,6 +81,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     const BLOCK_TICK_INTERVAL: Duration = Duration::from_secs(10);
     const PEX_TICK_INTERVAL: Duration = Duration::from_secs(60);
     const RATE_TICK_INTERVAL: Duration = Duration::from_secs(2);
+    const PEER_SEND_TIMEOUT: Duration = Duration::from_secs(20);
 
     pub fn new(
         client_id: PeerId,
@@ -238,48 +239,74 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     }
 
     async fn handle_output(&mut self, out: Output) -> Result<()> {
-        match out {
-            Output::ConnectPeer(addr) => {
-                self.spawn_peer(addr);
-            },
-            Output::DisconnectPeer(addr) => {
-                self.peer_cmds.remove(&addr);
-                self.peer_connector.disconnect(addr);
-            },
-            Output::SendToPeer { addr, message } => {
-                if let Some(tx) = self.peer_cmds.get(&addr) {
-                    let _ = tx.try_send(message);
-                }
-            },
-            Output::Completed => {
-                self.piece_store.flush().await?;
-            },
-            Output::WritePiece { range, data } => {
-                self.piece_store.write(range, data).await?;
-            },
-            Output::Broadcast(message) => {
-                for tx in self.peer_cmds.values() {
-                    let _ = tx.try_send(message.clone());
-                }
-            },
-            Output::ReadForUpload { id, range } => {
-                let read = self.piece_store.read(range);
-                let handle = self.reads.spawn(async move {
-                    UploadReadResult {
-                        id,
-                        range,
-                        result: read.await,
+        let mut outputs = vec![out];
+        while let Some(out) = outputs.pop() {
+            match out {
+                Output::ConnectPeer(addr) => {
+                    self.spawn_peer(addr);
+                },
+                Output::DisconnectPeer(addr) => {
+                    self.peer_cmds.remove(&addr);
+                    self.peer_connector.disconnect(addr);
+                    outputs.extend(
+                        self.swarm
+                            .step(Input::PeerDisconnected(addr))
+                            .into_iter()
+                            .rev(),
+                    );
+                },
+                Output::SendToPeer { addr, message } => {
+                    if !self.send_to_peer(addr, message).await {
+                        outputs.push(Output::DisconnectPeer(addr));
                     }
-                });
-                self.read_handles.insert(id, handle);
-            },
-            Output::CancelUploadRead(id) => {
-                if let Some(handle) = self.read_handles.remove(&id) {
-                    handle.abort();
-                }
-            },
+                },
+                Output::Completed => {
+                    self.piece_store.flush().await?;
+                },
+                Output::WritePiece { range, data } => {
+                    self.piece_store.write(range, data).await?;
+                },
+                Output::Broadcast(message) => {
+                    for &addr in self.peer_cmds.keys() {
+                        if !self.send_to_peer(addr, message.clone()).await {
+                            outputs.push(Output::DisconnectPeer(addr));
+                        }
+                    }
+                },
+                Output::ReadForUpload { id, range } => {
+                    let read = self.piece_store.read(range);
+                    let handle = self.reads.spawn(async move {
+                        UploadReadResult {
+                            id,
+                            range,
+                            result: read.await,
+                        }
+                    });
+                    self.read_handles.insert(id, handle);
+                },
+                Output::CancelUploadRead(id) => {
+                    if let Some(handle) = self.read_handles.remove(&id) {
+                        handle.abort();
+                    }
+                },
+            }
         }
         Ok(())
+    }
+
+    async fn send_to_peer(&self, addr: SocketAddr, message: Message) -> bool {
+        let Some(tx) = self.peer_cmds.get(&addr) else {
+            return false;
+        };
+        if matches!(
+            time::timeout(Self::PEER_SEND_TIMEOUT, tx.send(message)).await,
+            Ok(Ok(()))
+        ) {
+            true
+        } else {
+            tracing::warn!(%addr, "peer command queue closed or timed out; disconnecting");
+            false
+        }
     }
 
     fn spawn_peer(&mut self, addr: SocketAddr) {

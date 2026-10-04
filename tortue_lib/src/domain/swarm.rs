@@ -234,7 +234,14 @@ impl Swarm {
         match cmd {
             SwarmCommand::SetStatus(swarm_status) => {
                 self.status = swarm_status;
-                vec![]
+                if self.status.upload() {
+                    vec![]
+                } else {
+                    self.pending_reads
+                        .drain()
+                        .map(|(_, read)| Output::CancelUploadRead(read.id))
+                        .collect()
+                }
             },
         }
     }
@@ -245,14 +252,14 @@ impl Swarm {
         range: BlockRange,
         data: Vec<u8>,
     ) -> Vec<Output> {
-        if !self.status.upload() {
-            return vec![];
-        }
         if !self.pending_reads.get(&range).is_some_and(|r| r.id == id) {
             return vec![]; // cancelled
         }
-        let mut out = vec![];
         let read = self.pending_reads.remove(&range).expect("checked above");
+        if !self.status.upload() {
+            return vec![];
+        }
+        let mut out = vec![];
         for addr in read.peers {
             if !self.peer_registry.contains_addr(addr) {
                 continue;
@@ -345,8 +352,7 @@ impl Swarm {
             if direction == old_direction || direction != self.prefered_direction(id) {
                 return vec![Output::DisconnectPeer(addr)];
             }
-
-            self.on_disconnected(old_addr);
+            out.extend(self.on_disconnected(old_addr));
             out.push(Output::DisconnectPeer(old_addr));
         }
 
