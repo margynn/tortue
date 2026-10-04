@@ -1,8 +1,11 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::SeekFrom,
+    path::{Component, Path, PathBuf},
+};
 
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
 };
 
@@ -42,7 +45,7 @@ enum DiskCommand {
     Read {
         offset: u64,
         len: usize,
-        reply: oneshot::Sender<Vec<u8>>,
+        reply: oneshot::Sender<std::io::Result<Vec<u8>>>,
     },
 }
 
@@ -62,11 +65,11 @@ impl PieceStore for DiskStorage {
                 len,
                 reply: reply_tx,
             })
-            .map_err(|_| std::io::Error::other("reader task closed"));
+            .map_err(|_| std::io::Error::other("reader task closed"))?;
 
         reply_rx
             .await
-            .map_err(|_| std::io::Error::other("storage reply dropped"))
+            .map_err(|_| std::io::Error::other("storage reply dropped"))?
     }
 }
 
@@ -86,7 +89,10 @@ impl DiskStorage {
                         tracing::error!(error = %e, "disk write failed");
                     }
                 },
-                DiskCommand::Read { offset, len, reply } => todo!(),
+                DiskCommand::Read { offset, len, reply } => {
+                    let result = Self::read_from_files(&mut files, offset, len).await;
+                    let _ = reply.send(result);
+                },
             }
         }
     }
@@ -103,14 +109,59 @@ impl DiskStorage {
             let write_end = write_end.min(file_end);
             let buffer_start = (write_start - offset) as usize;
             let len = (write_end - write_start) as usize;
-            file.file
-                .seek(std::io::SeekFrom::Start(write_start - file_start))
-                .await?;
-            file.file
-                .write_all(&data[buffer_start..buffer_start + len])
-                .await?;
+            Self::write_at(
+                &mut file.file,
+                write_start - file_start,
+                &data[buffer_start..buffer_start + len],
+            )
+            .await?;
         }
         Ok(())
+    }
+
+    async fn read_from_files(
+        files: &mut [OutputFile],
+        offset: u64,
+        len: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let read_end = offset
+            .checked_add(len as u64)
+            .ok_or_else(|| std::io::Error::other("read range overflow"))?;
+        let mut buffer = Vec::with_capacity(len);
+        for file in files {
+            let file_end = file
+                .offset
+                .checked_add(file.length)
+                .ok_or_else(|| std::io::Error::other("file range overflow"))?;
+            let start = offset.max(file.offset);
+            let end = read_end.min(file_end);
+            if start >= end {
+                continue;
+            }
+            let expected = (end - start) as usize;
+            let read =
+                Self::read_from(&mut file.file, start - file.offset, expected, &mut buffer).await?;
+            if read != expected {
+                break;
+            }
+        }
+        Ok(buffer)
+    }
+
+    async fn write_at(file: &mut File, offset: u64, data: &[u8]) -> Result<()> {
+        file.seek(SeekFrom::Start(offset)).await?;
+        file.write_all(data).await?;
+        Ok(())
+    }
+
+    async fn read_from(
+        file: &mut File,
+        offset: u64,
+        len: usize,
+        buffer: &mut Vec<u8>,
+    ) -> std::io::Result<usize> {
+        file.seek(SeekFrom::Start(offset)).await?;
+        file.take(len as u64).read_to_end(buffer).await
     }
 
     /// Opens or creates the torrent files and records their offsets.
