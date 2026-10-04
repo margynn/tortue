@@ -76,7 +76,13 @@ impl PieceManager {
             } else {
                 metainfo.piece_length
             };
-            pieces.push(Piece::new(piece_length));
+            pieces.push(Piece::new(
+                *metainfo
+                    .pieces
+                    .get(i)
+                    .expect("piece index within metainfo bounds"),
+                piece_length,
+            ));
         }
 
         Self {
@@ -130,46 +136,24 @@ impl PieceManager {
     }
 
     pub(super) fn is_partial(&self, piece_index: usize) -> bool {
-        self.pieces
-            .get(piece_index)
-            .is_some_and(|piece| piece.received > 0 && !piece.is_complete())
+        self.pieces.get(piece_index).is_some_and(Piece::is_partial)
     }
 
     pub(super) fn has_no_piece(&self) -> bool {
         self.pieces.iter().all(|p| !p.is_complete())
     }
 
-    pub(super) fn read_block(
-        &mut self,
-        piece_index: usize,
-        piece_offset: usize,
-        piece_len: usize,
-    ) -> Option<Vec<u8>> {
-        if piece_len > BLOCK_SIZE {
-            return None;
-        }
-        // ! We should not share / communicate blocks that are not validated.
-        // Only when the piece is complete and its hash validated we can
-        // distribute blocks - otherwise there is a risk of global degradation
-        // and distributed corrupted blocks.
-        let piece = self.pieces.get(piece_index)?;
-        if piece.is_complete() {
-            return piece.read(piece_offset, piece_len);
-        }
-        None
-    }
-
     pub(super) fn blocks_total(&self) -> usize {
-        self.pieces.iter().map(|p| p.blocks.len()).sum()
+        self.pieces.iter().map(Piece::blocks_total).sum()
     }
 
     pub(super) fn blocks_received(&self) -> usize {
-        self.pieces.iter().map(|p| p.received).sum()
+        self.pieces.iter().map(Piece::blocks_received).sum()
     }
 
-    /// `Ok(None)` covers both "block received, piece still incomplete" and
-    /// "piece completed but failed its hash" (reset internally either way) —
-    /// nothing downstream distinguishes them today.
+    /// Returns a completed, hash-verified piece ready for storage.
+    /// `Ok(None)` means a duplicate, an incomplete piece, or a hash mismatch.
+    /// Only a hash mismatch resets the piece.
     pub(super) fn receive_block(
         &mut self,
         block_ref: BlockRef,
@@ -180,23 +164,10 @@ impl PieceManager {
             .pieces
             .get_mut(piece_index)
             .ok_or(Error::InvalidPieceIndex(piece_index))?;
-
-        // A duplicate must not re-emit a completion: that would
-        // write the piece and broadcast `Have` twice.
         let block_index = block_ref.block_index()?;
-        if !p.receive_block(block_index, data)? || !p.is_complete() {
+        let Some(buffer) = p.receive_block(block_index, data)? else {
             return Ok(None);
-        }
-
-        let buffer = p.buffer().expect("piece is complete");
-        let expected_hash = self.metainfo.pieces[piece_index];
-
-        if !verify_piece_hash(expected_hash, &buffer) {
-            p.reset();
-            self.bitfield.unset_bit(piece_index)?;
-            return Ok(None);
-        }
-
+        };
         let torrent_offset = piece_index as u64 * self.metainfo.piece_length as u64;
         self.bitfield.set_bit(piece_index)?;
         Ok(Some(CompletedPiece {
@@ -213,9 +184,20 @@ fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
 }
 
 struct Piece {
-    blocks: Vec<BlockState>,
-    length: usize,   // size in byte
-    received: usize, // received blocks
+    length: usize,
+    expected_hash: [u8; 20],
+    state: PieceState,
+}
+
+// We do not store completed pieces in memory in order to save memory usage.
+// Instead completed pieces data live on PieceStore and accessed via IO and managed
+// by the Swarm / SwarmIO directly.
+enum PieceState {
+    Partial {
+        blocks: Box<[BlockState]>,
+        received: usize,
+    },
+    Complete,
 }
 
 #[derive(Clone)]
@@ -225,24 +207,36 @@ enum BlockState {
 }
 
 impl Piece {
-    fn new(piece_length: usize) -> Self {
+    fn new(expected_hash: [u8; 20], piece_length: usize) -> Self {
         let num_blocks = piece_length.div_ceil(BLOCK_SIZE);
+        let blocks = vec![BlockState::Missing; num_blocks].into_boxed_slice();
         Self {
-            blocks: vec![BlockState::Missing; num_blocks],
             length: piece_length,
-            received: 0,
+            expected_hash,
+            state: PieceState::Partial {
+                blocks,
+                received: 0,
+            },
         }
     }
 
     fn unreceived_blocks(&self) -> impl Iterator<Item = usize> + '_ {
-        self.blocks
+        let blocks: &[BlockState] = match &self.state {
+            PieceState::Partial { blocks, .. } => blocks,
+            PieceState::Complete => &[],
+        };
+        blocks
             .iter()
             .enumerate()
             .filter_map(|(index, state)| matches!(state, BlockState::Missing).then_some(index))
     }
 
-    /// `false` when the block was already received, i.e. nothing changed.
-    fn receive_block(&mut self, block_index: usize, data: Vec<u8>) -> Result<bool> {
+    /// Returns the verified piece buffer on completion.
+    /// Returns None for duplicates, incomplete pieces, or hash mismatch.
+    fn receive_block(&mut self, block_index: usize, data: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        if matches!(&self.state, PieceState::Complete) {
+            return Ok(None);
+        }
         let expected_length = self.block_length(block_index)?;
         if data.len() != expected_length {
             return Err(Error::InvalidBlockSize {
@@ -250,63 +244,89 @@ impl Piece {
                 actual: data.len(),
             });
         }
-        if matches!(self.blocks[block_index], BlockState::Received(_)) {
-            return Ok(false);
+        let PieceState::Partial { blocks, received } = &mut self.state else {
+            unreachable!("complete piece handled above");
+        };
+        if matches!(blocks[block_index], BlockState::Received(_)) {
+            return Ok(None);
         }
-        self.blocks[block_index] = BlockState::Received(data);
-        self.received += 1;
-        Ok(true)
+        blocks[block_index] = BlockState::Received(data);
+        *received += 1;
+        let Some(buffer) = self.buffer() else {
+            return Ok(None);
+        };
+        if !verify_piece_hash(self.expected_hash, &buffer) {
+            self.reset();
+            return Ok(None);
+        }
+        self.state = PieceState::Complete;
+        Ok(Some(buffer))
     }
 
     fn block_length(&self, block_index: usize) -> Result<usize> {
-        if block_index >= self.blocks.len() {
-            return Err(Error::InvalidBlockIndex(block_index));
+        match &self.state {
+            PieceState::Complete => Ok(0),
+            PieceState::Partial { blocks, .. } => {
+                if block_index >= blocks.len() {
+                    return Err(Error::InvalidBlockIndex(block_index));
+                }
+                let offset = block_index * BLOCK_SIZE;
+                Ok((self.length - offset).min(BLOCK_SIZE))
+            },
         }
-        let offset = block_index * BLOCK_SIZE;
-        Ok((self.length - offset).min(BLOCK_SIZE))
+    }
+
+    fn blocks_total(&self) -> usize {
+        self.length.div_ceil(BLOCK_SIZE)
+    }
+
+    fn blocks_received(&self) -> usize {
+        match &self.state {
+            PieceState::Partial { received, .. } => *received,
+            PieceState::Complete => self.blocks_total(),
+        }
     }
 
     fn is_complete(&self) -> bool {
-        self.received == self.blocks.len()
+        match self.state {
+            PieceState::Partial { .. } => false,
+            PieceState::Complete => true,
+        }
+    }
+
+    fn is_partial(&self) -> bool {
+        match self.state {
+            PieceState::Partial { received, .. } => received > 0,
+            PieceState::Complete => false,
+        }
     }
 
     fn buffer(&self) -> Option<Vec<u8>> {
-        if !self.is_complete() {
+        let PieceState::Partial { blocks, received } = &self.state else {
+            return None;
+        };
+        if *received != blocks.len() {
             return None;
         }
         let mut buffer = Vec::with_capacity(self.length);
-        for block in &self.blocks {
+        for block in blocks {
             let BlockState::Received(data) = block else {
-                unreachable!("complete piece contains a non-received block");
+                unreachable!("all blocks received but a block is missing");
             };
             buffer.extend_from_slice(data);
         }
         Some(buffer)
     }
 
-    fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        if offset.checked_add(len)? > self.length {
-            return None;
-        }
-        let mut out = Vec::with_capacity(len);
-        let mut pos = offset;
-        while out.len() < len {
-            let block_index = pos / BLOCK_SIZE;
-            let within_block = pos % BLOCK_SIZE;
-            let BlockState::Received(buffer) = self.blocks.get(block_index)? else {
-                return None;
-            };
-            let take = (len - out.len()).min(buffer.len() - within_block);
-            out.extend_from_slice(&buffer[within_block..within_block + take]);
-            pos += take;
-        }
-        Some(out)
-    }
-
     fn reset(&mut self) {
-        for block in &mut self.blocks {
-            *block = BlockState::Missing;
+        match &mut self.state {
+            PieceState::Complete => {},
+            PieceState::Partial { blocks, received } => {
+                for block in blocks {
+                    *block = BlockState::Missing;
+                }
+                *received = 0;
+            },
         }
-        self.received = 0;
     }
 }
