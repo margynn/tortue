@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use tokio::{
     fs::{File, OpenOptions},
@@ -11,7 +11,18 @@ use crate::{
     domain::torrent::{Metainfo, Mode},
 };
 
-type Result<T> = std::io::Result<T>;
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("path traversal")]
+    PathTraversal,
+
+    #[error("invalid file size")]
+    InvalidFileSize,
+}
+type Result<T> = std::result::Result<T, Error>;
 
 struct OutputFile {
     file: File,
@@ -72,24 +83,23 @@ impl DiskStorage {
         Ok(())
     }
 
+    /// Creates the torrent files on disk with appropriate allocation
+    /// Performs multiple checks to prevent attacks:
+    /// - requesting too much disk space
+    /// - overwritting unrelated files
+    /// - using relative path and ../
     async fn create_files(metainfo: &Metainfo, root: PathBuf) -> Result<Vec<OutputFile>> {
         let mut files = Vec::new();
         let mut offset = 0u64;
-        let base = root.join(&metainfo.name);
+        let base = Self::build_path(&root, &Path::new(&metainfo.name))?;
+
+        if let Some(parent) = base.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
         match &metainfo.mode {
             Mode::Single { length } => {
-                if let Some(parent) = base.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                let file = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .read(true)
-                    .write(true)
-                    .open(&base)
-                    .await?;
-                file.set_len(*length).await?;
+                let file = Self::open_file(base, *length).await?;
                 files.push(OutputFile {
                     file,
                     length: *length,
@@ -98,20 +108,12 @@ impl DiskStorage {
             },
 
             Mode::Multiple { files: meta_files } => {
-                tokio::fs::create_dir_all(&base).await?;
                 for f in meta_files {
-                    let file_path = base.join(PathBuf::from_iter(&f.path));
+                    let file_path = Self::build_path(&base, &PathBuf::from_iter(&f.path))?;
                     if let Some(parent) = file_path.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    let file = OpenOptions::new()
-                        .create(true)
-                        .truncate(true)
-                        .read(true)
-                        .write(true)
-                        .open(&file_path)
-                        .await?;
-                    file.set_len(f.length).await?;
+                    let file = Self::open_file(file_path, f.length).await?;
                     files.push(OutputFile {
                         file,
                         length: f.length,
@@ -123,5 +125,28 @@ impl DiskStorage {
         }
 
         Ok(files)
+    }
+
+    async fn open_file(file_path: PathBuf, length: u64) -> Result<File> {
+        if let Ok(metadata) = tokio::fs::metadata(&file_path).await {
+            if metadata.len() != length {
+                return Err(Error::InvalidFileSize);
+            }
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&file_path)
+            .await?;
+        file.set_len(length).await?;
+        Ok(file)
+    }
+
+    fn build_path(root_path: &Path, path: &Path) -> Result<PathBuf> {
+        if path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+            return Err(Error::PathTraversal);
+        }
+        Ok(root_path.join(path))
     }
 }

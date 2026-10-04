@@ -49,6 +49,7 @@ pub struct File {
 
 impl Metainfo {
     const METADATA_PIECE_SIZE: usize = 16_384; // 16KB
+    const MAX_TORRENT_SIZE: u64 = 42949672960; // 40GB
 
     /// content size in bytes of the torrent content
     pub fn total_size(&self) -> u64 {
@@ -69,6 +70,19 @@ impl Metainfo {
             .unwrap_or_default()
             .to_vec()
     }
+
+    fn validate(&self) -> Result<()> {
+        // Last piece can be smaller than piece_length
+        let max_expected_size = self.piece_length * self.pieces.len();
+        let total_size = self.total_size();
+        if max_expected_size as u64 <= total_size {
+            return Err(Error::InvalidMetainfoSize);
+        }
+        if total_size > Self::MAX_TORRENT_SIZE {
+            return Err(Error::TorrentTooLarge);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +101,12 @@ pub enum Error {
 
     #[error("pieces data length is not a multiple of {PIECE_HASH_LEN}")]
     InvalidPiecesLength,
+
+    #[error("metainfo size non coherent")]
+    InvalidMetainfoSize,
+
+    #[error("torrent too large")]
+    TorrentTooLarge,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -101,7 +121,7 @@ impl TryFrom<&[u8]> for Metainfo {
         let (hash, info_bytes) = info_hash(info)?;
         let (name, piece_length, pieces, mode) = parse_info(info)?;
 
-        Ok(Metainfo {
+        let metainfo = Metainfo {
             announce,
             name,
             info_hash: hash,
@@ -113,7 +133,9 @@ impl TryFrom<&[u8]> for Metainfo {
             created_by: root.get_utf8(b"created by").ok(),
             created_at: root.get_int(b"creation date").ok(),
             url_list: parse_url_list(&root),
-        })
+        };
+        metainfo.validate()?;
+        Ok(metainfo)
     }
 }
 
@@ -127,6 +149,9 @@ impl TryFrom<&Bencode<'_>> for File {
             .iter()
             .map(|c| bytes_to_str(c).ok_or(Error::InvalidUtf8))
             .collect::<Result<Vec<_>>>()?;
+        if path.len() as u64 != length {
+            return Err(Error::InvalidMetainfoSize);
+        }
         Ok(File { length, path })
     }
 }

@@ -1,3 +1,4 @@
+use crate::adapters::disk_storage::{self};
 use crate::adapters::metadata_io::Error as MetadataError;
 use crate::domain::magnet::Error as MagnetError;
 
@@ -5,6 +6,9 @@ use crate::domain::magnet::Error as MagnetError;
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("invalid disk storage: {0}")]
+    DiskStorage(#[from] disk_storage::Error),
 
     #[error("invalid torrent file: {0}")]
     InvalidTorrentFile(String),
