@@ -214,8 +214,8 @@ fn verify_piece_hash(expected: [u8; 20], buffer: &[u8]) -> bool {
 
 struct Piece {
     blocks: Vec<BlockState>,
-    length: usize,
-    received: usize,
+    length: usize,   // size in byte
+    received: usize, // received blocks
 }
 
 #[derive(Clone)]
