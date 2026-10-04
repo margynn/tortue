@@ -74,7 +74,7 @@ struct PeerSample {
 struct UploadReadResult {
     id: UploadReadId,
     range: BlockRange,
-    res: std::io::Result<Vec<u8>>,
+    result: std::io::Result<Vec<u8>>,
 }
 
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
@@ -109,7 +109,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             progress_tx,
             stats,
             rate_sample: RateSample::default(),
-            reads: todo!(),
+            reads: JoinSet::new(),
             read_handles: HashMap::new(),
         }
     }
@@ -137,7 +137,14 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
     pub async fn run(&mut self) -> Result<()> {
         self.restore().await?;
+        let result = self.run_loop().await;
+        self.reads.abort_all();
+        while self.reads.join_next().await.is_some() {}
+        self.read_handles.clear();
+        result
+    }
 
+    async fn run_loop(&mut self) -> Result<()> {
         let mut block_tick = time::interval(Self::BLOCK_TICK_INTERVAL);
         let mut pex_tick = time::interval(Self::PEX_TICK_INTERVAL);
         let mut inbound_open = true;
@@ -222,8 +229,6 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             },
             Output::Completed => {
                 self.piece_store.flush().await?;
-                info!("download completed");
-                // todo: hook
             },
             Output::WritePiece { range, data } => {
                 self.piece_store.write(range, data).await?;
@@ -235,10 +240,20 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             },
             Output::ReadForUpload { id, range } => {
                 let read = self.piece_store.read(range);
-                let handle = self.reads.spawn(async move { (id, range, read.await) });
+                let handle = self.reads.spawn(async move {
+                    UploadReadResult {
+                        id,
+                        range,
+                        result: read.await,
+                    }
+                });
                 self.read_handles.insert(id, handle);
             },
-            Output::CancelUploadRead(upload_read_id) => todo!(),
+            Output::CancelUploadRead(id) => {
+                if let Some(handle) = self.read_handles.remove(&id) {
+                    handle.abort();
+                }
+            },
         }
         Ok(())
     }

@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     io::SeekFrom,
     path::{Component, Path, PathBuf},
 };
@@ -83,22 +84,28 @@ impl PieceStore for DiskStorage {
             .map_err(|_| std::io::Error::other("storage reply dropped"))?
     }
 
-    async fn read(&mut self, range: BlockRange) -> std::io::Result<Vec<u8>> {
-        let offset = self.storage_offset(range)?;
-        let (reply_tx, reply_rx) = oneshot::channel();
+    fn read(
+        &mut self,
+        range: BlockRange,
+    ) -> impl Future<Output = std::io::Result<Vec<u8>>> + Send + 'static {
+        // Own the sender so the future does not borrow this storage handle.
+        let tx = self.cmd_tx.clone();
+        let offset = self.storage_offset(range);
 
-        self.cmd_tx
-            .send(DiskCommand::Read {
+        async move {
+            let offset = offset?;
+            let (reply, rx) = oneshot::channel();
+            tx.send(DiskCommand::Read {
                 offset,
                 len: range.len,
-                reply: reply_tx,
+                reply,
             })
             .await
             .map_err(|_| std::io::Error::other("reader task closed"))?;
 
-        reply_rx
-            .await
-            .map_err(|_| std::io::Error::other("storage reply dropped"))?
+            rx.await
+                .map_err(|_| std::io::Error::other("storage reply dropped"))?
+        }
     }
 }
 
@@ -129,9 +136,7 @@ impl DiskStorage {
             .piece_offset
             .checked_add(range.len)
             .ok_or_else(invalid_range)?;
-        if range.piece_index >= self.piece_count
-            || range.len == 0
-            || piece_end > self.piece_length
+        if range.piece_index >= self.piece_count || range.len == 0 || piece_end > self.piece_length
         {
             return Err(invalid_range());
         }
@@ -158,6 +163,9 @@ impl DiskStorage {
                     }
                 },
                 DiskCommand::Read { offset, len, reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
                     let result = Self::read_from_files(&mut files, offset, len).await;
                     let _ = reply.send(result);
                 },

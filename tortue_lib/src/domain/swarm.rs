@@ -521,8 +521,7 @@ impl Swarm {
             return vec![]; // Malformed block: already unassigned, gets replanned.
         };
         self.downloaded_bytes += len as u64;
-        let Some(CompletedPiece { range, data }) = completed
-        else {
+        let Some(CompletedPiece { range, data }) = completed else {
             return vec![];
         };
 
