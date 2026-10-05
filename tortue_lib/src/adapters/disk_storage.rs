@@ -344,6 +344,78 @@ impl DiskStorage {
         if path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
             return Err(Error::PathTraversal);
         }
+        // Prevent writing on symlink completly
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::PathTraversal);
+        }
         Ok(root_path.join(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_path_joins_relative_paths() {
+        let root = Path::new("downloads");
+        for (path, expected) in [
+            ("file.bin", "downloads/file.bin"),
+            ("dir/file.bin", "downloads/dir/file.bin"),
+            ("dir/./file.bin", "downloads/dir/file.bin"),
+            ("..hidden/file.bin", "downloads/..hidden/file.bin"),
+            ("été/fichier.bin", "downloads/été/fichier.bin"),
+            ("", "downloads"),
+            (".", "downloads"),
+        ] {
+            assert_eq!(
+                DiskStorage::build_path(root, Path::new(path)).unwrap(),
+                PathBuf::from(expected),
+                "path: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_path_rejects_parent_directory_components() {
+        for path in [
+            "..",
+            "../file.bin",
+            "dir/../file.bin",
+            "dir/../../file.bin",
+            "./../file.bin",
+        ] {
+            assert!(
+                matches!(
+                    DiskStorage::build_path(Path::new("downloads"), Path::new(path)),
+                    Err(Error::PathTraversal)
+                ),
+                "path: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_path_rejects_absolute_paths() {
+        #[cfg(not(windows))]
+        let paths = ["/file.bin", "/tmp/dir/file.bin"];
+        #[cfg(windows)]
+        let paths = [
+            r"C:\file.bin",
+            r"C:\dir\file.bin",
+            r"\\server\share\file.bin",
+            r"\\?\C:\file.bin",
+        ];
+
+        for path in paths {
+            assert!(
+                matches!(
+                    DiskStorage::build_path(Path::new("downloads"), Path::new(path)),
+                    Err(Error::PathTraversal)
+                ),
+                "path: {path}"
+            );
+        }
     }
 }

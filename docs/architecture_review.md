@@ -1,40 +1,5 @@
 # Revue d’architecture — état courant et points à corriger
 
-## Bilan
-
-Le découpage reste pertinent : le domaine décide via `Swarm::step(Input) -> Vec<Output>`, les adapters exécutent les effets et `SwarmIO` possède l’état du swarm. Aucune réécriture des couches n’est nécessaire.
-
-Depuis la revue initiale, le stockage préserve les fichiers existants, la reprise vérifie leurs pièces, les uploads lisent sur disque et les pièces complètes ne restent plus en RAM. Une barrière `flush()` précède la publication de la complétion réseau. Les envois du swarm ont maintenant un timeout et un chemin de déconnexion. Les sessions TCP partagent leur lecture/écriture sans tâche reader détachée, et le domaine résout les doublons par `PeerId`.
-
-Les risques restants concernent surtout le confinement des chemins, les invariants du metainfo, le contrat magnet, l’arrêt global des tâches et la progression face à un peer qui ne répond pas. Le listener entrant existe mais n’est pas branché au démarrage public.
-
-**Périmètre :** cœur du swarm, stockage, reprise, connexions, trackers, orchestration et consommateur CLI ; pas un audit exhaustif des codecs. Revue du code présent dans le répertoire de travail, pas des fonctionnalités annoncées dans la roadmap.
-
-**Vérification :** `cargo test --manifest-path tortue_lib/Cargo.toml` réussit : **32 tests**, aucun échec, aucun doctest. Ces tests portent sur bencode, bitfield et magnet ; ils ne démontrent pas les garanties des nouveaux chemins disque/swarm/TCP. La compilation émet 12 warnings, dont le listener et le registre inutilisés.
-
-## 1. Chemins et fichiers existants
-
-**Priorité : haute — sécurité et perte de données. Statut : partiellement corrigé.**
-
-**Fichiers :** `adapters/disk_storage.rs`, `domain/torrent.rs` (sous `tortue_lib/src/`).
-
-### Ce qui a changé
-
-- `build_path()` refuse les chemins absolus et les composants `ParentDir` (`..`) sur la plateforme courante.
-- `open_file()` utilise `create_new(true)` pour créer un fichier ; le chemin existant est rouvert sans troncature.
-- Les contrôles de type et de taille utilisent les métadonnées du handle ouvert. Un fichier non régulier ou plus grand que la longueur attendue est refusé.
-- Un fichier plus court est **étendu** avec `set_len(length)`, un fichier de taille attendue est préservé. Le commentaire annonçant uniquement des fichiers existants de longueur exacte ne correspond donc plus au code.
-- `SwarmIO::restore()` relit les pièces locales et les passe au domaine pour validation SHA-1 avant de les considérer disponibles.
-
-### Restant à faire
-
-- [ ] Définir et appliquer le confinement face aux symlinks : les répertoires et fichiers existants sont actuellement suivis. Une cible extérieure peut être étendue ou réécrite.
-- [ ] Valider chaque composant de `name`/`File.path`, pas seulement le chemin assemblé : composants vides, séparateurs incorporés, préfixes propres aux plateformes et collisions entre fichiers.
-- [ ] Valider tous les chemins avant les premières créations pour éviter les effets partiels d’un torrent refusé tardivement.
-- [ ] Documenter la politique de reprise : les pièces locales invalides sont retéléchargées et leurs octets peuvent être remplacés ; préserver au démarrage ne signifie pas interdire tout écrasement ultérieur.
-
-**Vérification minimale :** traversal et symlinks ne permettent aucune modification extérieure ; un fichier trop grand est refusé, un fichier court est étendu sans perdre son préfixe, et seules les pièces locales vérifiées sont annoncées.
-
 ## 2. Écritures disque et complétion
 
 **Priorité : haute — intégrité. Statut : barrière de complétion implémentée, fermeture incomplète.**
