@@ -2,15 +2,26 @@ mod block_assignment;
 mod peer_registry;
 mod piece_manager;
 
-use std::{collections::HashSet, net::SocketAddr, sync::Arc, vec};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    vec,
+};
 
 use rand::seq::IteratorRandom;
 
+use crate::domain::block::BlockRange;
 use block_assignment::BlockAssignments;
 use peer_registry::{PeerRegistry, RejectReason};
-use piece_manager::{BlockRange, BlockRef, CompletedPiece, PieceManager};
+use piece_manager::{CompletedPiece, PieceManager};
 
-use crate::domain::message::{UT_PEX_EXT_ID, UtPexMessage};
+use crate::domain::peer::ConnectionDirection;
+
+use super::{
+    message::{UT_PEX_EXT_ID, UtPexMessage},
+    peer::PeerId,
+};
 
 use super::{
     message::{Message, UT_METADATA_EXT_ID, UtMetadataMessage},
@@ -23,13 +34,24 @@ pub(super) type PieceIndex = usize;
 pub enum Input {
     PeersDiscovered(Vec<SocketAddr>),
     PeerConnected {
+        id: PeerId,
+        direction: ConnectionDirection,
         addr: SocketAddr,
-        peer_extensions: PeerExtensions,
+        extensions: PeerExtensions,
     },
     PeerDisconnected(SocketAddr),
     MessageReceived {
         addr: SocketAddr,
         message: Message,
+    },
+    LocalPiece {
+        piece_index: usize,
+        data: Vec<u8>,
+    },
+    UploadReadCompleted {
+        id: UploadReadId,
+        range: BlockRange,
+        data: Vec<u8>,
     },
     SwarmCommand(SwarmCommand),
     Tick(Tick),
@@ -40,11 +62,21 @@ pub enum Tick {
     Pex,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UploadReadId(pub u64);
+
+struct PendingRead {
+    id: UploadReadId,
+    peers: HashSet<SocketAddr>,
+}
+
 pub enum Output {
     ConnectPeer(SocketAddr),
     DisconnectPeer(SocketAddr),
     SendToPeer { addr: SocketAddr, message: Message },
-    WritePiece { offset: u64, data: Vec<u8> },
+    WritePiece { range: BlockRange, data: Vec<u8> },
+    ReadForUpload { id: UploadReadId, range: BlockRange },
+    CancelUploadRead(UploadReadId),
     Broadcast(Message),
     Completed,
 }
@@ -88,11 +120,19 @@ impl SwarmStatus {
 }
 
 pub struct Swarm {
+    client_id: PeerId,
     metainfo: Arc<Metainfo>,
+
     peer_registry: PeerRegistry,
     block_assignments: BlockAssignments,
     pieces: PieceManager,
+
     status: SwarmStatus,
+    downloaded_bytes: u64,
+    uploaded_bytes: u64,
+
+    pending_reads: HashMap<BlockRange, PendingRead>,
+    next_upload_read_id: u64,
 }
 
 #[derive(Default)]
@@ -102,6 +142,7 @@ pub struct SwarmSnapshot {
     pub blocks_done: usize,
     pub blocks_in_flight: usize,
     pub bytes_total: u64,
+    pub bytes_available: u64,
     pub bytes_downloaded: u64,
     pub bytes_uploaded: u64,
     pub seeders: Vec<SocketAddr>,
@@ -120,14 +161,22 @@ pub struct PeerStats {
 }
 
 impl Swarm {
-    pub fn new(metainfo: Arc<Metainfo>) -> Self {
+    const MAX_PENDING_UPLOADS: usize = 32;
+
+    pub fn new(client_id: PeerId, metainfo: Arc<Metainfo>) -> Self {
         let total_pieces = metainfo.pieces.len();
+        let pieces = PieceManager::new(Arc::clone(&metainfo));
         Self {
-            metainfo: Arc::clone(&metainfo),
+            client_id,
+            metainfo,
             peer_registry: PeerRegistry::new(total_pieces),
             block_assignments: BlockAssignments::new(),
-            pieces: PieceManager::new(Arc::clone(&metainfo)),
+            pieces,
             status: SwarmStatus::Active,
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
+            pending_reads: HashMap::new(),
+            next_upload_read_id: 0,
         }
     }
 
@@ -138,8 +187,9 @@ impl Swarm {
             blocks_done: self.pieces.blocks_received(),
             blocks_in_flight: self.block_assignments.requests_in_flight(),
             bytes_total: self.metainfo.total_size(),
-            bytes_downloaded: self.pieces.downloaded_bytes,
-            bytes_uploaded: self.pieces.uploaded_bytes,
+            bytes_available: self.pieces.available_bytes(),
+            bytes_downloaded: self.downloaded_bytes,
+            bytes_uploaded: self.uploaded_bytes,
             seeders: self.peer_registry.seeders.iter().copied().collect(),
             leechers: self.peer_registry.leechers.iter().copied().collect(),
             peers: self
@@ -158,15 +208,23 @@ impl Swarm {
         }
     }
 
+    // TODO: should return Option<Vec<Output>> because some actions do not return any outputs
+    // and we should save memory
     pub fn step(&mut self, input: Input) -> Vec<Output> {
         match input {
             Input::PeersDiscovered(addrs) => self.on_discovered(addrs),
             Input::PeerConnected {
+                direction,
                 addr,
-                peer_extensions,
-            } => self.on_connected(addr, peer_extensions),
+                id,
+                extensions,
+            } => self.on_connected(addr, direction, id, extensions),
             Input::PeerDisconnected(addr) => self.on_disconnected(addr),
             Input::MessageReceived { addr, message } => self.on_message(addr, message),
+            Input::LocalPiece { piece_index, data } => self.on_local_piece(piece_index, data),
+            Input::UploadReadCompleted { id, range, data } => {
+                self.on_upload_read_completed(id, range, data)
+            },
             Input::SwarmCommand(cmd) => self.on_swarm_command(cmd),
             Input::Tick(tick) => self.on_tick(tick),
         }
@@ -176,10 +234,46 @@ impl Swarm {
         match cmd {
             SwarmCommand::SetStatus(swarm_status) => {
                 self.status = swarm_status;
-                vec![]
+                if self.status.upload() {
+                    vec![]
+                } else {
+                    self.pending_reads
+                        .drain()
+                        .map(|(_, read)| Output::CancelUploadRead(read.id))
+                        .collect()
+                }
             },
-            //
         }
+    }
+
+    fn on_upload_read_completed(
+        &mut self,
+        id: UploadReadId,
+        range: BlockRange,
+        data: Vec<u8>,
+    ) -> Vec<Output> {
+        if !self.pending_reads.get(&range).is_some_and(|r| r.id == id) {
+            return vec![]; // cancelled
+        }
+        let read = self.pending_reads.remove(&range).expect("checked above");
+        if !self.status.upload() {
+            return vec![];
+        }
+        let mut out = vec![];
+        for addr in read.peers {
+            if !self.peer_registry.contains_addr(addr) {
+                continue;
+            }
+            self.uploaded_bytes += data.len() as u64;
+            out.push(Output::SendToPeer {
+                addr,
+                message: Message::Piece {
+                    range,
+                    data: data.clone(),
+                },
+            });
+        }
+        out
     }
 
     fn on_tick(&mut self, tick: Tick) -> Vec<Output> {
@@ -221,7 +315,7 @@ impl Swarm {
     fn on_disconnected(&mut self, addr: SocketAddr) -> Vec<Output> {
         self.peer_registry.disconnected(addr);
         self.block_assignments.release_peer(addr);
-        self.plan()
+        self.cancel_peer_uploads(addr)
     }
 
     fn on_discovered(&mut self, socket_addrs: Vec<SocketAddr>) -> Vec<Output> {
@@ -230,16 +324,41 @@ impl Swarm {
         }
         let mut output = vec![];
         for addr in socket_addrs {
-            if !self.peer_registry.contains(addr) {
+            if !self.peer_registry.contains_addr(addr) {
                 output.push(Output::ConnectPeer(addr));
             }
         }
         output
     }
 
-    fn on_connected(&mut self, addr: SocketAddr, extensions: PeerExtensions) -> Vec<Output> {
+    fn on_connected(
+        &mut self,
+        addr: SocketAddr,
+        direction: ConnectionDirection,
+        id: PeerId,
+        extensions: PeerExtensions,
+    ) -> Vec<Output> {
+        // Duplicate resolution for the same remote PeerId:
+        // | Case                                 | Decision                       |
+        // |--------------------------------------|--------------------------------|
+        // | No existing connection               | Accept the new connection      |
+        // | Same direction                       | Reject the new connection      |
+        // | Opposite directions, old preferred   | Reject the new connection      |
+        // | Opposite directions, new preferred   | Replace the old connection     |
+        // The greater PeerId keeps its outbound connection; the smaller keeps
+        // its inbound connection, so both sides select the same TCP connection.
+        let mut out = vec![];
+        if let Some((old_addr, old_direction)) = self.peer_registry.connection_for(id) {
+            if direction == old_direction || direction != self.prefered_direction(id) {
+                return vec![Output::DisconnectPeer(addr)];
+            }
+            out.extend(self.on_disconnected(old_addr));
+            out.push(Output::DisconnectPeer(old_addr));
+        }
+
         self.block_assignments.release_peer(addr);
-        self.peer_registry.connected(addr, extensions);
+        self.peer_registry
+            .connected(addr, id, direction, extensions);
 
         // Communicate the pieces we have — BEP 6 allows exactly one of
         // HaveAll/HaveNone/Bitfield, never a Bitfield on top of the other two.
@@ -250,9 +369,21 @@ impl Swarm {
         } else {
             Message::Bitfield(self.pieces.bitfield())
         };
-        let mut out = vec![Output::SendToPeer { addr, message }];
+        out.push(Output::SendToPeer { addr, message });
         out.extend(self.declare_interest(addr));
         out
+    }
+
+    fn on_local_piece(&mut self, piece_index: usize, data: Vec<u8>) -> Vec<Output> {
+        let blocks: Vec<_> = self.pieces.unreceived_blocks(piece_index).collect();
+        for range in blocks {
+            let start = range.piece_offset;
+            let Some(block) = data.get(start..start + range.len) else {
+                break; // Remaining blocks are outside the available local prefix.
+            };
+            let _ = self.pieces.receive_block(range, block.to_vec());
+        }
+        vec![]
     }
 
     fn on_message(&mut self, addr: SocketAddr, message: Message) -> Vec<Output> {
@@ -262,70 +393,41 @@ impl Swarm {
             Ok(()) => {},
         }
 
-        // Decided once, up front: does this message type ever change what
-        // `plan()` can accomplish? See `Message::affects_scheduling`.
+        // Capture before consuming the message; replan after handling it.
         let should_plan = message.affects_scheduling();
 
         let mut outputs = match message {
-            // Availability-only: recorded by `peer_registry.apply` above,
-            // scheduled at the next tick rather than replanning right away.
-            Message::Bitfield(_) | Message::Have(_) | Message::HaveAll => {
-                self.declare_interest(addr)
-            },
-            Message::HaveNone => vec![],
-            Message::Unchoke => vec![],
+            Message::Bitfield(_)
+            | Message::Have(_)
+            | Message::HaveAll
+            | Message::SuggestPiece(_)
+            | Message::AllowedFast(_) => self.declare_interest(addr),
             Message::Choke => {
                 self.block_assignments.release_peer(addr);
                 vec![]
             },
-            Message::Piece {
-                piece_index,
-                piece_offset,
-                data,
-            } => {
-                let block_ref = BlockRef {
-                    piece_index,
-                    piece_offset,
-                };
-                self.on_message_piece(addr, block_ref, data)
-            },
+            Message::Piece { range, data } => self.on_message_piece(addr, range, data),
             Message::Interested => vec![Output::SendToPeer {
                 addr,
                 message: Message::Unchoke,
             }],
-            Message::NotInterested => vec![],
-            Message::Request {
-                piece_index,
-                piece_offset,
-                piece_len,
-            } => self.on_message_request(piece_index, piece_offset, piece_len, addr),
-            Message::Cancel { .. } => vec![],
-            Message::KeepAlive => vec![],
-            Message::Unimplemented => vec![],
-
-            // BEP 10
-            Message::ExtensionHandshake(_) => vec![],
+            Message::Request(range) => self.on_message_request(addr, range),
             Message::Extension { ext_id, payload } => {
                 self.on_extension_message(addr, ext_id, &payload)
             },
 
-            // BEP 6
-            Message::SuggestPiece(_) => self.declare_interest(addr),
-            Message::RejectRequest {
-                piece_index,
-                piece_offset,
-                ..
-            } => {
-                let block_ref = BlockRef {
-                    piece_index,
-                    piece_offset,
-                };
-                self.block_assignments.unassign(block_ref, addr);
-                // self.pieces.reset_block(block_ref);
-                // self.schedule_requests();
+            Message::RejectRequest(range) => {
+                self.block_assignments.unassign(range, addr);
                 vec![]
             },
-            Message::AllowedFast(_) => self.declare_interest(addr),
+            Message::Cancel(range) => self.cancel_upload(addr, range),
+            // Already handled by the registry, or no swarm action yet.
+            Message::HaveNone
+            | Message::Unchoke
+            | Message::NotInterested
+            | Message::KeepAlive
+            | Message::Unimplemented
+            | Message::ExtensionHandshake(_) => vec![],
         };
 
         if should_plan {
@@ -334,8 +436,7 @@ impl Swarm {
         outputs
     }
 
-    /// Tell the peer we're interested, but only the first time — a no-op
-    /// once `am_interested` is already set.
+    /// Repeat interest; a previous output may not have reached the peer.
     fn declare_interest(&mut self, addr: SocketAddr) -> Vec<Output> {
         match self.peer_registry.declare_interest(addr) {
             Some(message) => vec![Output::SendToPeer { addr, message }],
@@ -343,62 +444,96 @@ impl Swarm {
         }
     }
 
-    fn on_message_request(
-        &mut self,
-        piece_index: usize,
-        piece_offset: usize,
-        piece_len: usize,
-        addr: SocketAddr,
-    ) -> Vec<Output> {
+    fn cancel_upload(&mut self, addr: SocketAddr, range: BlockRange) -> Vec<Output> {
+        let Some(read) = self.pending_reads.get_mut(&range) else {
+            return vec![];
+        };
+        read.peers.remove(&addr);
+        if !read.peers.is_empty() {
+            return vec![];
+        }
+        let id = read.id;
+        self.pending_reads.remove(&range);
+        vec![Output::CancelUploadRead(id)]
+    }
+
+    fn cancel_peer_uploads(&mut self, addr: SocketAddr) -> Vec<Output> {
+        let mut out = vec![];
+        self.pending_reads.retain(|_, read| {
+            read.peers.remove(&addr);
+            if read.peers.is_empty() {
+                out.push(Output::CancelUploadRead(read.id));
+                false
+            } else {
+                true
+            }
+        });
+        out
+    }
+
+    fn on_message_request(&mut self, addr: SocketAddr, range: BlockRange) -> Vec<Output> {
         if !self.status.upload() {
             return vec![];
         }
-        let Some(data) = self.pieces.read_block(piece_index, piece_offset, piece_len) else {
-            return vec![];
-        };
-        vec![Output::SendToPeer {
-            addr,
-            message: Message::Piece {
-                piece_index,
-                piece_offset,
-                data,
+        if !self.pieces.valid_upload_range(range) {
+            return vec![]; // requested data not available
+        }
+
+        let pending: usize = self
+            .pending_reads
+            .values()
+            .map(|read| read.peers.len())
+            .sum();
+        if pending >= Self::MAX_PENDING_UPLOADS {
+            // TODO: should send reject request message if peer support fast-extension
+            return vec![]; // saturating - ignore request
+        }
+        if let Some(read) = self.pending_reads.get_mut(&range) {
+            read.peers.insert(addr);
+            return vec![]; // identical request - sharing the read
+        }
+        let id = UploadReadId(self.next_upload_read_id);
+        self.next_upload_read_id = self
+            .next_upload_read_id
+            .checked_add(1)
+            .expect("upload read id exhausted");
+        self.pending_reads.insert(
+            range,
+            PendingRead {
+                id,
+                peers: HashSet::from([addr]),
             },
-        }]
+        );
+        vec![Output::ReadForUpload { id, range }]
     }
 
     fn on_message_piece(
         &mut self,
         addr: SocketAddr,
-        block_ref: BlockRef,
+        range: BlockRange,
         data: Vec<u8>,
     ) -> Vec<Output> {
         // Only a peer we actually requested this block from may fulfil it —
         // otherwise any connected peer could complete blocks assigned to
         // others. Not time-bounded, so a slow-but-legitimate reply is still
         // accepted; `receive_block` below no-ops if we no longer need it.
-        if !self.block_assignments.is_holder(block_ref, addr) {
+        if !self.block_assignments.is_holder(range, addr) {
             return vec![];
         }
-        self.block_assignments.unassign(block_ref, addr);
+        self.block_assignments.unassign(range, addr);
 
-        let Ok(completed) = self.pieces.receive_block(block_ref, data) else {
+        let len = data.len();
+        let Ok(completed) = self.pieces.receive_block(range, data) else {
             return vec![]; // Malformed block: already unassigned, gets replanned.
         };
-        let Some(CompletedPiece {
-            piece_index,
-            piece_offset,
-            data,
-        }) = completed
-        else {
+        self.downloaded_bytes += len as u64;
+        let Some(CompletedPiece { range, data }) = completed else {
             return vec![];
         };
 
         let mut outputs = vec![
-            Output::Broadcast(Message::Have(piece_index)),
-            Output::WritePiece {
-                offset: piece_offset,
-                data,
-            },
+            Output::Broadcast(Message::Have(range.piece_index)),
+            Output::WritePiece { range, data },
         ];
         if self.pieces.is_complete() {
             outputs.push(Output::Completed);
@@ -477,9 +612,12 @@ impl Swarm {
 
         let mut holders = self.block_assignments.holder_counts();
         let mut needed: Vec<usize> = self.pieces.needed_pieces().collect();
-        // Sort by suggested and rarest first
+        // Finish partial pieces first, then prefer suggested and rare pieces.
+        // Targetting partial first allow to reduce memory footprint, as completed piece are
+        // evicted and served back via store read or cache.
         needed.sort_by_cached_key(|&piece| {
             (
+                !self.pieces.is_partial(piece),
                 !self.peer_registry.is_suggested(piece),
                 self.peer_registry.rarity(piece),
             )
@@ -508,20 +646,20 @@ impl Swarm {
                     if budget == 0 {
                         break;
                     }
-                    let holders_count = holders.get(&block.block).copied().unwrap_or(0);
+                    let holders_count = holders.get(&block).copied().unwrap_or(0);
                     // Only blocks at exactly this depth: every block gets its
                     // first holder before any block gets a second.
                     if holders_count != replication {
                         continue;
                     }
-                    let Some(addr) = self.pick_peer(block.block, &mut rng) else {
+                    let Some(addr) = self.pick_peer(block, &mut rng) else {
                         continue;
                     };
 
                     budget -= 1;
                     progressed = true;
-                    *holders.entry(block.block).or_insert(0) += 1;
-                    outputs.push(self.send_request(addr, block));
+                    *holders.entry(block).or_insert(0) += 1;
+                    outputs.extend(self.send_request(addr, block));
                 }
             }
         }
@@ -537,26 +675,33 @@ impl Swarm {
             .sum()
     }
 
-    fn pick_peer(&self, block_ref: BlockRef, rng: &mut impl rand::Rng) -> Option<SocketAddr> {
+    fn pick_peer(&self, range: BlockRange, rng: &mut impl rand::Rng) -> Option<SocketAddr> {
         self.peer_registry
-            .peers_with(block_ref.piece_index)
+            .peers_with(range.piece_index)
             .filter(|&addr| {
-                self.peer_registry.can_serve(addr, block_ref.piece_index)
+                self.peer_registry.can_serve(addr, range.piece_index)
                     && self.block_assignments.free_slots_for(addr) > 0
-                    && !self.block_assignments.is_holder(block_ref, addr)
+                    && !self.block_assignments.is_holder(range, addr)
             })
             .choose(rng)
     }
 
-    fn send_request(&mut self, addr: SocketAddr, block: BlockRange) -> Output {
-        self.block_assignments.assign(block.block, addr);
-        Output::SendToPeer {
+    fn send_request(&mut self, addr: SocketAddr, block: BlockRange) -> Vec<Output> {
+        let mut outputs = self.declare_interest(addr);
+        self.block_assignments.assign(block, addr);
+        outputs.push(Output::SendToPeer {
             addr,
-            message: Message::Request {
-                piece_index: block.block.piece_index,
-                piece_offset: block.block.piece_offset,
-                piece_len: block.len,
-            },
-        }
+            message: Message::Request(block),
+        });
+        outputs
+    }
+
+    fn prefered_direction(&self, peer_id: PeerId) -> ConnectionDirection {
+        let preferred = if self.client_id.as_ref() > peer_id.as_ref() {
+            ConnectionDirection::Outbound
+        } else {
+            ConnectionDirection::Inbound
+        };
+        preferred
     }
 }

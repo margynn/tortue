@@ -7,11 +7,12 @@ use super::PieceIndex;
 use crate::domain::{
     bitfield::Bitfield,
     message::{ExtensionHandshake, Message},
-    peer::PeerExtensions,
+    peer::{ConnectionDirection, PeerExtensions, PeerId},
 };
 
 pub(super) struct PeerRegistry {
     peers: HashMap<SocketAddr, PeerState>,
+    by_id: HashMap<PeerId, (SocketAddr, ConnectionDirection)>,
     availability: PieceAvailability,
     pub seeders: HashSet<SocketAddr>,
     pub leechers: HashSet<SocketAddr>,
@@ -28,36 +29,52 @@ impl PeerRegistry {
     pub(super) fn new(total_pieces: usize) -> Self {
         Self {
             peers: HashMap::new(),
+            by_id: HashMap::new(),
             availability: PieceAvailability::new(total_pieces),
             seeders: HashSet::new(),
             leechers: HashSet::new(),
         }
     }
 
-    pub(super) fn connected(&mut self, addr: SocketAddr, extensions: PeerExtensions) {
-        self.peers.insert(addr, PeerState::new(extensions));
+    pub(super) fn connected(
+        &mut self,
+        addr: SocketAddr,
+        id: PeerId,
+        direction: ConnectionDirection,
+        extensions: PeerExtensions,
+    ) {
+        self.peers.insert(addr, PeerState::new(id, extensions));
+        self.by_id.insert(id, (addr, direction));
     }
 
     pub(super) fn disconnected(&mut self, addr: SocketAddr) {
         self.seeders.remove(&addr);
         self.leechers.remove(&addr);
-        self.peers.remove(&addr);
         self.availability.remove_peer(addr);
+        if let Some(peer) = self.peers.remove(&addr) {
+            if self
+                .by_id
+                .get(&peer.id)
+                .is_some_and(|(active_addr, _)| *active_addr == addr)
+            {
+                self.by_id.remove(&peer.id);
+            }
+        }
     }
 
-    pub(super) fn contains(&self, addr: SocketAddr) -> bool {
+    pub(super) fn contains_addr(&self, addr: SocketAddr) -> bool {
         self.peers.contains_key(&addr)
     }
 
-    /// `Some(Message::Interested)` the first time we become interested in
-    /// `addr` — the caller relays it. `None` on every later call.
-    pub(super) fn declare_interest(&mut self, addr: SocketAddr) -> Option<Message> {
-        let peer = self.peers.get_mut(&addr)?;
-        if peer.am_interested {
-            return None;
-        }
-        peer.am_interested = true;
-        Some(Message::Interested)
+    pub(super) fn connection_for(&self, id: PeerId) -> Option<(SocketAddr, ConnectionDirection)> {
+        self.by_id.get(&id).cloned()
+    }
+
+    /// Repeat interest for a known peer; enqueueing does not confirm delivery.
+    pub(super) fn declare_interest(&self, addr: SocketAddr) -> Option<Message> {
+        self.peers
+            .contains_key(&addr)
+            .then_some(Message::Interested)
     }
 
     pub(super) fn peer_extension_id(&self, addr: SocketAddr, name: &str) -> Option<u8> {
@@ -195,7 +212,7 @@ impl PieceAvailability {
 
 #[derive(Clone)]
 struct PeerState {
-    am_interested: bool,
+    id: PeerId,
     peer_choking: bool,
     peer_interested: bool,
     allowed_fast: HashSet<usize>,
@@ -207,9 +224,9 @@ struct PeerState {
 }
 
 impl PeerState {
-    fn new(extensions: PeerExtensions) -> Self {
+    fn new(id: PeerId, extensions: PeerExtensions) -> Self {
         Self {
-            am_interested: false,
+            id,
             peer_choking: true,
             peer_interested: false,
             allowed_fast: HashSet::new(),
@@ -237,8 +254,8 @@ impl PeerState {
             Message::Piece { data, .. } => {
                 self.bytes_downloaded += data.len() as u64;
             },
-            Message::Request { piece_len, .. } => {
-                self.bytes_uploaded += *piece_len as u64;
+            Message::Request(range) => {
+                self.bytes_uploaded += range.len as u64;
             },
             _ => {},
         }

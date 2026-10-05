@@ -7,6 +7,7 @@ use std::{
 
 use tokio::{
     sync::{mpsc, watch},
+    task::{AbortHandle, JoinSet},
     time,
 };
 use tracing::info;
@@ -14,9 +15,10 @@ use tracing::info;
 use crate::{
     application::ports::{peer_connector::PeerConnector, piece_store::PieceStore},
     domain::{
+        block::BlockRange,
         message::Message,
-        peer::PeerEvent,
-        swarm::{Input, Output, Swarm, SwarmCommand, SwarmSnapshot, Tick},
+        peer::{PeerEvent, PeerId},
+        swarm::{Input, Output, Swarm, SwarmCommand, SwarmSnapshot, Tick, UploadReadId},
         torrent::Metainfo,
         tracker::SessionStats,
     },
@@ -24,19 +26,26 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("storage error: {0}")]
+    Storage(#[from] std::io::Error),
+
     #[error("tracker disconnected")]
     TrackerDisconnected,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct SwarmIO<S, C> {
+pub struct SwarmIO<S, C: PeerConnector> {
     metainfo: Arc<Metainfo>,
+    swarm: Swarm,
     commands_rx: mpsc::Receiver<SwarmCommand>,
     peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+    inbound_rx: mpsc::Receiver<(SocketAddr, C::Inbound)>,
     peer_cmds: HashMap<SocketAddr, mpsc::Sender<Message>>,
     peer_events_tx: mpsc::Sender<(SocketAddr, PeerEvent)>,
     peer_events_rx: mpsc::Receiver<(SocketAddr, PeerEvent)>,
+    reads: JoinSet<UploadReadResult>,
+    read_handles: HashMap<UploadReadId, AbortHandle>,
     piece_store: S,
     peer_connector: C,
     progress_tx: watch::Sender<SwarmSnapshot>,
@@ -62,14 +71,23 @@ struct PeerSample {
     download_rate: f64,
 }
 
+struct UploadReadResult {
+    id: UploadReadId,
+    range: BlockRange,
+    result: std::io::Result<Vec<u8>>,
+}
+
 impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
     const BLOCK_TICK_INTERVAL: Duration = Duration::from_secs(10);
     const PEX_TICK_INTERVAL: Duration = Duration::from_secs(60);
     const RATE_TICK_INTERVAL: Duration = Duration::from_secs(2);
+    const PEER_SEND_TIMEOUT: Duration = Duration::from_secs(20);
 
     pub fn new(
+        client_id: PeerId,
         metainfo: Arc<Metainfo>,
         peers_rx: mpsc::Receiver<Vec<SocketAddr>>,
+        inbound_rx: mpsc::Receiver<(SocketAddr, C::Inbound)>,
         peer_connector: C,
         piece_store: S,
         progress_tx: watch::Sender<SwarmSnapshot>,
@@ -77,10 +95,13 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
         commands_rx: mpsc::Receiver<SwarmCommand>,
     ) -> Self {
         let (peer_events_tx, peer_events_rx) = mpsc::channel(1024);
+        let swarm = Swarm::new(client_id, Arc::clone(&metainfo));
         Self {
             metainfo,
+            swarm,
             commands_rx,
             peers_rx,
+            inbound_rx,
             peer_cmds: HashMap::new(),
             peer_events_tx,
             peer_events_rx,
@@ -89,13 +110,45 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             progress_tx,
             stats,
             rate_sample: RateSample::default(),
+            reads: JoinSet::new(),
+            read_handles: HashMap::new(),
         }
     }
 
+    async fn restore(&mut self) -> Result<()> {
+        let mut remaining = self.metainfo.total_size();
+        let piece_length = self.metainfo.piece_length as u64;
+
+        for piece_index in 0..self.metainfo.pieces.len() {
+            let len = remaining.min(piece_length) as usize;
+            let range = BlockRange {
+                piece_index,
+                piece_offset: 0,
+                len,
+            };
+            let data = self.piece_store.read(range).await?;
+            remaining -= len as u64;
+            self.swarm.step(Input::LocalPiece { piece_index, data });
+        }
+
+        let snapshot = self.swarm.snapshot();
+        self.publish(snapshot);
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<()> {
-        let mut coordinator = Swarm::new(Arc::clone(&self.metainfo));
+        self.restore().await?;
+        let result = self.run_loop().await;
+        self.reads.abort_all();
+        while self.reads.join_next().await.is_some() {}
+        self.read_handles.clear();
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         let mut block_tick = time::interval(Self::BLOCK_TICK_INTERVAL);
         let mut pex_tick = time::interval(Self::PEX_TICK_INTERVAL);
+        let mut inbound_open = true;
 
         loop {
             let input = tokio::select! {
@@ -105,18 +158,32 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     None => break,
                 },
 
-                // Listen to trackers
+                // Listen to trackers peers
                 addrs = self.peers_rx.recv() => match addrs {
                     Some(addrs) => Input::PeersDiscovered(addrs),
                     None => return Err(Error::TrackerDisconnected),
                 },
 
-                // Listen to peers
+                // Listen to inbound (accepting) peers
+                inbound = self.inbound_rx.recv(), if inbound_open => {
+                    match inbound {
+                        Some((addr, peer)) => self.accept_inbound(addr, peer),
+                        None => inbound_open = false,
+                    }
+                    continue;
+                },
+
+                // Listen to peer events
                 msg = self.peer_events_rx.recv() => match msg {
                     None => break,
-                    Some((addr, PeerEvent::Connected{peer_id, peer_extensions})) => {
+                    Some((addr, PeerEvent::Connected{peer_id, direction, peer_extensions})) => {
                         info!(addr = %addr, peer_id = %peer_id, "peer connected");
-                        Input::PeerConnected { addr, peer_extensions }
+                        Input::PeerConnected {
+                            direction,
+                            addr,
+                            id: peer_id,
+                            extensions: peer_extensions,
+                        }
                     },
                     Some((addr, PeerEvent::Disconnected)) => {
                         info!(addr = %addr, "peer disconnected");
@@ -128,6 +195,30 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
                     },
                 },
 
+                // Join the disk read for upload requests
+                result = self.reads.join_next(), if !self.reads.is_empty() => {
+                    let read = match result.expect("non-empty JoinSet") {
+                        Ok(read) => read,
+                        Err(error) if error.is_cancelled() => continue,
+                        Err(error) => return Err(std::io::Error::other(error).into()),
+                    };
+                    if self.read_handles.remove(&read.id).is_none() {
+                        continue; // annulée logiquement
+                    }
+                    let data = read.result?;
+                    if data.len() != read.range.len {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "incomplete upload read",
+                        ).into());
+                    }
+                    Input::UploadReadCompleted {
+                        id: read.id,
+                        range: read.range,
+                        data,
+                    }
+                },
+
                 // Tick block
                 _ = block_tick.tick() => Input::Tick(Tick::Block),
 
@@ -136,45 +227,85 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
 
             };
 
-            for out in coordinator.step(input) {
-                self.handle_output(out);
+            for out in self.swarm.step(input) {
+                self.handle_output(out).await?;
             }
 
-            let snapshot = coordinator.snapshot();
+            let snapshot = self.swarm.snapshot();
             self.publish(snapshot);
         }
 
         Ok(())
     }
 
-    fn handle_output(&mut self, out: Output) {
-        match out {
-            Output::ConnectPeer(addr) => {
-                self.spawn_peer(addr);
-            },
-            Output::DisconnectPeer(addr) => {
-                self.peer_cmds.remove(&addr);
-                self.peer_connector.disconnect(addr);
-            },
-            Output::SendToPeer { addr, message } => {
-                if let Some(tx) = self.peer_cmds.get(&addr) {
-                    let _ = tx.try_send(message);
-                }
-            },
-            Output::Completed => {
-                info!("download completed");
-                // todo: hook
-            },
-            Output::WritePiece { offset, data } => {
-                if let Err(e) = self.piece_store.write(offset, &data) {
-                    tracing::error!(error = %e, "failed to write piece");
-                }
-            },
-            Output::Broadcast(message) => {
-                for tx in self.peer_cmds.values() {
-                    let _ = tx.try_send(message.clone());
-                }
-            },
+    async fn handle_output(&mut self, out: Output) -> Result<()> {
+        let mut outputs = vec![out];
+        while let Some(out) = outputs.pop() {
+            match out {
+                Output::ConnectPeer(addr) => {
+                    self.spawn_peer(addr);
+                },
+                Output::DisconnectPeer(addr) => {
+                    self.peer_cmds.remove(&addr);
+                    self.peer_connector.disconnect(addr);
+                    outputs.extend(
+                        self.swarm
+                            .step(Input::PeerDisconnected(addr))
+                            .into_iter()
+                            .rev(),
+                    );
+                },
+                Output::SendToPeer { addr, message } => {
+                    if !self.send_to_peer(addr, message).await {
+                        outputs.push(Output::DisconnectPeer(addr));
+                    }
+                },
+                Output::Completed => {
+                    self.piece_store.flush().await?;
+                },
+                Output::WritePiece { range, data } => {
+                    self.piece_store.write(range, data).await?;
+                },
+                Output::Broadcast(message) => {
+                    for &addr in self.peer_cmds.keys() {
+                        if !self.send_to_peer(addr, message.clone()).await {
+                            outputs.push(Output::DisconnectPeer(addr));
+                        }
+                    }
+                },
+                Output::ReadForUpload { id, range } => {
+                    let read = self.piece_store.read(range);
+                    let handle = self.reads.spawn(async move {
+                        UploadReadResult {
+                            id,
+                            range,
+                            result: read.await,
+                        }
+                    });
+                    self.read_handles.insert(id, handle);
+                },
+                Output::CancelUploadRead(id) => {
+                    if let Some(handle) = self.read_handles.remove(&id) {
+                        handle.abort();
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_to_peer(&self, addr: SocketAddr, message: Message) -> bool {
+        let Some(tx) = self.peer_cmds.get(&addr) else {
+            return false;
+        };
+        if matches!(
+            time::timeout(Self::PEER_SEND_TIMEOUT, tx.send(message)).await,
+            Ok(Ok(()))
+        ) {
+            true
+        } else {
+            tracing::warn!(%addr, "peer command queue closed or timed out; disconnecting");
+            false
         }
     }
 
@@ -188,6 +319,16 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             .connect(addr, cmd_rx, self.peer_events_tx.clone());
     }
 
+    fn accept_inbound(&mut self, addr: SocketAddr, peer: C::Inbound) {
+        if self.peer_cmds.contains_key(&addr) {
+            return;
+        }
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        self.peer_cmds.insert(addr, cmd_tx);
+        self.peer_connector
+            .accept(peer, cmd_rx, self.peer_events_tx.clone());
+    }
+
     fn publish(&mut self, mut snapshot: SwarmSnapshot) {
         *self.stats.lock().unwrap() = SessionStats {
             swarm_status: snapshot.status,
@@ -195,7 +336,7 @@ impl<S: PieceStore, C: PeerConnector> SwarmIO<S, C> {
             downloaded: snapshot.bytes_downloaded,
             left: snapshot
                 .bytes_total
-                .saturating_sub(snapshot.bytes_downloaded),
+                .saturating_sub(snapshot.bytes_available),
         };
         self.apply_rates(&mut snapshot);
         let _ = self.progress_tx.send(snapshot);

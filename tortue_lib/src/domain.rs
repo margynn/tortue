@@ -1,5 +1,6 @@
 pub mod bencode;
 pub mod bitfield;
+pub mod block;
 pub mod magnet;
 pub mod message;
 pub mod metadata;
